@@ -312,6 +312,38 @@ tr.fade td{opacity:.45}
         </div>
       </div>
 
+      <div class="card" id="cfgEditCard">
+        <div class="card-head"><h3>Provider / 部署配置</h3><small>编辑后写入服务端 config.json 与 .env</small></div>
+        <div class="card-body">
+          <div class="btnrow" style="margin:0 0 10px">
+            <select id="ceProv" style="flex:1" aria-label="编辑目标 provider"></select>
+            <button class="btn-ghost" onclick="ceAdd()">新增</button>
+            <button class="btn-ghost" onclick="ceDel()">删除</button>
+          </div>
+          <div class="grid2">
+            <div><label class="f" for="ceName">名称（.env 的 API_KEY_&lt;名称&gt; 后缀）</label>
+              <input type="text" id="ceName" placeholder="如 local / deepseek"></div>
+            <div><label class="f" for="ceLabel">显示标签</label>
+              <input type="text" id="ceLabel" placeholder="如 本地网关（LiteLLM）"></div>
+          </div>
+          <label class="f" for="ceUrl">网关地址</label>
+          <input type="text" id="ceUrl" placeholder="http://127.0.0.1:4000 或 https://api.deepseek.com">
+          <label class="ck" style="margin-top:10px"><input type="checkbox" id="ceLocal"> 本地部署（允许并发测试；云端强制单发）</label>
+          <label class="f" for="ceKey">API Key（只写入服务端 .env，页面不回显）</label>
+          <div class="btnrow" style="margin:0">
+            <input type="password" id="ceKey" style="flex:1" placeholder="已配置或留空则保持不变" autocomplete="off">
+            <button class="btn-ghost" onclick="ceClearKey()">清除 Key</button>
+          </div>
+          <label class="f">部署环境（模型 → 量化/硬件/框架/参数；卡片 meta 与超窗钳制来源）</label>
+          <div id="ceDeps"></div>
+          <button class="btn-ghost" onclick="ceDepAdd()" style="margin-top:8px">+ 添加部署环境</button>
+          <div class="btnrow">
+            <button class="btn-primary" onclick="ceSave()">保存配置</button>
+            <span class="hint" style="margin:auto 0">provider 名称决定 .env 的 key 映射，创建后建议不再改名</span>
+          </div>
+        </div>
+      </div>
+
       <div class="card" id="deployCard" hidden>
         <div class="card-head"><h3>部署环境</h3></div>
         <div class="card-body" id="deployList"></div>
@@ -444,6 +476,7 @@ async function init(){
   offChart = echarts.init($("#offChart"));
   window.addEventListener("resize", () => state.charts.forEach(c => c.resize()));
   $("#modelList").addEventListener("change", () => { saveModelSel(); syncDeployCard(); });   // 勾选模型→记忆选择+联动部署环境展示
+  initCfgEditor(sel.value);   // Provider/部署配置编辑器（ADR-0026）
   refreshModels();
   loadHistoryList();
 }
@@ -511,6 +544,135 @@ function syncDeployCard(){
     ${d.framework ? `<div class="kv"><span class="k">推理框架</span><span class="v">${esc(d.framework)}</span></div>` : ""}
     ${d.params ? `<div class="kv"><span class="k">核心参数</span><span class="v">${esc(d.params)}</span></div>` : ""}
   </div>`).join("");
+}
+
+/* ---------------- 配置编辑器（ADR-0026）：provider / 部署环境写回 config.json 与 .env ---------------- */
+state.cfgEdit = { providers: [], keyClear: false };
+function ceCurrent(){ return state.cfgEdit.providers.find(p => p.name === $("#ceProv").value); }
+function initCfgEditor(keepName){
+  state.cfgEdit.providers = state.providers.map(p => ({...p, deployments:(p.deployments||[]).map(d => ({...d}))}));
+  renderCeProv(keepName);
+}
+function renderCeProv(keepName){
+  const sel = $("#ceProv");
+  const keep = keepName || sel.value;
+  sel.innerHTML = state.cfgEdit.providers.map(p =>
+    `<option value="${esc(p.name)}">${esc(p.label || p.name)}（${esc(p.name)}）</option>`).join("");
+  if([...sel.options].some(o => o.value === keep)) sel.value = keep;
+  fillCfgForm();
+}
+function fillCfgForm(){
+  const p = ceCurrent();
+  if(!p) return;
+  $("#ceName").value = p.name;
+  $("#ceLabel").value = p.label;
+  $("#ceUrl").value = p.gateway_url;
+  $("#ceLocal").checked = !!p.local;
+  state.keyClear = false;
+  $("#ceKey").value = "";
+  $("#ceKey").placeholder = p.has_key ? "已配置（留空保持不变）" : "未配置";
+  renderCeDeps();
+}
+function ceAdd(){
+  const name = "provider-" + Date.now().toString(36).slice(-4);
+  state.cfgEdit.providers.push({name, label:"", gateway_url:"", local:false, deployments:[], has_key:false});
+  renderCeProv(name);
+  $("#ceName").focus();
+}
+function ceDel(){
+  const p = ceCurrent();
+  if(!p || !confirm(`删除 provider「${p.label || p.name}」？对应 .env 的 Key 行不会自动删除，可先「清除 Key」。`)) return;
+  state.cfgEdit.providers = state.cfgEdit.providers.filter(x => x.name !== p.name);
+  renderCeProv(state.cfgEdit.providers[0]?.name);
+}
+function ceClearKey(){
+  state.keyClear = true;
+  $("#ceKey").value = "";
+  $("#ceKey").placeholder = "保存后将清除 .env 中的 Key";
+}
+$("#ceKey").addEventListener("input", () => { state.keyClear = false; });   // 重新输入即取消清除
+function renderCeDeps(){
+  const p = ceCurrent();
+  const box = $("#ceDeps");
+  box.innerHTML = (p.deployments || []).map(d => `
+    <div class="dep-edit" style="border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-top:10px;background:var(--bg)">
+      <div class="grid2">
+        <div><label class="f" style="margin-top:0">部署标签</label><input type="text" class="d-label" value="${esc(d.label||"")}"></div>
+        <div><label class="f" style="margin-top:0">适用模型（逗号分隔）</label><input type="text" class="d-models" value="${esc((d.models||[]).join(", "))}"></div>
+      </div>
+      <div class="grid2">
+        <div><label class="f">量化（卡片首格展示）</label><input type="text" class="d-quant" value="${esc(d.quant||"")}"></div>
+        <div><label class="f">上下文上限 max_ctx（tokens）</label><input type="number" class="d-maxctx" value="${d.max_ctx||""}" placeholder="如 196608"></div>
+      </div>
+      <label class="f">硬件环境</label><input type="text" class="d-hardware" value="${esc(d.hardware||"")}">
+      <label class="f">推理框架</label><input type="text" class="d-framework" value="${esc(d.framework||"")}">
+      <label class="f">核心参数</label><input type="text" class="d-params" value="${esc(d.params||"")}">
+      <button class="btn-ghost dep-del" style="margin-top:8px">删除此部署</button>
+    </div>`).join("") || '<span class="hint">暂无部署环境；本地模型建议配一条（量化/硬件/框架/参数/max_ctx）</span>';
+}
+$("#ceDeps").addEventListener("click", e => {
+  const b = e.target.closest(".dep-del");
+  if(!b) return;
+  b.closest(".dep-edit").remove();
+});
+function ceDepAdd(){
+  const p = ceCurrent();
+  (p.deployments || (p.deployments = [])).push({});
+  renderCeDeps();
+}
+function collectCeForm(){
+  const p = ceCurrent();
+  p.name = $("#ceName").value.trim();
+  p.label = $("#ceLabel").value.trim();
+  p.gateway_url = $("#ceUrl").value.trim();
+  p.local = $("#ceLocal").checked;
+  p.deployments = [...document.querySelectorAll("#ceDeps .dep-edit")].map(el => ({
+    label: el.querySelector(".d-label").value.trim(),
+    models: el.querySelector(".d-models").value.split(/[,，]/).map(s => s.trim()).filter(Boolean),
+    quant: el.querySelector(".d-quant").value.trim(),
+    max_ctx: +el.querySelector(".d-maxctx").value || undefined,
+    hardware: el.querySelector(".d-hardware").value.trim(),
+    framework: el.querySelector(".d-framework").value.trim(),
+    params: el.querySelector(".d-params").value.trim(),
+  }));
+  return p;
+}
+async function ceSave(){
+  const p = collectCeForm();
+  if(!p.name || !p.gateway_url){ setPill("provider 名称与网关地址不能为空", "err"); return; }
+  const keyVal = $("#ceKey").value.trim();
+  const r = await fetch("/api/config", {method:"PUT", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({providers: state.cfgEdit.providers.map(q => ({
+      name:q.name, label:q.label, gateway_url:q.gateway_url, local:q.local,
+      deployments:q.deployments}))})});
+  if(!r.ok){ const d = await r.json().catch(()=>({})); return setPill("保存失败：" + (d.detail || ("HTTP " + r.status)), "err"); }
+  if(state.keyClear || keyVal){
+    const kr = await fetch("/api/config/key", {method:"PUT", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({provider: p.name, key: keyVal, clear: state.keyClear})});
+    if(!kr.ok){ const d = await kr.json().catch(()=>({})); return setPill("配置已保存，但 Key 写入失败：" + (d.detail || kr.status), "err"); }
+  }
+  setPill("配置已保存并即时生效", "");
+  await reloadConfig(p.name);
+}
+/* 保存后整体重载：provider 下拉/编辑器/部署展示/并发 UI/模型列表全部跟随新配置 */
+async function reloadConfig(keepName){
+  const cfg = await (await fetch("/api/config")).json();
+  state.providers = cfg.providers || [];
+  if(cfg.config_error) setPill(cfg.config_error, "err");
+  const sel = $("#fProvider");
+  const keep = keepName || sel.value;
+  sel.innerHTML = state.providers.map(p =>
+    `<option value="${esc(p.name)}">${esc(p.label)}（${esc(p.gateway_url.replace(/^https?:\/\//,""))}）</option>`).join("");
+  if([...sel.options].some(o => o.value === keep)) sel.value = keep;
+  state.cfgEdit.providers = state.providers.map(p => ({...p, deployments:(p.deployments||[]).map(d => ({...d}))}));
+  renderCeProv(keep);
+  const cp = currentProvider();
+  $("#keyHint").innerHTML = !cp ? "" : (cp.has_key
+    ? `API Key 已由服务端 .env 提供（${cp.name}）`
+    : `该 provider 未配置 API Key（.env 的 API_KEY_${cp.name.toUpperCase()}），云端模型将无法认证`);
+  syncDeployCard();
+  syncConcurrencyUI();
+  refreshModels();
 }
 
 /* ---------------- 阶段聚焦布局：idle 平铺配置 / run 实时事实 / done 统计分析 ---------------- */

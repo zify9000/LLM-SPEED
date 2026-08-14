@@ -17,6 +17,20 @@
 
 ## 快速开始
 
+### 一键启动（推荐）
+
+```bash
+./start.sh        # Linux / macOS
+start.bat         # Windows
+```
+
+自动完成：创建 `.venv` 虚拟环境 → 安装 `requirements.txt` → 缺失时从
+`.env.example` 生成 `.env` → 启动服务（缺省 http://127.0.0.1:8501）。
+首次启动后先在页面「Provider / 部署配置」卡片里填好各 provider 的 API Key
+（或手动编辑 .env），再点「保存配置」即时生效。
+
+### 手动启动
+
 ```bash
 pip install -r requirements.txt
 cp .env.example .env    # 填入各 provider 的 API Key（API_KEY_<名称大写>）
@@ -34,7 +48,14 @@ python server.py                                   # 默认 http://127.0.0.1:850
 
 ### 配置 Provider
 
-`config.json` 定义 provider 列表（名称 + 网关地址），`.env` 提供对应的 key：
+两种等价方式：
+
+1. **页面配置（推荐）**：浏览器打开后，「Provider / 部署配置」卡片里直接
+   增删 provider、编辑网关地址、本地部署标记与部署环境
+   （量化/硬件/框架/核心参数/max_ctx），并可写入或清除 API Key
+   （Key 只写入服务端 `.env`，页面不回显）。「保存配置」即时生效，无需重启。
+2. **手改文件**：`config.json` 定义 provider 列表（名称 + 网关地址），
+   `.env` 提供对应的 key：
 
 ```json
 {
@@ -120,14 +141,15 @@ bash tests/check_frontend_js.sh           # 前端内联 JS 语法检查（需 n
 ## 文件结构
 
 ```
-server.py        FastAPI 服务端（provider 解析 + 测速任务 + SSE + 历史）
+server.py        FastAPI 服务端（provider 解析 + 测速任务 + SSE + 历史 + 配置写入）
 bench.py         测速引擎（prompt 构造、流式测量、测试矩阵调度）
 corpus/code/     代码场景真实语料（vendored llama.cpp b9934 源码，MIT）
 corpus/creative/ 创意场景语料（vendored 公版《红楼梦》，Project Gutenberg License）
-static/index.html 单页前端（ECharts 折线图 + html2canvas 卡片导出）
+static/index.html 单页前端（ECharts 折线图 + html2canvas 卡片导出 + 配置编辑）
 mock_server.py   假 OpenAI 网关（自测用）
-tests/           回归测试（单元 + mock 端到端 + JS 语法检查）
-config.json      provider 列表 / 卡片默认文案
-.env             各 provider 的 API Key（不入库）
+tests/           回归测试（单元 + mock 端到端 + 配置接口 + JS 语法检查）
+start.sh / start.bat  一键启动脚本（Linux/macOS / Windows）
+config.json      provider 列表 / 部署映射（页面可编辑）
+.env             各 provider 的 API Key（不入库，页面可写入）
 results/         历次测速结果 JSON
 ```

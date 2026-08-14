@@ -148,6 +148,106 @@ async def get_config():
     }
 
 
+# ---------------------------------------------------------------------------
+# 配置写入（ADR-0026）：页面编辑 provider / 部署环境，服务端校验后原子写回
+# config.json；API Key 单向上行写入 .env，永不回显前端
+# ---------------------------------------------------------------------------
+
+_PROVIDER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _atomic_write(path: str, text: str):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)   # 原子替换，写坏一半不会毁掉旧配置
+
+
+def _validate_providers(providers) -> list[dict]:
+    """白名单化前端提交的 providers（config.json 的权威结构），拒绝非法值。"""
+    if not isinstance(providers, list) or not providers:
+        raise HTTPException(400, "providers 不能为空")
+    out, seen = [], set()
+    for p in providers:
+        if not isinstance(p, dict):
+            raise HTTPException(400, "provider 条目必须是对象")
+        name = str(p.get("name") or "").strip()
+        if not _PROVIDER_NAME_RE.fullmatch(name):
+            raise HTTPException(400, f"provider 名称非法: {name!r}"
+                                     f"（仅字母/数字/_/-，≤64 字符）")
+        if name in seen:
+            raise HTTPException(400, f"provider 名称重复: {name}")
+        seen.add(name)
+        gw = str(p.get("gateway_url") or "").strip()
+        if not gw.startswith(("http://", "https://")):
+            raise HTTPException(400, f"{name} 的网关地址必须以 http(s):// 开头")
+        deps = []
+        for d in p.get("deployments") or []:
+            if not isinstance(d, dict):
+                raise HTTPException(400, f"{name} 的部署条目必须是对象")
+            max_ctx = d.get("max_ctx")
+            dep = {
+                "label": str(d.get("label") or "").strip()[:64],
+                "models": [str(m).strip() for m in (d.get("models") or []) if str(m).strip()],
+                "quant": str(d.get("quant") or "").strip()[:64],
+                "hardware": str(d.get("hardware") or "").strip()[:200],
+                "framework": str(d.get("framework") or "").strip()[:100],
+                "params": str(d.get("params") or "").strip()[:300],
+            }
+            if isinstance(max_ctx, (int, float)) and not isinstance(max_ctx, bool) \
+                    and int(max_ctx) > 0:
+                dep["max_ctx"] = int(max_ctx)   # 超窗钳制来源（ADR-0014），非正数视为未配置
+            deps.append(dep)
+        out.append({
+            "name": name,
+            "label": (str(p.get("label") or "").strip() or name)[:64],
+            "gateway_url": gw,
+            "local": bool(p.get("local")),
+            "deployments": deps,
+        })
+    return out
+
+
+@app.put("/api/config")
+async def put_config(body: dict):
+    """整表替换 config.json 的 providers（部署环境随 provider 内嵌）。"""
+    providers = _validate_providers(body.get("providers"))
+    d, _err = load_config_file()
+    d["providers"] = providers
+    _atomic_write(CONFIG_PATH, json.dumps(d, ensure_ascii=False, indent=2) + "\n")
+    return {"ok": True, "providers": len(providers)}
+
+
+@app.put("/api/config/key")
+async def put_config_key(body: dict):
+    """写/清除某 provider 的 API Key 到 .env（API_KEY_<名称> 行）。
+
+    凭据边界不变量（ADR-0001）：key 只单向上行（前端输入 → 服务端 → .env），
+    任何接口不回显 key 本体；写入后同步 os.environ 即时生效。
+    """
+    provider = str(body.get("provider") or "").strip()
+    if not _PROVIDER_NAME_RE.fullmatch(provider):
+        raise HTTPException(400, "provider 名称非法")
+    if not any(p["name"] == provider for p in load_providers()):
+        raise HTTPException(400, f"provider 不存在: {provider}")
+    key = str(body.get("key") or "")
+    clear = bool(body.get("clear"))
+    env_name = _env_key_name(provider)
+    env_path = os.path.join(BASE, ".env")
+    lines = []
+    if os.path.exists(env_path):
+        with open(env_path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    lines = [l for l in lines if not l.startswith(env_name + "=")]
+    if not clear and key:
+        lines.append(f'{env_name}={json.dumps(key, ensure_ascii=False)}')  # 加引号，值含 # 等也不破坏解析
+        os.environ[env_name] = key
+    else:
+        os.environ[env_name] = ""   # 空值回退全局 API_KEY（load_providers 语义）
+    _atomic_write(env_path, "\n".join(lines) + "\n")
+    return {"ok": True}
+
+
 @app.get("/api/models")
 async def list_models(provider: str | None = None, gateway: str | None = None):
     """透传网关的模型列表；API Key 由服务端注入，不经前端。"""

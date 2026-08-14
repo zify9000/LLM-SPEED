@@ -3,3 +3,4 @@ __pycache__/
 results/
 .pi/
 *.pyc
+.venv/
