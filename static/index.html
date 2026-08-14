@@ -430,7 +430,8 @@ async function init(){
   state.providers = cfg.providers || [];
   const sel = $("#fProvider");
   sel.innerHTML = state.providers.map(p =>
-    `<option value="${p.name}">${p.label}（${p.gateway_url.replace(/^https?:\/\//,"")}）</option>`).join("");
+    `<option value="${esc(p.name)}">${esc(p.label)}（${esc(p.gateway_url.replace(/^https?:\/\//,""))}）</option>`).join("");
+  if(cfg.config_error) setPill(cfg.config_error, "err");   // config.json 坏了不静默
   const firstWithKey = state.providers.find(p=>p.has_key);
   if(firstWithKey) sel.value = firstWithKey.name;
   $("#scenarioList").innerHTML = cfg.scenarios.map(s => ckHtml("scen", s.key, s.label, true)).join("");
@@ -447,7 +448,8 @@ async function init(){
   loadHistoryList();
 }
 function ckHtml(group, val, label, on){
-  return `<label class="ck"><input type="checkbox" data-g="${group}" value="${val}" ${on?"checked":""}> ${label}</label>`;
+  // 模型名等外部字符串统一转义：网关响应、历史存档均可控面之外
+  return `<label class="ck"><input type="checkbox" data-g="${esc(group)}" value="${esc(val)}" ${on?"checked":""}> ${esc(label)}</label>`;
 }
 const checkedVals = g => [...document.querySelectorAll(`.ck input[data-g=${g}]:checked`)].map(i => i.value);
 /* 自定义上下文档位：部署上限非标准 2 的幂（如 192K）时补末尾档，localStorage 记忆 */
@@ -617,8 +619,38 @@ async function startRun(){
   setPill("测速运行中…", "run");
   if(state.es) state.es.close();
   state.es = new EventSource(`/api/bench/events/${d.run_id}`);
+  wireEvents();
+}
+/* SSE 断线分级（ADR-0024）：网络瞬断（CONNECTING）仅提示自动重连；
+   流永久关闭（CLOSED，如服务重启后 run 已不在）时按 active → 历史存档
+   分级兜底，不再静默卡死在 run 阶段 */
+function wireEvents(){
   state.es.onmessage = e => onEvent(JSON.parse(e.data));
-  state.es.onerror = () => {};  // 自动重连，后端回放历史 + 前端 seq 去重
+  state.es.onerror = () => {
+    if(!state.es) return;
+    if(state.es.readyState === EventSource.CLOSED) recoverClosedStream();
+    else if(state.running) $("#statusMsg").textContent = "⚠ 事件流中断，正在自动重连…";
+  };
+}
+async function recoverClosedStream(){
+  const rid = state.runId;
+  if(!rid || !state.running) return;
+  try {
+    const act = await (await fetch("/api/bench/active")).json();
+    if((act.runs||[]).some(r => r.run_id === rid)) return;   // 服务端仍在跑，ES 会自行重连
+    const h = await fetch(`/api/bench/history/${encodeURIComponent(rid)}`);
+    if(h.ok){
+      hydrateArchive(await h.json());   // 已结束但事件未放完：存档兜底
+      finishRun("已从存档恢复");
+      return;
+    }
+    if(state.es){ state.es.close(); state.es = null; }
+    state.running = false;
+    $("#btnStart").hidden = false; $("#btnStop").hidden = true;
+    setPill("事件流已断开，任务不可恢复", "err");
+  } catch(e) { /* 服务不可达：提示后不再重试 */
+    setPill("连接服务器失败", "err");
+  }
 }
 async function stopRun(){
   if(state.runId) await fetch(`/api/bench/stop/${state.runId}`, {method:"POST"});
@@ -644,15 +676,20 @@ function onEvent(ev){
     case "point": addPoint(ev.point); markLiveDone(ev.point); break;
     case "done": finishRun("测速完成"); break;
     case "stopped": finishRun("已停止"); break;
-    case "error": setPill(ev.msg, "err"); break;
+    case "error":
+      // 引擎级异常：终态收敛到 done 阶段展示已有数据，而不是卡在 run 阶段
+      if(state.running) finishRun(ev.msg || "测速任务异常", "err");
+      else setPill(ev.msg || "测速任务异常", "err");
+      break;
   }
 }
-function finishRun(msg){
+function finishRun(msg, cls){
   state.running = false;
   if(state.es){ state.es.close(); state.es = null; }
   $("#btnStart").hidden = false; $("#btnStop").hidden = true;
   setPhase("done");        // 完成后：聚焦表格/图表/卡片等统计信息
-  setPill(msg); loadHistoryList();
+  setPill(msg, cls || "");
+  loadHistoryList();
   $("#kpiReqs").innerHTML = '0 <small>个</small>';
 }
 
@@ -800,10 +837,10 @@ function renderResultTable(){
     const preTitle = p.prefill_net_tok_s != null && p.rtt_ms != null
       ? ` title="净口径：已扣除网络往返 ${p.rtt_ms}ms（毛值 ${p.prefill_tok_s ?? "-"}）"` : "";
     return `<tr class="${p.all_ok?"":"err"}">
-      <td>${p.model}</td><td>${SCEN_LABEL[p.scenario]||p.scenario}</td><td>${fmtK(p.ctx_target)}</td><td>${p.concurrency}</td>
+      <td>${esc(p.model)}</td><td>${SCEN_LABEL[p.scenario]||esc(p.scenario)}</td><td>${fmtK(p.ctx_target)}</td><td>${p.concurrency}</td>
       <td>${p.prompt_tokens ?? "-"}</td><td>${p.cache_hit_tokens ? fmtK(p.cache_hit_tokens) : "-"}</td><td>${p.ttft_s ?? "-"}</td><td${preTitle}>${preOf(p) ?? "-"}</td>
       <td>${p.decode_tok_s ?? "-"}</td><td ${showTotal?"":"hidden"}>${p.decode_total_tok_s ?? "-"}</td><td>${p.out_tokens ?? "-"}</td>
-      <td>${p.finish==="length" ? "截断" : (p.finish||"-")}</td><td>${st}</td></tr>`;
+      <td>${p.finish==="length" ? "截断" : (p.finish!=null ? esc(String(p.finish)) : "-")}</td><td>${st}</td></tr>`;
   }).join("") : `<tr class="empty-row"><td colspan="${showTotal?13:12}">该筛选条件下暂无结果</td></tr>`;
 }
 
@@ -1022,22 +1059,38 @@ function captureScenarioCharts(model, scens){
   }
   return out;
 }
+/* 多模型卡片合并为单张纵向长图导出（ADR-0024 部分取代 ADR-0023 的逐张导出）：
+   异步渲染后再多次 a.click() 会被浏览器当作无手势的多文件下载拦截；
+   先逐卡 canvas 渲染、再拼接成一张图一次点击，可靠且单文件更易分享 */
 async function downloadCard(){
-  const cards = document.querySelectorAll("#cardWrap .speed-card");
-  for(const card of cards){   // 多模型平铺：逐张导出 PNG
-    const canvas = await html2canvas(card, {scale:2, backgroundColor:"#FFFFFF", useCORS:true});
-    const a = document.createElement("a");
-    a.download = `speed-card-${card.dataset.model}-${Date.now()}.png`;
-    a.href = canvas.toDataURL("image/png");
-    a.click();
+  const cards = [...document.querySelectorAll("#cardWrap .speed-card")];
+  if(!cards.length) return;
+  const parts = [];
+  for(const card of cards){
+    parts.push(await html2canvas(card, {scale:2, backgroundColor:"#FFFFFF", useCORS:true}));
   }
+  const gap = 48;   // canvas 已按 scale=2 放大，48px 视觉上 ≈ 24px 间隔
+  const w = Math.max(...parts.map(c => c.width));
+  const h = parts.reduce((a, c) => a + c.height + gap, -gap);
+  const canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  let y = 0;
+  for(const c of parts){
+    ctx.drawImage(c, (w - c.width) / 2, y);
+    y += c.height + gap;
+  }
+  const a = document.createElement("a");
+  a.download = `speed-cards-${state.runId || Date.now()}.png`;   // run_id 为服务端生成的安全字符集
+  a.href = canvas.toDataURL("image/png");
+  a.click();
 }
 
 /* ---------------- 历史记录 ---------------- */
 async function loadHistoryList(){
   const d = await (await fetch("/api/bench/history")).json();
   $("#historySel").innerHTML = d.history.map(h =>
-    `<option value="${h.run_id}">${h.started_at||""} · ${(h.models||[]).join(",")} · ${h.n_points}点</option>`).join("")
+    `<option value="${esc(h.run_id)}">${esc(h.started_at||"")} · ${(h.models||[]).map(esc).join(",")} · ${h.n_points}点</option>`).join("")
     || '<option value="">暂无记录</option>';
   renderActiveRuns();
 }
@@ -1069,8 +1122,7 @@ function enterRun(rid, totalPoints){
   setPhase("run");
   setPill("测速运行中…", "run");
   state.es = new EventSource(`/api/bench/events/${rid}`);
-  state.es.onmessage = e => onEvent(JSON.parse(e.data));
-  state.es.onerror = () => {};
+  wireEvents();
 }
 async function deleteHistory(){
   const id = $("#historySel").value;
@@ -1083,10 +1135,8 @@ async function clearHistory(){
   await fetch("/api/bench/history", {method:"DELETE"});
   await loadHistoryList();
 }
-async function loadHistory(){
-  const id = $("#historySel").value;
-  if(!id) return;
-  const d = await (await fetch(`/api/bench/history/${id}`)).json();
+/* 历史存档/断线兜底的公共水合路径：points、进度、cfg（含 provider 回切） */
+function hydrateArchive(d){
   state.points.clear();
   (d.results||[]).forEach(p => state.points.set(pointKey(p), p));
   state.donePoints = state.points.size;
@@ -1098,6 +1148,12 @@ async function loadHistory(){
     }
     syncDeployCard();
   }
+}
+async function loadHistory(){
+  const id = $("#historySel").value;
+  if(!id) return;
+  const d = await (await fetch(`/api/bench/history/${id}`)).json();
+  hydrateArchive(d);
   setPhase("done");   // 载入历史直接进入统计展示阶段
   resetKpis();
   $("#kpiPoints").innerHTML = `${state.donePoints} <small>个点</small>`;

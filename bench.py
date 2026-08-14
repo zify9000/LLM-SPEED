@@ -29,7 +29,8 @@ import httpx
 # 场景定义：创意写作 / 代码生成
 # ---------------------------------------------------------------------------
 
-# 语料池：多段不同语料，拼接时乱序抽取。单段循环拼接的高重复文本会让模型照抄
+# 内置回退语料池（corpus/creative/ 存在时被 _load_creative_pool 取代）：
+# 多段不同语料，拼接时乱序抽取。单段循环拼接的高重复文本会让模型照抄
 # 参考材料，输出 ≈ 输入 → 投机采样（MTP/EAGLE 类）draft 命中率被人为拉满、
 # decode 虚高；对 RadixAttention/稀疏注意力后端代表性也差。池化乱序后输出只能
 # 正常逐字生成，MTP 按真实口径生效而不被注水（ADR-0013）
@@ -221,6 +222,8 @@ def _fmt_ctx(ctx: int) -> str:
 
 CORPUS_CODE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "corpus", "code")
+CORPUS_CREATIVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "corpus", "creative")
 
 
 def _load_code_pool() -> list[str]:
@@ -247,7 +250,31 @@ def _load_code_pool() -> list[str]:
     return pool or list(_CODE_POOL)
 
 
+def _load_creative_pool() -> list[str]:
+    """创意场景语料：优先用 vendored 的公版文学文本（corpus/creative/，清·曹雪芹
+    《红楼梦》，Project Gutenberg License）。内置散文池仅 672 字符，4K 档即整池
+    循环 ~9 遍、256K 档 ~585 遍——高重复填充让投机采样 draft 命中被人为拉满、
+    decode 虚高（ADR-0013 判据）；83 万字符的语料把循环点推到 512K 档之后。
+    文件每行一个语料块（150~260 字符、句末切块）；缺失/为空时回退内置池。"""
+    pool = []
+    try:
+        for root, _dirs, files in os.walk(CORPUS_CREATIVE_DIR):
+            for fn in sorted(files):
+                if fn.upper().startswith(("LICENSE", "README")):
+                    continue
+                try:
+                    with open(os.path.join(root, fn), encoding="utf-8",
+                              errors="replace") as f:
+                        pool.extend(line.strip() for line in f if len(line.strip()) >= 40)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return pool or list(_CREATIVE_POOL)
+
+
 SCENARIOS["code"]["filler_pool"] = _load_code_pool()
+SCENARIOS["creative"]["filler_pool"] = _load_creative_pool()
 
 
 def _make_stream(pool: list[str]) -> str:
@@ -370,9 +397,10 @@ class BenchRun:
         self.run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + "".join(
             random.choices("abcdef0123456789", k=4))
         self.results_dir = results_dir
-        self.q: asyncio.Queue = asyncio.Queue()
         # SSE 订阅扇出队列：每条事件连接独立队列（多标签页 / 断线重连残留的旧
-        # 连接不再从同一队列竞争消费、互相抢事件，ADR-0021）
+        # 连接不再从同一队列竞争消费、互相抢事件，ADR-0021）；测试与内嵌调用
+        # 同样向 subs 挂队列收事件（ADR-0024：原 self.q 生产路径无人消费、
+        # 事件双份驻留内存，已移除）
         self.subs: set[asyncio.Queue] = set()
         self.history: list[dict] = []
         self.stop_flag = False
@@ -421,7 +449,6 @@ class BenchRun:
         self.history.append(ev)
         for q in list(self.subs):   # 扇出给全部 SSE 订阅连接
             q.put_nowait(ev)
-        await self.q.put(ev)        # self.q 保留给内嵌调用方与测试脚本
 
     def _close_streams(self):
         """向全部 SSE 订阅连接推送终止标记（gen 收到 None 退出）。"""
@@ -507,7 +534,6 @@ class BenchRun:
                                     await self.emit({"type": "stopped"})
                                     self.finished_at = time.time()
                                     self._save()
-                                    await self.q.put(None)
                                     self._close_streams()
                                     return
                                 label = SCENARIOS[scenario]["label"]
@@ -540,7 +566,6 @@ class BenchRun:
             await self.emit({"type": "error", "msg": f"测速任务异常: {e}"})
         self.finished_at = time.time()
         self._save()
-        await self.q.put(None)
         self._close_streams()
 
     # -- 前置探测与网络基线 ----------------------------------------------------

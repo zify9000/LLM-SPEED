@@ -1,3 +1,4 @@
-fastapi>=0.110
-uvicorn>=0.29
-httpx>=0.27
+# 运行时依赖（锁定到本机验证过的版本，升级需全量回归 tests/）
+fastapi==0.115.0
+uvicorn==0.30.6
+httpx==0.28.1

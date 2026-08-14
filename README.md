@@ -25,8 +25,12 @@ cp .env.example .env    # 填入各 provider 的 API Key（API_KEY_<名称大写
 MOCK_PP=1200 MOCK_TG=60 python mock_server.py     # 模拟 prefill 1200 tok/s、decode 60 tok/s
 MOCK_NO_V1=1 python mock_server.py                # DeepSeek 风格：不带 /v1 前缀
 
-python server.py                                   # 默认 http://0.0.0.0:8501
+python server.py                                   # 默认 http://127.0.0.1:8501
 ```
+
+> 服务端**缺省只绑定本机回环**（全端点无鉴权：绑 `0.0.0.0` 会让局域网内任何人
+> 可触发对云端付费网关的测速并删除历史）。确需局域网访问时 `HOST=0.0.0.0
+> python server.py`，并自行评估风险。
 
 ### 配置 Provider
 
@@ -66,7 +70,8 @@ API_KEY_LOCAL=            # 本地网关无鉴权可留空，会回退全局 API
 | Decode 速度 | 生成 tokens ÷ (末 token 时间 − 首 token 时间)，单请求均值 |
 | 双并发总吞吐 | 两请求总输出 tokens ÷ (首个 token → 末个 token 的时间窗) |
 
-- **上下文构造**：场景语料池整段乱序拼接撑长度（创意=多段中文散文；代码=**真实项目源码**，
+- **上下文构造**：场景语料池整段乱序拼接撑长度（创意=公版文学文本《红楼梦》，
+  见 `corpus/creative/`，缺失回退内置散文池；代码=**真实项目源码**，
   vendored llama.cpp b9934，见 `corpus/code/`），避免模型照抄重复语料导致投机采样命中率
   注水；每次请求注入随机 nonce 编号，**防止 prefix cache 命中导致 prefill 虚高**
 - **前置探测校准**：每个模型×场景进矩阵前先发一次短请求（兼服务端预热），用真实
@@ -101,14 +106,27 @@ API_KEY_LOCAL=            # 本地网关无鉴权可留空，会回退全局 API
 5. **decode 输出长度**：`max_tokens` 默认 1024；调太小会让 decode 测量窗口变短、噪声变大
 6. prefill 展示口径默认已扣除实测网络 RTT（明细表悬浮可见毛值）；本地部署 RTT < 1ms 可忽略
 
+## 测试
+
+```bash
+python -m unittest discover -s tests -v   # 引擎单测 + mock 端到端（需本机 python 环境）
+python -m pytest tests/ -q                # 等价跑法（pip install -r requirements-dev.txt）
+bash tests/check_frontend_js.sh           # 前端内联 JS 语法检查（需 node）
+```
+
+端到端用例在进程内拉起 mock 网关验证全链路口径（prefill 净口径 ≈ MOCK_PP、
+双并发总吞吐 ≈ 2× 单请求、cfg 事件脱敏首发、mock 运行不落盘）。
+
 ## 文件结构
 
 ```
 server.py        FastAPI 服务端（provider 解析 + 测速任务 + SSE + 历史）
 bench.py         测速引擎（prompt 构造、流式测量、测试矩阵调度）
 corpus/code/     代码场景真实语料（vendored llama.cpp b9934 源码，MIT）
+corpus/creative/ 创意场景语料（vendored 公版《红楼梦》，Project Gutenberg License）
 static/index.html 单页前端（ECharts 折线图 + html2canvas 卡片导出）
 mock_server.py   假 OpenAI 网关（自测用）
+tests/           回归测试（单元 + mock 端到端 + JS 语法检查）
 config.json      provider 列表 / 卡片默认文案
 .env             各 provider 的 API Key（不入库）
 results/         历次测速结果 JSON

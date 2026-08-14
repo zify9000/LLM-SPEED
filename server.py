@@ -1,7 +1,7 @@
 """LLM-SPEED 服务端：FastAPI 单页测速服务（多 provider）。
 
-启动：  uvicorn server:app --host 0.0.0.0 --port 8501
-或：    python server.py
+启动：  uvicorn server:app --host 127.0.0.1 --port 8501
+或：    python server.py      # 缺省绑定 127.0.0.1:8501（HOST/PORT 环境变量可覆盖）
 """
 from __future__ import annotations
 
@@ -48,16 +48,18 @@ app = FastAPI(title="LLM-SPEED")
 RUNS: dict[str, BenchRun] = {}
 
 
-def load_config_file() -> dict:
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, encoding="utf-8") as f:
-                d = json.load(f)
-                d.pop("api_key", None)   # 兼容旧配置：忽略其中的 key
-                return d
-        except Exception:  # noqa: BLE001
-            pass
-    return {}
+def load_config_file() -> tuple[dict, str | None]:
+    """返回 (config, error)。解析失败不再静默吞掉：错误上浮到 /api/config，
+    前端显式提示，避免用户面对「配置坏了却只看到默认网关」的悬案。"""
+    if not os.path.exists(CONFIG_PATH):
+        return {}, None
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+        d.pop("api_key", None)   # 兼容旧配置：忽略其中的 key
+        return d, None
+    except Exception as e:  # noqa: BLE001
+        return {}, f"config.json 解析失败: {e}"
 
 
 def _env_key_name(provider_name: str) -> str:
@@ -69,7 +71,7 @@ def load_providers() -> list[dict]:
 
     key 查找顺序：API_KEY_<NAME> → 全局 API_KEY。全部缺失时回退单网关模式。
     """
-    d = load_config_file()
+    d, _err = load_config_file()
     providers = []
     for p in d.get("providers") or []:
         if not p.get("gateway_url"):
@@ -134,7 +136,7 @@ async def index():
 
 @app.get("/api/config")
 async def get_config():
-    d = load_config_file()
+    d, config_error = load_config_file()
     providers = load_providers()
     return {
         "providers": [{k: v for k, v in p.items()} for p in providers],
@@ -142,6 +144,7 @@ async def get_config():
         "scenarios": [{"key": k, "label": v["label"]} for k, v in SCENARIOS.items()],
         "ctx_list": DEFAULT_CTX_LIST,
         "concurrencies": DEFAULT_CONCURRENCIES,
+        "config_error": config_error,   # config.json 坏了不静默：前端显式告警
     }
 
 
@@ -328,4 +331,8 @@ async def bench_history_clear():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8503)))
+    # 缺省只绑本机回环：全端点无鉴权，绑 0.0.0.0 会让局域网内任何人可触发
+    # 对云端付费网关的测速（烧额度）并删除历史；确需局域网访问时显式
+    # HOST=0.0.0.0 并自行评估风险
+    uvicorn.run(app, host=os.environ.get("HOST", "127.0.0.1"),
+                port=int(os.environ.get("PORT", 8501)))
