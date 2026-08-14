@@ -1,0 +1,1112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM-SPEED · LLM 测速台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+<style>
+/* ============ 设计令牌（浅色 BI 风格） ============ */
+:root{
+  --bg:#F9FAFB;
+  --card:#FFFFFF;
+  --border:#E5E7EB;
+  --border-2:#D1D5DB;
+  --ink:#111827;
+  --ink-2:#374151;
+  --ink-3:#6B7280;
+  --ink-4:#9CA3AF;
+  --primary:#4F46E5;
+  --primary-hover:#4338CA;
+  --primary-soft:#EEF2FF;
+  --green:#16A34A; --green-soft:#F0FDF4;
+  --yellow:#CA8A04; --yellow-soft:#FEFCE8;
+  --red:#DC2626;   --red-soft:#FEF2F2;
+  --blue-soft:#EFF6FF;
+  --violet:#9333EA;
+  --font:"Inter","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  --shadow:0 1px 2px rgba(0,0,0,.05);
+}
+*{box-sizing:border-box; margin:0; padding:0}
+body{background:var(--bg); color:var(--ink); font:14px/1.6 var(--font)}
+button{font-family:inherit; cursor:pointer}
+input,select,textarea{font-family:inherit}
+:focus-visible{outline:2px solid var(--primary); outline-offset:2px; border-radius:6px}
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation-duration:.01ms!important; transition-duration:.01ms!important}
+}
+[hidden]{display:none!important}
+
+/* ============ 顶部导航 ============ */
+nav{background:var(--card); border-bottom:1px solid var(--border); padding:12px 24px;
+  position:sticky; top:0; z-index:50}
+.nav-inner{max-width:1440px; margin:0 auto; display:flex; align-items:center; gap:12px}
+.brand-ic{width:32px; height:32px; border-radius:8px; background:var(--primary-soft);
+  color:var(--primary); display:flex; align-items:center; justify-content:center; flex:none}
+nav h1{font-size:15px; font-weight:600}
+nav .tag{font-size:12px; color:var(--ink-4)}
+#statusPill{margin-left:auto; display:inline-flex; align-items:center; gap:7px;
+  padding:5px 14px; border-radius:999px; font-size:12.5px; font-weight:500;
+  background:var(--card); color:var(--ink-3); border:1px solid var(--border-2);
+  transition:color .2s, border-color .2s}
+#statusPill .dot{width:8px; height:8px; border-radius:50%; background:var(--border-2); flex:none}
+#statusPill.run{color:var(--green); border-color:#BBF7D0; background:var(--green-soft)}
+#statusPill.run .dot{background:var(--green); animation:pulse 1.6s ease-in-out infinite}
+#statusPill.err{color:var(--red); border-color:#FECACA; background:var(--red-soft)}
+#statusPill.err .dot{background:var(--red)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ============ 页面容器 ============ */
+.page{max-width:1440px; margin:0 auto; padding:24px}
+.page-head{display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; gap:16px; flex-wrap:wrap}
+.page-head h2{font-size:22px; font-weight:700}
+.page-head .sub{color:var(--ink-3); font-size:13.5px; margin-top:2px}
+.head-actions{display:flex; align-items:center; gap:8px; flex-wrap:wrap}
+.head-actions .sel-inline{display:flex; align-items:center; gap:6px}
+.head-actions .sel-inline span{color:var(--ink-3); font-size:12.5px}
+.head-actions select{width:auto; min-width:150px; padding:7px 10px; font-size:13px}
+#statusMsg{color:var(--ink-3); font-size:12.5px; min-height:20px; margin-bottom:12px}
+#statusMsg.err{color:var(--red)}
+
+/* ============ KPI 卡片行 ============ */
+.kpis{display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px}
+.kpi{background:var(--card); border:1px solid var(--border); border-radius:12px;
+  padding:18px 20px; box-shadow:var(--shadow)}
+.kpi .k{font-size:13px; color:var(--ink-3); margin-bottom:4px}
+.kpi .v{font-size:26px; font-weight:700; color:var(--ink); font-variant-numeric:tabular-nums; line-height:1.25}
+.kpi .v small{font-size:13px; font-weight:500; color:var(--ink-3)}
+.kpi .d{font-size:12.5px; margin-top:3px; color:var(--ink-3)}
+.kpi.prefill .v{color:var(--primary)}
+.kpi.decode .v{color:var(--green)}
+.kpi.prog .v{color:var(--violet)}
+.progbar{height:8px; background:#E5E7EB; border-radius:999px; overflow:hidden; margin-top:10px}
+.progbar > div{height:100%; background:linear-gradient(90deg,#6366F1,#4F46E5); border-radius:999px;
+  transition:width .3s ease; width:0%}
+#decodeBarWrap > div{background:linear-gradient(90deg,#4ADE80,#16A34A)}
+#prefillBarWrap > div{background:linear-gradient(90deg,#818CF8,#4F46E5)}
+
+/* ============ 布局（配置平铺 + 主区，随阶段聚焦） ============ */
+.cfg-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:20px;
+  align-items:stretch; margin-bottom:20px}
+.cfg-grid .card{margin-bottom:0}
+@media (max-width:1100px){ .kpis{grid-template-columns:repeat(2,1fr)} }
+.card{background:var(--card); border:1px solid var(--border); border-radius:12px;
+  box-shadow:var(--shadow); margin-bottom:20px}
+.card-head{padding:14px 20px; border-bottom:1px solid var(--border);
+  display:flex; align-items:center; gap:8px}
+.card-head h3{font-size:14.5px; font-weight:600}
+.card-head small{color:var(--ink-4); font-weight:400; font-size:12px}
+.card-body{padding:20px}
+
+/* ============ 表单 ============ */
+label.f{display:block; color:var(--ink-3); font-size:12.5px; font-weight:500; margin:14px 0 5px}
+label.f:first-child{margin-top:0}
+input[type=text],input[type=password],input[type=number],select,textarea{
+  width:100%; background:var(--card); border:1px solid var(--border-2); color:var(--ink);
+  border-radius:8px; padding:8px 12px; font-size:13.5px; min-height:38px; transition:border-color .15s, box-shadow .15s}
+input:hover,select:hover,textarea:hover{border-color:var(--ink-4)}
+input:focus,select:focus,textarea:focus{outline:none; border-color:var(--primary);
+  box-shadow:0 0 0 3px rgba(79,70,229,.15)}
+textarea{resize:vertical; min-height:auto}
+.hint{color:var(--ink-4); font-size:11.5px; margin-top:5px; line-height:1.5}
+/* 部署环境（跟随选中模型自动展示，只读） */
+.deploy-item{border:1px solid var(--border); border-radius:10px; padding:12px 14px; background:var(--bg)}
+.deploy-item + .deploy-item{margin-top:10px}
+.deploy-item .dn{font-size:13px; font-weight:600}
+.deploy-item .dn small{color:var(--ink-4); font-weight:400; margin-left:6px}
+.deploy-item .kv{display:flex; gap:8px; margin-top:6px; font-size:12.5px}
+.deploy-item .kv .k{color:var(--ink-4); flex:none; min-width:60px}
+.deploy-item .kv .v{color:var(--ink-2); word-break:break-all}
+/* 朴素勾选项（无放大效果） */
+.ckrow{display:flex; flex-wrap:wrap; gap:2px 0}
+.ck{display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--ink-2);
+  padding:4px 14px 4px 0; cursor:pointer; user-select:none}
+.ck input{accent-color:var(--primary); width:14px; height:14px; cursor:pointer}
+
+/* ============ 按钮 ============ */
+button{border:none; border-radius:8px; padding:9px 16px; font-size:13px; font-weight:500;
+  display:inline-flex; align-items:center; gap:7px; transition:background .15s, transform .06s}
+button:active:not(:disabled){transform:scale(.97)}
+button:disabled{opacity:.45; cursor:not-allowed}
+.btn-primary{background:var(--primary); color:#fff}
+.btn-primary:hover:not(:disabled){background:var(--primary-hover)}
+.btn-ghost{background:var(--card); border:1px solid var(--border-2); color:var(--ink-2)}
+.btn-ghost:hover:not(:disabled){background:var(--bg)}
+.btnrow{display:flex; gap:8px; margin-top:16px; flex-wrap:wrap}
+
+/* ============ 表格 ============ */
+.tablewrap{overflow-x:auto}
+table{width:100%; border-collapse:collapse; font-size:13px}
+th{color:var(--ink-3); font-weight:500; text-align:left; padding:10px 12px;
+  border-bottom:1px solid var(--border); white-space:nowrap; font-size:12px}
+td{padding:10px 12px; border-bottom:1px solid #F3F4F6; white-space:nowrap;
+  font-variant-numeric:tabular-nums; color:var(--ink-2)}
+#liveTable td:nth-child(n+7), #resultTable td:nth-child(n+5){font-family:var(--mono); font-size:12.5px}
+tbody tr{transition:background .12s}
+tbody tr:hover{background:var(--bg)}
+tr.err td{color:var(--red)}
+tr.fade td{opacity:.45}
+.empty-row td{color:var(--ink-4); text-align:center; padding:28px}
+/* 进行中的测速任务（多标签页入口） */
+.arun{display:flex; align-items:center; gap:10px; border:1px solid #BBF7D0;
+  background:var(--green-soft); border-radius:10px; padding:10px 14px;
+  font-size:13px; margin-bottom:10px}
+.arun .dot{width:8px; height:8px; border-radius:50%; background:var(--green);
+  animation:pulse 1.6s ease-in-out infinite; flex:none}
+.arun .meta{color:var(--ink-2); flex:1; min-width:0; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap}
+.arun .meta b{color:var(--ink)}
+.arun button{flex:none}
+
+/* ============ 图表 ============ */
+.grid2{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+@media (max-width:900px){ .grid2{grid-template-columns:1fr} }
+.cm-title{font-size:14px; font-weight:600; color:var(--ink-2); margin:18px 0 10px}
+.chart-model:first-child > .cm-title{margin-top:0}
+.cm-scen{margin-bottom:16px}
+.cm-scen-name{font-size:12.5px; color:var(--ink-4); font-weight:500; margin-bottom:8px}
+#cardWrap .speed-card + .speed-card{margin-top:24px}
+.chartbox{height:330px; position:relative; border:1px solid var(--border); border-radius:10px;
+  background:var(--card)}
+
+/* ============ 测速卡片（浅色导出样式） ============ */
+#cardWrap{overflow-x:auto}
+.speed-card{width:100%; min-width:1120px; border-radius:20px; padding:40px 44px; color:var(--ink);
+  background:#FFFFFF; border:1px solid var(--border); box-shadow:0 8px 30px rgba(0,0,0,.08);
+  font-family:var(--font)}
+.sc-head{display:flex; justify-content:space-between; align-items:flex-start}
+.sc-brand{display:flex; align-items:center; gap:12px}
+.sc-logo{width:42px; height:42px; border-radius:10px; background:var(--primary-soft);
+  color:var(--primary); display:flex; align-items:center; justify-content:center; flex:none}
+.sc-title{font-size:22px; font-weight:700; letter-spacing:.5px}
+.sc-sub{color:var(--ink-4); font-size:12.5px; margin-top:1px}
+.sc-date{color:var(--ink-4); font-size:12.5px; text-align:right; font-family:var(--mono)}
+.sc-model{font-size:22px; font-weight:700; margin:22px 0 2px; color:var(--primary); font-family:var(--mono)}
+.sc-prov{color:var(--ink-3); font-size:13px; margin-bottom:16px}
+.sc-meta{display:grid; grid-template-columns:repeat(3,1fr); gap:14px 28px;
+  background:var(--bg); border:1px solid var(--border); border-radius:12px;
+  padding:18px 22px; margin-bottom:16px}
+.sc-meta .k{display:block; color:var(--ink-4); font-size:10.5px; font-weight:600;
+  letter-spacing:1.2px; text-transform:uppercase}
+.sc-meta .v{display:block; font-size:13.5px; color:var(--ink-2); margin-top:3px; word-break:break-all}
+.sc-scen-block{margin-bottom:18px}
+.sc-scen-head{display:flex; align-items:center; gap:8px; margin-bottom:10px}
+.sc-scen-head .bar{width:4px; height:16px; border-radius:2px; background:var(--primary)}
+.sc-scen-head .name{font-size:15px; font-weight:600}
+.sc-stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px}
+.sc-stat{border-radius:12px; padding:13px 14px; border:1px solid var(--border)}
+.sc-stat .k{font-size:11px; color:var(--ink-3); font-weight:500}
+.sc-stat .n{font-size:20px; font-weight:700; font-family:var(--mono);
+  font-variant-numeric:tabular-nums; line-height:1.3; margin-top:2px}
+.sc-stat .n small{font-size:11px; font-weight:600}
+.sc-stat .t{font-size:11px; color:var(--ink-4); margin-top:3px}
+.sc-stat.s1{background:var(--primary-soft)} .sc-stat.s1 .n{color:var(--primary)}
+.sc-stat.s2{background:var(--blue-soft)}   .sc-stat.s2 .n{color:#2563EB}
+.sc-stat.s3{background:var(--green-soft)}  .sc-stat.s3 .n{color:var(--green)}
+.sc-stat.s4{background:var(--yellow-soft)} .sc-stat.s4 .n{color:var(--yellow)}
+.sc-stat.s5{background:#F5F3FF}         .sc-stat.s5 .n{color:var(--violet)}
+.sc-charts{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:10px}
+.sc-chart-cell img{width:100%; border-radius:10px; border:1px solid var(--border); background:#fff; display:block}
+.sc-chart-cell .cap{font-size:11px; color:var(--ink-4); text-align:center; margin-top:5px}
+.sc-foot{margin-top:18px; color:var(--ink-4); font-size:11.5px; text-align:center}
+
+.ic{width:16px; height:16px; flex:none}
+#offChartBox{position:fixed; left:-9999px; top:0}
+#offChart{width:540px; height:300px}
+</style>
+</head>
+<body>
+<nav>
+  <div class="nav-inner">
+    <div class="brand-ic" aria-hidden="true">
+      <svg class="ic" style="width:18px;height:18px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+    </div>
+    <h1>LLM-SPEED</h1>
+    <span class="tag">LLM Benchmark Console</span>
+    <span id="statusPill" role="status"><span class="dot"></span><span id="statusText">空闲</span></span>
+  </div>
+</nav>
+
+<div class="page">
+  <div class="page-head">
+    <div>
+      <h2>测速控制台</h2>
+      <p class="sub">prefill / decode × 上下文长度（0K~1M）× 并发 · 创意写作 / 代码生成</p>
+    </div>
+    <div class="head-actions">
+      <button class="btn-ghost" id="btnToggleCfg" onclick="toggleConfig()">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span id="btnToggleCfgText">收起配置</span></button>
+      <button id="btnStart" class="btn-primary" onclick="startRun()">
+        <svg class="ic" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><polygon points="6 3 20 12 6 21 6 3"/></svg>开始测速</button>
+      <button id="btnStop" class="btn-ghost" onclick="stopRun()" hidden>
+        <svg class="ic" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>停止</button>
+    </div>
+  </div>
+  <div id="statusMsg" aria-live="polite"></div>
+
+  <!-- ========== 配置区（始终位于控制台上方：空闲时平铺展示；测速/完成后自动隐藏，
+       「展开配置」唤回时也悬于 KPI/实时表/图表之上，不嵌入主区） ========== -->
+  <aside id="configPanel">
+    <div class="cfg-grid">
+      <div class="card">
+        <div class="card-head"><h3>Provider 与模型</h3></div>
+        <div class="card-body">
+          <label class="f" for="fProvider">Provider</label>
+          <select id="fProvider" onchange="onProviderChange()"></select>
+          <div id="keyHint" class="hint"></div>
+          <div class="btnrow" style="margin-top:10px">
+            <button class="btn-ghost" onclick="refreshModels()">
+              <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>刷新模型列表</button>
+          </div>
+          <label class="f">被测模型（可多选，逐一顺序测试）</label>
+          <div class="btnrow" style="margin:0 0 6px">
+            <button class="btn-ghost" onclick="selAllModels(true)">全选</button>
+            <button class="btn-ghost" onclick="selAllModels(false)">全不选</button>
+          </div>
+          <div id="modelList" class="ckrow"><span class="hint" style="margin:0">请先刷新模型列表…</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>测试矩阵</h3></div>
+        <div class="card-body">
+          <label class="f">场景</label>
+          <div id="scenarioList" class="ckrow"></div>
+          <label class="f">上下文长度（目标输入 tokens）</label>
+          <div id="ctxList" class="ckrow"></div>
+          <div class="btnrow" style="margin:6px 0 0">
+            <input type="text" id="fCustomCtx" placeholder="自定义档位，如 192K" style="width:150px"
+                   onkeydown="if(event.key==='Enter')addCustomCtx()">
+            <button class="btn-ghost" onclick="addCustomCtx()">添加</button>
+          </div>
+          <div class="hint">部署上限非标准 2 的幂（如 192K）时，用自定义档位补上末尾一档</div>
+          <div id="concWrap">
+            <label class="f">并发数</label>
+            <div id="concList" class="ckrow"></div>
+          </div>
+          <div id="concHint" class="hint" hidden>云端 provider 不做并发测试：请求可能被调度到不同推理设备，并发数据无参考意义</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>请求参数</h3></div>
+        <div class="card-body">
+          <div class="grid2">
+            <div><label class="f" for="fMaxTokens">单请求最大输出 tokens</label><input type="number" id="fMaxTokens" value="1024"></div>
+            <div><label class="f" for="fRepeats">每点重复次数（取中位）</label><input type="number" id="fRepeats" value="1" min="1" max="5"></div>
+          </div>
+          <div class="hint">云端读数有调度抖动，关键点建议 3 次取中位；本地稳定环境保持 1 即可</div>
+          <label class="f" for="fTimeout">单请求超时（秒）</label>
+          <input type="number" id="fTimeout" value="1200">
+          <label class="f" for="fThinking">思考模式</label>
+          <select id="fThinking">
+            <option value="disabled" selected>禁用（推荐）</option>
+            <option value="enabled">启用（思考流计入测速）</option>
+            <option value="auto">跟随服务端默认</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="card" id="deployCard" hidden>
+        <div class="card-head"><h3>部署环境</h3></div>
+        <div class="card-body" id="deployList"></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ================= 历史记录（与参数配置同级，可载入/删除/清空） ================= -->
+  <section id="historyPanel">
+    <div class="card">
+      <div class="card-head"><h3>历史记录</h3><small>自动保存于 results/ · mock 运行不入库</small></div>
+      <div class="card-body">
+        <div id="activeRuns"></div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap">
+          <select id="historySel" style="flex:1; min-width:240px" aria-label="历史测速记录"></select>
+          <button class="btn-ghost" onclick="loadHistory()">载入</button>
+          <button class="btn-ghost" onclick="deleteHistory()">删除所选</button>
+          <button class="btn-ghost" onclick="clearHistory()">清空全部</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- KPI 行 -->
+  <div class="kpis">
+    <div class="kpi prefill">
+      <p class="k">最新 Prefill 速度</p>
+      <p class="v" id="kpiPrefill">– <small>tok/s</small></p>
+      <p class="d">prompt tokens ÷（TTFT − RTT）</p>
+      <div class="progbar" id="prefillBarWrap" hidden><div id="prefillBarFill"></div></div>
+    </div>
+    <div class="kpi decode">
+      <p class="k">实时 Decode 速度</p>
+      <p class="v" id="kpiDecode">– <small>tok/s</small></p>
+      <p class="d">流式解码最新读数</p>
+      <div class="progbar" id="decodeBarWrap" hidden><div id="decodeBarFill"></div></div>
+    </div>
+    <div class="kpi">
+      <p class="k">进行中请求</p>
+      <p class="v" id="kpiReqs">0 <small>个</small></p>
+      <p class="d">当前并发的流式请求数</p>
+    </div>
+    <div class="kpi prog">
+      <p class="k">已完成测试点</p>
+      <p class="v" id="kpiPoints">0 <small>/ 0</small></p>
+      <p class="d">模型 × 场景 × 上下文 × 并发</p>
+      <div class="progbar" id="progWrap" hidden><div id="progFill"></div></div>
+    </div>
+  </div>
+
+  <!-- ================= 主区 ================= -->
+  <section id="mainCol">
+      <div class="card" id="liveCard" hidden>
+        <div class="card-head"><h3>实时测速</h3><small>prefill 等待期 1s、decode 期 0.4s 刷新</small></div>
+        <div class="tablewrap">
+        <table id="liveTable">
+          <thead><tr><th>模型</th><th>场景</th><th>上下文</th><th>并发</th><th>请求</th><th>阶段</th><th>TTFT</th><th>已出 tokens</th><th>实时速度</th><th>耗时</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        </div>
+      </div>
+
+      <div class="card" id="chartCard" hidden>
+        <div class="card-head"><h3>速度曲线</h3><small>按模型 × 场景平铺</small></div>
+        <div class="card-body">
+          <div id="chartList"></div>
+        </div>
+      </div>
+
+      <div class="card" id="resultCard" hidden>
+        <div class="card-head"><h3>测试结果明细</h3></div>
+        <div class="tablewrap">
+        <table id="resultTable">
+          <thead><tr><th>模型</th><th>场景</th><th>输入上下文</th><th>并发</th><th>实际 prompt tokens</th><th>缓存命中</th><th>TTFT(s)</th><th>Prefill(tok/s)</th><th>Decode(tok/s)</th><th id="thTotal">双并发总吞吐(tok/s)</th><th>输出tokens</th><th>结束</th><th>状态</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        </div>
+      </div>
+
+      <div class="card" id="cardCard" hidden>
+        <div class="card-head"><h3>测速卡片</h3><small>合并全部场景，可导出 PNG</small></div>
+        <div class="card-body">
+          <div class="btnrow" style="margin:0 0 16px">
+            <button class="btn-ghost" onclick="genCards()">
+              <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>生成卡片</button>
+            <button class="btn-ghost" onclick="downloadCard()" id="btnDl" disabled>
+              <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>下载 PNG</button>
+          </div>
+          <div id="cardWrap"></div>
+        </div>
+      </div>
+  </section>
+</div>
+<div id="offChartBox" aria-hidden="true"><div id="offChart"></div></div>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const SCEN_LABEL = {creative:"创意写作", code:"代码生成"};
+const fmtK = v => !v ? "0K"
+  : v>=1048576 ? (v/1048576).toFixed(v%1048576?1:0)+"M"
+  : v>=1024 ? (v/1024).toFixed(v%1024?1:0)+"K" : v;
+const esc = s => String(s).replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtNum = v => v==null ? "-" : Math.round(v).toLocaleString("en-US");
+const round1 = v => Math.round(v*10)/10;
+
+const state = {points:new Map(), es:null, runId:null, running:false, cfg:null, maxSeq:-1,
+  activeReqs:new Set(), donePoints:0, totalPoints:0, providers:[], phase:"idle",
+  charts:[]};   // 平铺图表的 echarts 实例（重建/resize 用）
+let offChart;
+
+/* ---------------- 初始化 ---------------- */
+async function init(){
+  const cfg = await (await fetch("/api/config")).json();
+  state.providers = cfg.providers || [];
+  const sel = $("#fProvider");
+  sel.innerHTML = state.providers.map(p =>
+    `<option value="${p.name}">${p.label}（${p.gateway_url.replace(/^https?:\/\//,"")}）</option>`).join("");
+  const firstWithKey = state.providers.find(p=>p.has_key);
+  if(firstWithKey) sel.value = firstWithKey.name;
+  $("#scenarioList").innerHTML = cfg.scenarios.map(s => ckHtml("scen", s.key, s.label, true)).join("");
+  $("#ctxList").innerHTML = cfg.ctx_list.map(v => ckHtml("ctx", v, fmtK(v), v<=32768)).join("");
+  state.defCtx = cfg.ctx_list.map(Number);
+  loadCustomCtx();
+  $("#concList").innerHTML = cfg.concurrencies.map(v => ckHtml("conc", v, v+" 并发", Number(v)===1)).join("");
+  onProviderChange();
+  setPhase("idle");   // 刚启动：平铺全部配置，不展示测速组件
+  offChart = echarts.init($("#offChart"));
+  window.addEventListener("resize", () => state.charts.forEach(c => c.resize()));
+  $("#modelList").addEventListener("change", () => { saveModelSel(); syncDeployCard(); });   // 勾选模型→记忆选择+联动部署环境展示
+  refreshModels();
+  loadHistoryList();
+}
+function ckHtml(group, val, label, on){
+  return `<label class="ck"><input type="checkbox" data-g="${group}" value="${val}" ${on?"checked":""}> ${label}</label>`;
+}
+const checkedVals = g => [...document.querySelectorAll(`.ck input[data-g=${g}]:checked`)].map(i => i.value);
+/* 自定义上下文档位：部署上限非标准 2 的幂（如 192K）时补末尾档，localStorage 记忆 */
+function parseCtx(s){
+  const m = String(s).trim().match(/^(\d+(?:\.\d+)?)\s*([kKmM]?)$/);
+  if(!m) return 0;
+  const u = m[2].toLowerCase();
+  return Math.round(parseFloat(m[1]) * (u==="k" ? 1024 : u==="m" ? 1048576 : 1));
+}
+function loadCustomCtx(){
+  let saved = [];
+  try{ saved = JSON.parse(localStorage.getItem("llmspeed.customCtx") || "[]"); }catch(e){}
+  saved.filter(v => Number.isInteger(v) && v > 0 && !state.defCtx.includes(v))
+    .forEach(v => $("#ctxList").insertAdjacentHTML("beforeend", ckHtml("ctx", v, fmtK(v), true)));
+}
+function saveCustomCtx(){
+  const customs = [...document.querySelectorAll('.ck input[data-g=ctx]')]
+    .map(i => +i.value).filter(v => !state.defCtx.includes(v));
+  localStorage.setItem("llmspeed.customCtx", JSON.stringify(customs));
+}
+function addCustomCtx(){
+  const v = parseCtx($("#fCustomCtx").value);
+  if(!v) return setPill("自定义档位格式无效：支持 196608 / 192K / 1M", "err");
+  if(v > 4*1048576) return setPill("自定义档位过大（上限 4M）", "err");
+  if([...document.querySelectorAll('.ck input[data-g=ctx]')].some(i => +i.value === v))
+    return setPill(`档位 ${fmtK(v)} 已存在`, "err");
+  $("#ctxList").insertAdjacentHTML("beforeend", ckHtml("ctx", v, fmtK(v), true));
+  $("#fCustomCtx").value = "";
+  saveCustomCtx();
+  setPill(`已添加自定义档位 ${fmtK(v)}`, "");
+}
+function currentProvider(){ return state.providers.find(p => p.name === $("#fProvider").value); }
+function onProviderChange(){
+  const p = currentProvider();
+  $("#keyHint").innerHTML = !p ? "" : (p.has_key
+    ? `API Key 已由服务端 .env 提供（${p.name}）`
+    : `该 provider 未配置 API Key（.env 的 API_KEY_${p.name.toUpperCase()}），云端模型将无法认证`);
+  syncDeployCard();
+  syncConcurrencyUI();
+  refreshModels();
+}
+/* 云端 provider 不做并发测试：隐藏并发勾选，固定并发 1 */
+function syncConcurrencyUI(){
+  const local = !!currentProvider()?.local;
+  $("#concWrap").hidden = !local;
+  $("#concHint").hidden = local;
+}
+/* 部署环境（硬件/推理框架/核心参数）挂在 provider 内部、与被测模型建立映射：
+   一个 provider 可挂多套部署（deployments），勾选的模型命中哪套就展示哪套 */
+function syncDeployCard(){
+  const sel = checkedVals("model");
+  // 部署环境仅本地部署展示；云端 deployments 只用于 max_ctx 钳制（ADR-0020）
+  const deps = !currentProvider()?.local ? [] : (currentProvider()?.deployments || [])
+    .filter(d => (d.models || []).some(m => sel.includes(m)));
+  $("#deployCard").hidden = deps.length === 0;
+  $("#deployList").innerHTML = deps.map(d => `<div class="deploy-item">
+    <div class="dn">${esc(d.label || "未命名部署")}<small>适用：${(d.models||[]).map(esc).join("、")}</small></div>
+    ${d.hardware ? `<div class="kv"><span class="k">硬件环境</span><span class="v">${esc(d.hardware)}</span></div>` : ""}
+    ${d.framework ? `<div class="kv"><span class="k">推理框架</span><span class="v">${esc(d.framework)}</span></div>` : ""}
+    ${d.params ? `<div class="kv"><span class="k">核心参数</span><span class="v">${esc(d.params)}</span></div>` : ""}
+  </div>`).join("");
+}
+
+/* ---------------- 阶段聚焦布局：idle 平铺配置 / run 实时事实 / done 统计分析 ---------------- */
+function setPhase(phase){
+  state.phase = phase;
+  document.body.dataset.phase = phase;
+  const idle = phase === "idle";
+  if(idle) document.body.classList.remove("config-force");
+  $("#btnToggleCfg").hidden = idle;
+  $("#historyPanel").hidden = phase === "run";   // 历史与参数配置同级，测速中隐藏
+  $("#configPanel").hidden = !idle && !document.body.classList.contains("config-force");
+  $(".kpis").hidden = idle;
+  $("#liveCard").hidden = phase !== "run";
+  updateToggleText();
+  showDataSections();
+}
+/* 测速中/完成后可手动展开或收起配置 */
+function toggleConfig(){
+  if(state.phase === "idle") return;
+  const show = document.body.classList.toggle("config-force");
+  $("#configPanel").hidden = !show;
+  updateToggleText();
+}
+function updateToggleText(){
+  $("#btnToggleCfgText").textContent =
+    document.body.classList.contains("config-force") ? "收起配置" : "展开配置";
+}
+
+/* ---------------- 模型列表 ---------------- */
+/* 每个 provider 的模型勾选记忆在 localStorage，切换 provider 回来时恢复上次选择；
+   首次访问默认全选 */
+const MODEL_SEL_KEY = "llmspeed.modelSel";
+function loadModelSel(provider){
+  try { return JSON.parse(localStorage.getItem(MODEL_SEL_KEY) || "{}")[provider] || null; }
+  catch { return null; }
+}
+function saveModelSel(){
+  try {
+    const mem = JSON.parse(localStorage.getItem(MODEL_SEL_KEY) || "{}");
+    mem[$("#fProvider").value] = checkedVals("model");
+    localStorage.setItem(MODEL_SEL_KEY, JSON.stringify(mem));
+  } catch { /* localStorage 不可用时静默降级为不记忆 */ }
+}
+function selAllModels(on){
+  document.querySelectorAll('#modelList input[data-g="model"]').forEach(i => { i.checked = on; });
+  saveModelSel(); syncDeployCard();
+}
+async function refreshModels(){
+  const box = $("#modelList");
+  box.innerHTML = '<span class="hint" style="margin:0">加载中…</span>';
+  try{
+    const r = await fetch(`/api/models?provider=${encodeURIComponent($("#fProvider").value)}`);
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail || "fail");
+    const mem = loadModelSel($("#fProvider").value);
+    box.innerHTML = d.models.length
+      ? d.models.map(m => ckHtml("model", m, m, mem ? mem.includes(m) : true)).join("")
+      : '<span class="hint" style="margin:0">网关未返回模型</span>';
+  }catch(e){ box.innerHTML = `<span class="hint" style="margin:0;color:var(--red)">拉取失败：${e.message}</span>`; }
+  syncDeployCard();
+}
+
+/* ---------------- 启动测速 ---------------- */
+function collectCfg(){
+  return {
+    provider: $("#fProvider").value,
+    models: checkedVals("model"),
+    scenarios: checkedVals("scen"),
+    ctx_list: checkedVals("ctx").map(Number).sort((a,b)=>a-b),
+    concurrencies: currentProvider()?.local
+      ? checkedVals("conc").map(Number).sort((a,b)=>a-b) : [1],
+    max_tokens: +$("#fMaxTokens").value || 1024,
+    repeats: Math.min(5, Math.max(1, +$("#fRepeats").value || 1)),
+    timeout_s: +$("#fTimeout").value || 1200,
+    thinking: $("#fThinking").value,
+  };
+}
+async function startRun(){
+  const cfg = collectCfg();
+  if(!cfg.models.length || !cfg.scenarios.length || !cfg.ctx_list.length || !cfg.concurrencies.length){
+    setPill("模型/场景/上下文/并发均不能为空", "err");
+    if(state.phase !== "idle"){   // 校验失败时展开配置便于修改
+      document.body.classList.add("config-force");
+      $("#configPanel").hidden = false;
+      updateToggleText();
+    }
+    return;
+  }
+  state.points.clear(); state.maxSeq = -1; state.activeReqs.clear();
+  state.donePoints = 0;
+  state.totalPoints = cfg.models.length * cfg.scenarios.length * cfg.ctx_list.length * cfg.concurrencies.length;
+  $("#liveTable tbody").innerHTML = "";
+  renderAll(); resetKpis();
+  $("#progWrap").hidden = false;
+  $("#progFill").style.width = "0%";
+  const r = await fetch("/api/bench/start", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(cfg)});
+  const d = await r.json();
+  if(!r.ok){ setPill(d.detail || "启动失败", "err"); return; }
+  state.runId = d.run_id; state.running = true;
+  // 本地先记一份（cfg 事件到达后即被服务端权威配置覆盖）
+  const cp = currentProvider();
+  state.cfg = {...cfg, provider_label: cp?.label, provider_local: cp?.local,
+               gateway_url: cp?.gateway_url};
+  $("#btnStart").hidden = true; $("#btnStop").hidden = false; $("#btnDl").disabled = true;
+  setPhase("run");         // 测速中：隐藏配置，只展实时事实
+  setPill("测速运行中…", "run");
+  if(state.es) state.es.close();
+  state.es = new EventSource(`/api/bench/events/${d.run_id}`);
+  state.es.onmessage = e => onEvent(JSON.parse(e.data));
+  state.es.onerror = () => {};  // 自动重连，后端回放历史 + 前端 seq 去重
+}
+async function stopRun(){
+  if(state.runId) await fetch(`/api/bench/stop/${state.runId}`, {method:"POST"});
+}
+function setPill(msg, cls){
+  $("#statusText").textContent = msg;
+  $("#statusPill").className = cls || "";
+  const m = $("#statusMsg");
+  m.textContent = cls==="err" ? msg : (cls==="run" ? "" : msg);
+  m.className = cls==="err" ? "err" : "";
+}
+function onEvent(ev){
+  if(ev.seq != null){
+    if(ev.seq <= state.maxSeq) return;
+    state.maxSeq = ev.seq;
+  }
+  switch(ev.type){
+    // 权威运行配置由服务端随事件流首发（回放即得）：卡片信息不依赖发起页本地状态
+    case "cfg": state.cfg = {...(ev.cfg || {}), started_at: ev.started_at}; break;
+    case "status": if(state.running) $("#statusMsg").textContent = "▶ " + ev.msg; break;
+    case "point_skipped": state.donePoints += ev.count || 1; bumpProgress(); break;
+    case "tick": updateLive(ev); break;
+    case "point": addPoint(ev.point); markLiveDone(ev.point); break;
+    case "done": finishRun("测速完成"); break;
+    case "stopped": finishRun("已停止"); break;
+    case "error": setPill(ev.msg, "err"); break;
+  }
+}
+function finishRun(msg){
+  state.running = false;
+  if(state.es){ state.es.close(); state.es = null; }
+  $("#btnStart").hidden = false; $("#btnStop").hidden = true;
+  setPhase("done");        // 完成后：聚焦表格/图表/卡片等统计信息
+  setPill(msg); loadHistoryList();
+  $("#kpiReqs").innerHTML = '0 <small>个</small>';
+}
+
+/* ---------------- KPI ---------------- */
+function resetKpis(){
+  $("#kpiPrefill").innerHTML = '– <small>tok/s</small>';
+  $("#kpiPrefill").dataset.peak = "";
+  $("#prefillBarWrap").hidden = true;
+  $("#prefillBarFill").style.width = "0%";
+  $("#kpiDecode").innerHTML = '– <small>tok/s</small>';
+  $("#kpiDecode").dataset.peak = "";
+  $("#decodeBarWrap").hidden = true;
+  $("#decodeBarFill").style.width = "0%";
+  $("#kpiReqs").innerHTML = '0 <small>个</small>';
+  $("#kpiPoints").innerHTML = `0 <small>/ ${state.totalPoints}</small>`;
+}
+function updateKpis(){ $("#kpiReqs").innerHTML = `${state.activeReqs.size} <small>个</small>`; }
+function bumpProgress(){
+  $("#kpiPoints").innerHTML = `${state.donePoints} <small>/ ${state.totalPoints}</small>`;
+  if(state.totalPoints) $("#progFill").style.width = (state.donePoints/state.totalPoints*100) + "%";
+}
+
+/* KPI 主数值=最新读数，峰值隐示于进度条（宽=最新/峰值，title 悬浮展示） */
+function kpiPush(vSel, wrapSel, fillSel, val, label){
+  const el = $(vSel);
+  const peak = Math.max(+(el.dataset.peak || 0), val);
+  el.dataset.peak = peak;
+  el.innerHTML = `${val} <small>tok/s</small>`;
+  const wrap = $(wrapSel);
+  wrap.hidden = false;
+  wrap.title = `${label}：${peak} tok/s`;
+  $(fillSel).style.width = (peak ? Math.min(100, val/peak*100) : 0) + "%";
+}
+
+/* ---------------- 实时表格 ---------------- */
+function updateLive(t){
+  const tb = $("#liveTable tbody");
+  let tr = tb.querySelector(`tr[data-tag="${CSS.escape(t.tag)}"]`);
+  if(t.phase === "prefill"){ state.activeReqs.add(t.tag); updateKpis(); }
+  if(!tr){
+    tr = document.createElement("tr");
+    tr.dataset.tag = t.tag;
+    tr.innerHTML = "<td></td>".repeat(10);
+    tb.appendChild(tr);
+  }
+  const c = tr.children;
+  c[0].textContent = t.model;
+  c[1].textContent = SCEN_LABEL[t.scenario] || t.scenario;
+  c[2].textContent = fmtK(t.ctx);
+  c[3].textContent = t.conc;
+  c[4].textContent = "r" + t.req;
+  if(t.phase === "prefill"){
+    c[5].textContent = "prefill 中"; c[5].style.color = "var(--yellow)"; c[5].style.fontWeight = "500";
+    if(t.ttft != null){
+      // 首 token 到达：prefill 实测读数（请求级），即刻刷新 KPI，不等整点完成（ADR-0018）
+      if(t.speed) kpiPush("#kpiPrefill", "#prefillBarWrap", "#prefillBarFill", t.speed, "最快 Prefill");
+    } else if(t.speed){
+      c[8].textContent = "≈" + t.speed + " tok/s";   // 等待期估值：若此刻完成的 prefill 速度
+    }
+  }
+  else if(t.phase === "decode"){
+    c[5].textContent = t.thinking ? "decode·含思考" : "decode";
+    c[5].style.color = "var(--green)"; c[5].style.fontWeight = "500";
+    state.activeReqs.add(t.tag); updateKpis();
+    kpiPush("#kpiDecode", "#decodeBarWrap", "#decodeBarFill", t.speed || 0, "最快 Decode");
+  }
+  else if(t.phase === "error"){
+    c[5].textContent = "出错"; c[5].style.color = "var(--red)"; c[5].style.fontWeight = "500";
+    c[9].textContent = (t.msg||"").slice(0,40); tr.classList.add("err");
+    state.activeReqs.delete(t.tag); updateKpis();
+  }
+  if(t.ttft != null) c[6].textContent = t.ttft + "s";
+  if(t.tokens) c[7].textContent = Math.round(t.tokens);
+  if(t.phase === "decode" && t.speed) c[8].textContent = t.speed + " tok/s";
+  if(t.elapsed) c[9].textContent = t.elapsed + "s";
+}
+function markLiveDone(p){
+  const prefix = `${p.model}|${p.scenario}|${p.ctx_target}|${p.concurrency}|`;
+  document.querySelectorAll('#liveTable tbody tr').forEach(tr => {
+    const tag = tr.dataset.tag;
+    if(!tag || !tag.startsWith(prefix)) return;
+    const reqTag = tag.split('|').pop();
+    const r = p.reqs.find(x => "r" + x.req === reqTag);
+    tr.children[5].textContent = (r && r.err) ? "失败" : "完成";
+    tr.children[5].style.color = (r && r.err) ? "var(--red)" : "var(--ink-4)";
+    tr.classList.add("fade");
+    state.activeReqs.delete(tag); updateKpis();
+    setTimeout(() => tr.remove(), 2500);
+  });
+}
+
+/* ---------------- 数据存储与全局渲染 ---------------- */
+const pointKey = p => `${p.model}|${p.scenario}|${p.ctx_target}|${p.concurrency}`;
+// Prefill 展示口径：优先扣 RTT 的净值（ADR-0013），旧存档无该字段时回退毛值
+const preOf = p => p.prefill_net_tok_s ?? p.prefill_tok_s;
+function addPoint(p){
+  if(!state.points.has(pointKey(p))) state.donePoints++;
+  state.points.set(pointKey(p), p);
+  bumpProgress();
+  renderAll();
+  const pv = preOf(p);
+  if(pv) kpiPush("#kpiPrefill", "#prefillBarWrap", "#prefillBarFill", pv, "最快 Prefill");
+  if(p.decode_tok_s){
+    // 点完成回写权威读数：主数值=最终窗口均值，峰值对比沿用实时逻辑（ADR-0012）
+    kpiPush("#kpiDecode", "#decodeBarWrap", "#decodeBarFill", p.decode_tok_s, "最快 Decode");
+  }
+}
+/* 结果全量平铺（ADR：模型/场景筛选下拉已移除）——固定排序：
+   模型 → 场景（创意写作在前）→ 上下文升序 → 并发升序 */
+const SCEN_ORDER = {creative:0, code:1};
+function allPoints(){
+  return [...state.points.values()].sort((a,b) =>
+    a.model.localeCompare(b.model) ||
+    (SCEN_ORDER[a.scenario]??9) - (SCEN_ORDER[b.scenario]??9) ||
+    a.ctx_target - b.ctx_target || a.concurrency - b.concurrency);
+}
+function showDataSections(){
+  const has = state.points.size > 0;
+  const run = state.phase === "run";
+  const cc = $("#chartCard");
+  const wasHidden = cc.hidden;
+  cc.hidden = !has || run;   // 图表属统计分析，完成后才展示
+  if(wasHidden && !cc.hidden){
+    // echarts 在隐藏容器内渲染为 0 尺寸：先显示，再 rAF 构建/重绘
+    requestAnimationFrame(() => renderCharts());
+  }
+  $("#cardCard").hidden = !has || run;
+  $("#resultCard").hidden = !has;         // 明细表是事实，运行中即累积展示
+}
+function renderAll(){
+  showDataSections();
+  renderResultTable();
+  renderCharts();
+}
+
+/* ---------------- 结果明细表 ---------------- */
+function renderResultTable(){
+  const rows = allPoints();
+  const showTotal = rows.some(p => p.concurrency > 1);   // 单并发矩阵不展示总吞吐列
+  $("#thTotal").hidden = !showTotal;
+  $("#resultTable tbody").innerHTML = rows.length ? rows.map(p => {
+    const reqErr = p.reqs.filter(r=>r.err);
+    let st = p.all_ok ? "✓ 成功" : (reqErr.length===p.reqs.length ? "✗ 失败" : `部分 ${p.reqs.length-reqErr.length}/${p.reqs.length}`);
+    if(p.n_reps > 1) st += ` · 中位×${p.n_reps}`;
+    const preTitle = p.prefill_net_tok_s != null && p.rtt_ms != null
+      ? ` title="净口径：已扣除网络往返 ${p.rtt_ms}ms（毛值 ${p.prefill_tok_s ?? "-"}）"` : "";
+    return `<tr class="${p.all_ok?"":"err"}">
+      <td>${p.model}</td><td>${SCEN_LABEL[p.scenario]||p.scenario}</td><td>${fmtK(p.ctx_target)}</td><td>${p.concurrency}</td>
+      <td>${p.prompt_tokens ?? "-"}</td><td>${p.cache_hit_tokens ? fmtK(p.cache_hit_tokens) : "-"}</td><td>${p.ttft_s ?? "-"}</td><td${preTitle}>${preOf(p) ?? "-"}</td>
+      <td>${p.decode_tok_s ?? "-"}</td><td ${showTotal?"":"hidden"}>${p.decode_total_tok_s ?? "-"}</td><td>${p.out_tokens ?? "-"}</td>
+      <td>${p.finish==="length" ? "截断" : (p.finish||"-")}</td><td>${st}</td></tr>`;
+  }).join("") : `<tr class="empty-row"><td colspan="${showTotal?13:12}">该筛选条件下暂无结果</td></tr>`;
+}
+
+/* ---------------- 折线图（类别轴 4K/8K/16K，数值取整） ---------------- */
+function buildChartOpt(pts, metric, title){
+  const ctxs = [...new Set(pts.map(p=>p.ctx_target))].sort((a,b)=>a-b);
+  const cats = ctxs.map(fmtK);
+  const concs = [...new Set(pts.map(p=>p.concurrency))].sort((a,b)=>a-b);
+  const STYLE = {"1":{color:"#4F46E5", symbol:"circle"}, "2":{color:"#9333EA", symbol:"triangle"}};
+  const isPre = metric==="prefill";
+  const single = concs.length===1;   // 单并发时并发数无增量信息，图例直接标指标名
+  const getVal = isPre ? preOf : (p=>p.decode_tok_s);
+  const ttftOf = p => p.ttft_net_s ?? p.ttft_s;   // 与 prefill 同取净口径
+  const mk = (getv, conc, name, dashed, color, yAxisIndex) => ({
+    name, type:"line", symbolSize:8, symbol: STYLE[String(conc)]?.symbol || "circle",
+    lineStyle:{width:2, type:dashed?"dashed":"solid"},
+    itemStyle:{color: color || STYLE[String(conc)]?.color || "#16A34A"},
+    yAxisIndex: yAxisIndex || 0,
+    data: ctxs.map(ctx => {
+      const p = pts.find(q => q.ctx_target===ctx && q.concurrency===conc);
+      return p ? getv(p) : null;
+    }),
+  });
+  const series = concs.flatMap(c => {
+    const s = [mk(getVal, c, single ? (isPre ? "Prefill（tok/s）" : "Decode（tok/s）")
+                  : (isPre ? `并发 ${c} Prefill（tok/s）` : `并发 ${c} 单请求均值（tok/s）`))];
+    if(metric==="decode" && c > 1)
+      s.push(mk(p=>p.decode_total_tok_s, c, `并发 ${c} 总吞吐（tok/s）`, true, "#16A34A"));
+    if(isPre)   // 双纵轴：右轴叠加 TTFT（虚线、独立琥珀色），单位信息在图例上
+      s.push(mk(ttftOf, c, single ? "TTFT（s）" : `并发 ${c} TTFT（s）`, true, "#F59E0B", 1));
+    return s;
+  });
+  const speedAxis = {type:"value",
+    axisLabel:{color:"#6B7280", formatter:v=>v>=1000?(v/1000)+"K":v},
+    splitLine:{lineStyle:{color:"#F3F4F6"}}};
+  return {
+    backgroundColor:"transparent",
+    title:{text:title, textStyle:{color:"#111827", fontSize:14, fontFamily:"Inter"}, left:12, top:8},
+    tooltip:{trigger:"axis", backgroundColor:"#fff", borderColor:"#E5E7EB",
+      textStyle:{color:"#111827", fontSize:12}, extraCssText:"box-shadow:0 4px 12px rgba(0,0,0,.08)",
+      valueFormatter: v => v==null ? "-" : round1(v).toLocaleString("en-US")},
+    legend:{textStyle:{color:"#6B7280"}, top:8, right:8, type:"scroll"},
+    grid:{left:64, right:isPre?56:20, top:52, bottom:40},
+    xAxis:{type:"category", name:"上下文", nameLocation:"middle", nameGap:26, data:cats,
+      nameTextStyle:{color:"#6B7280"}, axisLabel:{color:"#6B7280"},
+      axisLine:{lineStyle:{color:"#D1D5DB"}}, axisTick:{alignWithLabel:true}},
+    yAxis: isPre
+      ? [speedAxis,
+         {type:"value", axisLabel:{color:"#D97706"}, splitLine:{show:false}}]
+      : speedAxis,
+    series,
+  };
+}
+/* 速度曲线按模型 × 场景平铺：两个场景同屏对比，多模型各自成块 */
+function renderCharts(){
+  const box = $("#chartList");
+  if(!box || $("#chartCard").hidden) return;
+  state.charts.forEach(c => c.dispose());
+  state.charts = [];
+  box.innerHTML = "";
+  const models = [...new Set(allPoints().map(p => p.model))];
+  for(const m of models){
+    const pts = allPoints().filter(p => p.model === m);
+    const scens = [...new Set(pts.map(p => p.scenario))];
+    const blk = document.createElement("div");
+    blk.className = "chart-model";
+    blk.innerHTML =
+      (models.length > 1 ? `<h4 class="cm-title">${esc(m)}</h4>` : "") +
+      scens.map(sc => `<div class="cm-scen">
+        <div class="cm-scen-name">${SCEN_LABEL[sc] || sc}</div>
+        <div class="grid2">
+          <div class="chartbox" data-scen="${sc}" data-metric="prefill" role="img" aria-label="Prefill / TTFT 折线图"></div>
+          <div class="chartbox" data-scen="${sc}" data-metric="decode" role="img" aria-label="Decode 折线图"></div>
+        </div></div>`).join("");
+    box.appendChild(blk);
+    blk.querySelectorAll(".chartbox").forEach(el => {
+      const scPts = pts.filter(p => p.scenario === el.dataset.scen);
+      const ch = echarts.init(el);
+      ch.setOption(buildChartOpt(scPts, el.dataset.metric,
+        el.dataset.metric === "prefill" ? "Prefill / TTFT" : "Decode"), true);
+      state.charts.push(ch);
+    });
+  }
+}
+
+/* ---------------- 测速卡片（全场景合并） ---------------- */
+/* 某模型的部署环境：优先本次运行/存档的 cfg.model_info（服务端按映射注入），
+   无则回退当前 provider 的 deployments 映射 */
+function modelInfo(model){
+  const fromProv = (currentProvider()?.deployments || [])
+    .find(d => (d.models || []).includes(model));
+  const fromCfg = state.cfg?.model_info?.[model];
+  const mi = fromCfg || fromProv || null;
+  // quant 是后加字段：旧存档的 model_info 没有它，用当前 provider 配置补齐
+  if(mi && !mi.quant && fromProv?.quant) return {...mi, quant: fromProv.quant};
+  return mi;
+}
+function scenarioStats(pts){
+  const ok = pts.filter(p=>p.all_ok);
+  const withCtx = (arr) => arr.reduce((m,p)=>p.v>m.v?{v:p.v,ctx:p.ctx}:m, {v:-Infinity,ctx:null});
+  const pre = ok.map(p=>({v:preOf(p), ctx:p.ctx_target})).filter(x=>x.v!=null);
+  const dec = ok.map(p=>({v:p.decode_tok_s, ctx:p.ctx_target})).filter(x=>x.v!=null);
+  const preRange = pre.length ? [Math.min(...pre.map(x=>x.v)), Math.max(...pre.map(x=>x.v))] : null;
+  const decRange = dec.length ? [Math.min(...dec.map(x=>x.v)), Math.max(...dec.map(x=>x.v))] : null;
+  const prePeak = pre.length ? withCtx(pre) : null;
+  const decPeak = dec.length ? withCtx(dec) : null;
+  const concs = [...new Set(ok.map(p=>p.concurrency))].sort((a,b)=>a-b);
+  const baseConc = concs[0];
+  const preAvg = pre.length ? pre.reduce((a,x)=>a+x.v,0)/pre.length : null;   // 全档上下文均值
+  const baseDec = ok.filter(p=>p.concurrency===baseConc).map(p=>p.decode_tok_s).filter(v=>v!=null);
+  const baseDecAvg = baseDec.length ? baseDec.reduce((a,b)=>a+b,0)/baseDec.length : null;
+  const hiConc = concs.length > 1 ? concs[concs.length-1] : null;
+  const hiVals = hiConc ? ok.filter(p=>p.concurrency===hiConc)
+      .map(p=>p.decode_total_tok_s).filter(v=>v!=null) : [];
+  const hiTotal = hiVals.length ? hiVals.reduce((a,b)=>a+b,0)/hiVals.length : null;   // 均值而非峰值
+  return {preRange, decRange, prePeak, decPeak, preAvg, baseConc, baseDecAvg, hiConc, hiTotal};
+}
+/* 生成单个模型的卡片 HTML（全场景合并）；多模型时由 genCards 平铺多张 */
+function cardHTML(model){
+  const all = allPoints().filter(p => p.model===model);
+  const scens = [...new Set(all.map(p=>p.scenario))];
+  const prov = state.cfg?.provider_label || currentProvider()?.label || "";
+  // 本地部署隐去网关地址（内网 IP/端口无对外意义）；未知来源默认隐去
+  const isLocal = state.cfg?.provider_local ?? currentProvider()?.local ?? true;
+  const gw = isLocal ? "" : (state.cfg?.gateway_url || currentProvider()?.gateway_url || "").replace(/^https?:\/\//,"");
+  const provLine = [prov, gw].filter(Boolean).join(" · ") +
+    ` · 并发 ${[...new Set(all.map(p=>p.concurrency))].sort((a,b)=>a-b).join(" / ")}` +
+    ` · 上下文 ${fmtK(Math.min(...all.map(p=>p.ctx_target)))}~${fmtK(Math.max(...all.map(p=>p.ctx_target)))}`;
+
+  // meta：首格固定「模型 = 模型名 · 量化」（deployments[].quant，未配只显模型名），
+  // 其后硬件/框架/参数；仅本地部署展示——云端 deployments 只承载 max_ctx 钳制
+  // （ADR-0020），其 label 命中映射会产出「部署: 模型名」噪声单元格
+  const mi = isLocal ? modelInfo(model) : null;
+  const meta = mi ? [
+    ["模型", model + (mi.quant ? ` · ${mi.quant}` : "")],
+    ["硬件环境", mi.hardware],
+    ["推理框架", mi.framework],
+    ["核心参数", mi.params],
+  ].filter(([,v]) => v) : [];
+  const metaHtml = meta.length
+    ? `<div class="sc-meta" style="grid-template-columns:repeat(${Math.min(meta.length,4)},1fr)">` +
+      meta.map(([k,v]) => `<div><span class="k">${k}</span><span class="v">${esc(v)}</span></div>`).join("") +
+      `</div>` : "";
+
+  // 各场景区块：速度范围 + 峰值上下文 + 并发对比
+  const imgs = captureScenarioCharts(model, scens);
+  const scenHtml = scens.map(sc => {
+    const pts = all.filter(p=>p.scenario===sc);
+    const s = scenarioStats(pts);
+    const cells = [];
+    if(s.preRange) cells.push(`<div class="sc-stat s1"><div class="k">Prefill 速度范围</div>
+      <div class="n">${fmtNum(s.preRange[0])}–${fmtNum(s.preRange[1])}<small> tok/s</small></div>
+      <div class="t">峰值 @ ${fmtK(s.prePeak.ctx)}</div></div>`);
+    if(s.decRange) cells.push(`<div class="sc-stat s2"><div class="k">Decode 速度范围</div>
+      <div class="n">${fmtNum(s.decRange[0])}–${fmtNum(s.decRange[1])}<small> tok/s</small></div>
+      <div class="t">峰值 @ ${fmtK(s.decPeak.ctx)}</div></div>`);
+    if(s.preAvg) cells.push(`<div class="sc-stat s3"><div class="k">Prefill 均值</div>
+      <div class="n">${fmtNum(s.preAvg)}<small> tok/s</small></div>
+      <div class="t">全档上下文均值</div></div>`);
+    if(s.baseDecAvg) cells.push(`<div class="sc-stat s4"><div class="k">Decode 均值</div>
+      <div class="n">${fmtNum(s.baseDecAvg)}<small> tok/s</small></div>
+      <div class="t">并发 ${s.baseConc}</div></div>`);
+    if(s.hiTotal) cells.push(`<div class="sc-stat s5"><div class="k">并发 ${s.hiConc} 总吞吐均值</div>
+      <div class="n">${fmtNum(s.hiTotal)}<small> tok/s</small></div>
+      <div class="t">${s.baseDecAvg ? "≈ " + round1(s.hiTotal/s.baseDecAvg) + " × 单请求" : ""}</div></div>`);
+    const chartImgs = imgs[sc] || {};
+    return `<div class="sc-scen-block">
+      <div class="sc-scen-head"><span class="bar"></span><span class="name">${SCEN_LABEL[sc]||sc}</span></div>
+      <div class="sc-stats">${cells.join("")}</div>
+      <div class="sc-charts">
+        ${chartImgs.prefill ? `<div class="sc-chart-cell"><img src="${chartImgs.prefill}" alt="${sc} prefill 曲线"><div class="cap">Prefill / TTFT · ${SCEN_LABEL[sc]||sc}</div></div>` : ""}
+        ${chartImgs.decode ? `<div class="sc-chart-cell"><img src="${chartImgs.decode}" alt="${sc} decode 曲线"><div class="cap">Decode · ${SCEN_LABEL[sc]||sc}</div></div>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+
+  return `<div class="speed-card" data-model="${esc(model)}">
+    <div class="sc-head">
+      <div class="sc-brand">
+        <div class="sc-logo">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        </div>
+        <div>
+          <div class="sc-title">LLM 测速卡片</div>
+          <div class="sc-sub">Local LLM Speed Report · prefill / decode</div>
+        </div>
+      </div>
+      <div class="sc-date">测试时间<br>${state.cfg?.started_at || new Date().toLocaleString("zh-CN")}</div>
+    </div>
+    <div class="sc-model">${esc(model)}</div>
+    <div class="sc-prov">${esc(provLine)}</div>
+    ${metaHtml}
+    ${scenHtml}
+    <div class="sc-foot">Prefill 速度 = 实际 prompt tokens ÷（TTFT − 网络往返基线）· Decode 速度 = 生成 tokens ÷ 生成耗时 · 由 LLM-SPEED 生成</div>
+  </div>`;
+}
+/* 按模型平铺生成卡片（多模型各一张）；历史载入时自动调用并滚动到位 */
+function genCards(){
+  const models = [...new Set(allPoints().map(p => p.model))];
+  if(!models.length){ alert("当前暂无测速结果"); return; }
+  $("#cardWrap").innerHTML = models.map(cardHTML).join("");
+  $("#btnDl").disabled = false;
+  $("#cardWrap").scrollIntoView({behavior:"smooth", block:"nearest"});
+}
+/* 离屏渲染各场景图表并导出 base64 */
+function captureScenarioCharts(model, scens){
+  const out = {};
+  for(const sc of scens){
+    const pts = [...state.points.values()].filter(p => p.model===model && p.scenario===sc);
+    if(!pts.length) continue;
+    offChart.setOption({...buildChartOpt(pts, "prefill", `Prefill / TTFT · ${SCEN_LABEL[sc]||sc}`), animation:false}, true);
+    const pre = offChart.getDataURL({pixelRatio:2, backgroundColor:"#FFFFFF"});
+    offChart.setOption({...buildChartOpt(pts, "decode", `Decode · ${SCEN_LABEL[sc]||sc}`), animation:false}, true);
+    const dec = offChart.getDataURL({pixelRatio:2, backgroundColor:"#FFFFFF"});
+    out[sc] = {prefill: pre, decode: dec};
+  }
+  return out;
+}
+async function downloadCard(){
+  const cards = document.querySelectorAll("#cardWrap .speed-card");
+  for(const card of cards){   // 多模型平铺：逐张导出 PNG
+    const canvas = await html2canvas(card, {scale:2, backgroundColor:"#FFFFFF", useCORS:true});
+    const a = document.createElement("a");
+    a.download = `speed-card-${card.dataset.model}-${Date.now()}.png`;
+    a.href = canvas.toDataURL("image/png");
+    a.click();
+  }
+}
+
+/* ---------------- 历史记录 ---------------- */
+async function loadHistoryList(){
+  const d = await (await fetch("/api/bench/history")).json();
+  $("#historySel").innerHTML = d.history.map(h =>
+    `<option value="${h.run_id}">${h.started_at||""} · ${(h.models||[]).join(",")} · ${h.n_points}点</option>`).join("")
+    || '<option value="">暂无记录</option>';
+  renderActiveRuns();
+}
+/* 进行中的任务（多标签页入口，ADR-0021）：任意标签页可进入正在跑的测速 */
+async function renderActiveRuns(){
+  const box = $("#activeRuns");
+  let runs = [];
+  try{ runs = (await (await fetch("/api/bench/active")).json()).runs || []; }
+  catch(e){ box.innerHTML = ""; return; }
+  box.innerHTML = runs.map(r => `
+    <div class="arun">
+      <span class="dot"></span>
+      <span class="meta">测速进行中：<b>${esc((r.models||[]).join(", "))}</b>
+        · ${esc(r.provider||"")} · ${r.done_points}/${r.total_points} 点 · 开始于 ${esc(r.started_at||"")}</span>
+      <button class="btn-ghost" onclick='enterRun(${JSON.stringify(r.run_id)}, ${r.total_points})'>进入</button>
+    </div>`).join("");
+}
+/* 进入正在运行的任务：重放历史事件（seq 去重）后接续实时流，状态从零重建 */
+function enterRun(rid, totalPoints){
+  if(state.running && state.runId === rid) return;
+  if(state.es) state.es.close();
+  state.points.clear(); state.maxSeq = -1; state.activeReqs.clear();
+  state.donePoints = 0; state.totalPoints = totalPoints || 0;
+  $("#liveTable tbody").innerHTML = "";
+  renderAll(); resetKpis();
+  $("#progWrap").hidden = false;
+  state.runId = rid; state.running = true; state.cfg = null;   // cfg 事件随回放到达
+  $("#btnStart").hidden = true; $("#btnStop").hidden = false; $("#btnDl").disabled = true;
+  setPhase("run");
+  setPill("测速运行中…", "run");
+  state.es = new EventSource(`/api/bench/events/${rid}`);
+  state.es.onmessage = e => onEvent(JSON.parse(e.data));
+  state.es.onerror = () => {};
+}
+async function deleteHistory(){
+  const id = $("#historySel").value;
+  if(!id || !confirm("删除该条历史记录？")) return;
+  await fetch(`/api/bench/history/${encodeURIComponent(id)}`, {method:"DELETE"});
+  await loadHistoryList();
+}
+async function clearHistory(){
+  if(!confirm("清空全部历史记录？不可恢复。")) return;
+  await fetch("/api/bench/history", {method:"DELETE"});
+  await loadHistoryList();
+}
+async function loadHistory(){
+  const id = $("#historySel").value;
+  if(!id) return;
+  const d = await (await fetch(`/api/bench/history/${id}`)).json();
+  state.points.clear();
+  (d.results||[]).forEach(p => state.points.set(pointKey(p), p));
+  state.donePoints = state.points.size;
+  state.totalPoints = state.points.size;
+  if(d.cfg){
+    state.cfg = {...d.cfg, started_at: d.started_at};
+    if(d.cfg.provider && [...$("#fProvider").options].some(o => o.value === d.cfg.provider)){
+      $("#fProvider").value = d.cfg.provider;   // 部署环境跟随记录所属 provider
+    }
+    syncDeployCard();
+  }
+  setPhase("done");   // 载入历史直接进入统计展示阶段
+  resetKpis();
+  $("#kpiPoints").innerHTML = `${state.donePoints} <small>个点</small>`;
+  $("#progWrap").hidden = true;
+  renderAll();
+  genCards();   // 载入历史：直接展示卡片数据并滚动到卡片位置
+}
+
+init();
+</script>
+</body>
+</html>
