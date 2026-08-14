@@ -49,7 +49,7 @@ nav{background:var(--card); border-bottom:1px solid var(--border); padding:12px 
   color:var(--primary); display:flex; align-items:center; justify-content:center; flex:none}
 nav h1{font-size:15px; font-weight:600}
 nav .tag{font-size:12px; color:var(--ink-4)}
-#statusPill{margin-left:auto; display:inline-flex; align-items:center; gap:7px;
+#statusPill{display:inline-flex; align-items:center; gap:7px;
   padding:5px 14px; border-radius:999px; font-size:12.5px; font-weight:500;
   background:var(--card); color:var(--ink-3); border:1px solid var(--border-2);
   transition:color .2s, border-color .2s}
@@ -69,7 +69,7 @@ nav .tag{font-size:12px; color:var(--ink-4)}
 .head-actions .sel-inline{display:flex; align-items:center; gap:6px}
 .head-actions .sel-inline span{color:var(--ink-3); font-size:12.5px}
 .head-actions select{width:auto; min-width:150px; padding:7px 10px; font-size:13px}
-#statusMsg{color:var(--ink-3); font-size:12.5px; min-height:20px; margin-bottom:12px}
+#statusMsg{color:var(--ink-3); font-size:12.5px; min-height:20px; margin-bottom:12px; transition:color .15s}
 #statusMsg.err{color:var(--red)}
 
 /* ============ KPI 卡片行 ============ */
@@ -124,18 +124,73 @@ textarea{resize:vertical; min-height:auto}
 /* 朴素勾选项（无放大效果） */
 .ckrow{display:flex; flex-wrap:wrap; gap:2px 0}
 .ck{display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--ink-2);
-  padding:4px 14px 4px 0; cursor:pointer; user-select:none}
+  padding:4px 14px 4px 6px; cursor:pointer; user-select:none; border-radius:6px;
+  transition:background .12s}
+.ck:hover{background:var(--bg)}
 .ck input{accent-color:var(--primary); width:14px; height:14px; cursor:pointer}
+
+/* ============ Provider / 部署配置抽屉（与测速配置完全分离，ADR-0027） ============ */
+#drawerRoot{position:fixed; inset:0; z-index:100}
+#drawerScrim{position:absolute; inset:0; background:rgba(17,24,39,.45);
+  opacity:0; transition:opacity .2s ease; cursor:default}
+#cfgDrawer{position:absolute; top:0; right:0; height:100dvh; width:min(560px,100vw);
+  background:var(--bg); border-left:1px solid var(--border);
+  box-shadow:-16px 0 40px rgba(17,24,39,.12);
+  transform:translateX(102%); transition:transform .28s cubic-bezier(.32,.72,.05,1);
+  display:flex; flex-direction:column; visibility:hidden}
+#drawerRoot.open #drawerScrim{opacity:1}
+#drawerRoot.open #cfgDrawer{transform:none; visibility:visible}
+.dr-head{display:flex; align-items:flex-start; gap:12px; padding:16px 20px;
+  background:var(--card); border-bottom:1px solid var(--border); flex:none}
+.dr-head h3{font-size:15px; font-weight:600}
+.dr-sub{color:var(--ink-4); font-size:12px; margin-top:2px}
+.dr-body{flex:1; overflow-y:auto; padding:20px; overscroll-behavior:contain}
+.dr-foot{padding:14px 20px; background:var(--card); border-top:1px solid var(--border);
+  display:flex; align-items:center; gap:12px; flex:none}
+/* 抽屉内分组区块 */
+.dsec{background:var(--card); border:1px solid var(--border); border-radius:12px;
+  padding:16px 18px; box-shadow:var(--shadow)}
+.dsec + .dsec{margin-top:16px}
+.dsec > .ds-t{font-size:11.5px; font-weight:600; color:var(--ink-4);
+  letter-spacing:.8px; margin-bottom:12px}
+/* 部署环境编辑条目：头部行（折叠/删除）+ 字段体 */
+.dep-edit{border:1px solid var(--border); border-radius:10px; background:var(--bg); margin-top:10px;
+  transition:border-color .15s}
+.dep-edit:focus-within{border-color:var(--border-2)}
+.dep-head{display:flex; align-items:center; gap:8px; padding:9px 8px 9px 12px;
+  cursor:pointer; user-select:none; border-radius:10px}
+.dep-head .chev{transition:transform .18s ease; color:var(--ink-4)}
+.dep-edit.collapsed .chev{transform:rotate(-90deg)}
+.dep-head .t{flex:1; min-width:0; font-size:13px; font-weight:600; color:var(--ink-2);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.dep-head .t small{color:var(--ink-4); font-weight:400}
+.dep-body{padding:2px 12px 12px}
+.dep-edit.collapsed .dep-body{display:none}
+.dep-body label.f{margin-top:10px}
+.dep-body .grid2 label.f{margin-top:0}
+.dep-body .grid2 + .grid2 label.f{margin-top:10px}
+/* 卡片入场（阶段切换时的事实/统计区） */
+@keyframes rise{from{opacity:0; transform:translateY(6px)} to{opacity:1; transform:none}}
+.reveal{animation:rise .25s ease-out}
 
 /* ============ 按钮 ============ */
 button{border:none; border-radius:8px; padding:9px 16px; font-size:13px; font-weight:500;
-  display:inline-flex; align-items:center; gap:7px; transition:background .15s, transform .06s}
+  display:inline-flex; align-items:center; gap:7px;
+  transition:background .15s, border-color .15s, color .15s, transform .06s}
 button:active:not(:disabled){transform:scale(.97)}
 button:disabled{opacity:.45; cursor:not-allowed}
 .btn-primary{background:var(--primary); color:#fff}
 .btn-primary:hover:not(:disabled){background:var(--primary-hover)}
 .btn-ghost{background:var(--card); border:1px solid var(--border-2); color:var(--ink-2)}
 .btn-ghost:hover:not(:disabled){background:var(--bg)}
+/* 危险动作：幽灵按钮红色化（删除/清空/清除 Key），与主操作视觉分离 */
+.btn-ghost.danger:hover:not(:disabled){border-color:#FECACA; color:var(--red); background:var(--red-soft)}
+/* 顶栏小按钮与图标按钮（抽屉关闭/部署删除等） */
+.btn-ghost.nav-btn{padding:7px 12px; font-size:12.5px}
+.icon-btn{width:34px; height:34px; padding:0; justify-content:center; flex:none;
+  background:transparent; border-radius:8px; color:var(--ink-3)}
+.icon-btn:hover:not(:disabled){background:var(--bg); color:var(--ink-2)}
+.icon-btn.danger:hover:not(:disabled){background:var(--red-soft); color:var(--red)}
 .btnrow{display:flex; gap:8px; margin-top:16px; flex-wrap:wrap}
 
 /* ============ 表格 ============ */
@@ -227,6 +282,9 @@ tr.fade td{opacity:.45}
     </div>
     <h1>LLM-SPEED</h1>
     <span class="tag">LLM Benchmark Console</span>
+    <button class="btn-ghost nav-btn" style="margin-left:auto" onclick="openCfgDrawer()">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+      Provider 管理</button>
     <span id="statusPill" role="status"><span class="dot"></span><span id="statusText">空闲</span></span>
   </div>
 </nav>
@@ -262,6 +320,7 @@ tr.fade td{opacity:.45}
           <div class="btnrow" style="margin-top:10px">
             <button class="btn-ghost" onclick="refreshModels()">
               <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>刷新模型列表</button>
+            <button class="btn-ghost" onclick="openCfgDrawer()">管理 Provider / 部署…</button>
           </div>
           <label class="f">被测模型（可多选，逐一顺序测试）</label>
           <div class="btnrow" style="margin:0 0 6px">
@@ -312,38 +371,6 @@ tr.fade td{opacity:.45}
         </div>
       </div>
 
-      <div class="card" id="cfgEditCard">
-        <div class="card-head"><h3>Provider / 部署配置</h3><small>编辑后写入服务端 config.json 与 .env</small></div>
-        <div class="card-body">
-          <div class="btnrow" style="margin:0 0 10px">
-            <select id="ceProv" style="flex:1" aria-label="编辑目标 provider"></select>
-            <button class="btn-ghost" onclick="ceAdd()">新增</button>
-            <button class="btn-ghost" onclick="ceDel()">删除</button>
-          </div>
-          <div class="grid2">
-            <div><label class="f" for="ceName">名称（.env 的 API_KEY_&lt;名称&gt; 后缀）</label>
-              <input type="text" id="ceName" placeholder="如 local / deepseek"></div>
-            <div><label class="f" for="ceLabel">显示标签</label>
-              <input type="text" id="ceLabel" placeholder="如 本地网关（LiteLLM）"></div>
-          </div>
-          <label class="f" for="ceUrl">网关地址</label>
-          <input type="text" id="ceUrl" placeholder="http://127.0.0.1:4000 或 https://api.deepseek.com">
-          <label class="ck" style="margin-top:10px"><input type="checkbox" id="ceLocal"> 本地部署（允许并发测试；云端强制单发）</label>
-          <label class="f" for="ceKey">API Key（只写入服务端 .env，页面不回显）</label>
-          <div class="btnrow" style="margin:0">
-            <input type="password" id="ceKey" style="flex:1" placeholder="已配置或留空则保持不变" autocomplete="off">
-            <button class="btn-ghost" onclick="ceClearKey()">清除 Key</button>
-          </div>
-          <label class="f">部署环境（模型 → 量化/硬件/框架/参数；卡片 meta 与超窗钳制来源）</label>
-          <div id="ceDeps"></div>
-          <button class="btn-ghost" onclick="ceDepAdd()" style="margin-top:8px">+ 添加部署环境</button>
-          <div class="btnrow">
-            <button class="btn-primary" onclick="ceSave()">保存配置</button>
-            <span class="hint" style="margin:auto 0">provider 名称决定 .env 的 key 映射，创建后建议不再改名</span>
-          </div>
-        </div>
-      </div>
-
       <div class="card" id="deployCard" hidden>
         <div class="card-head"><h3>部署环境</h3></div>
         <div class="card-body" id="deployList"></div>
@@ -360,8 +387,8 @@ tr.fade td{opacity:.45}
         <div style="display:flex; gap:8px; flex-wrap:wrap">
           <select id="historySel" style="flex:1; min-width:240px" aria-label="历史测速记录"></select>
           <button class="btn-ghost" onclick="loadHistory()">载入</button>
-          <button class="btn-ghost" onclick="deleteHistory()">删除所选</button>
-          <button class="btn-ghost" onclick="clearHistory()">清空全部</button>
+          <button class="btn-ghost danger" onclick="deleteHistory()">删除所选</button>
+          <button class="btn-ghost danger" onclick="clearHistory()">清空全部</button>
         </div>
       </div>
     </div>
@@ -437,6 +464,62 @@ tr.fade td{opacity:.45}
       </div>
   </section>
 </div>
+<!-- ========== Provider / 部署配置抽屉：页面级配置，与测速配置分离（ADR-0027） ========== -->
+<div id="drawerRoot" hidden>
+  <div id="drawerScrim" onclick="closeCfgDrawer()"></div>
+  <aside id="cfgDrawer" role="dialog" aria-modal="true" aria-labelledby="cfgDrawerTitle">
+    <header class="dr-head">
+      <div style="flex:1; min-width:0">
+        <h3 id="cfgDrawerTitle">Provider / 部署配置</h3>
+        <p class="dr-sub">写入服务端 config.json 与 .env · 保存后即时生效，无需重启</p>
+      </div>
+      <button class="icon-btn" onclick="closeCfgDrawer()" aria-label="关闭配置抽屉">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </header>
+    <div class="dr-body">
+      <div class="dsec">
+        <div class="ds-t">PROVIDER</div>
+        <div class="btnrow" style="margin:0">
+          <select id="ceProv" style="flex:1" aria-label="编辑目标 provider"></select>
+          <button class="btn-ghost" onclick="ceAdd()">新增</button>
+          <button class="btn-ghost danger" onclick="ceDel()">删除</button>
+        </div>
+      </div>
+      <div class="dsec">
+        <div class="ds-t">基本信息</div>
+        <div class="grid2">
+          <div><label class="f" for="ceName">名称（.env 的 API_KEY_&lt;名称&gt; 后缀）</label>
+            <input type="text" id="ceName" placeholder="如 local / deepseek"></div>
+          <div><label class="f" for="ceLabel">显示标签</label>
+            <input type="text" id="ceLabel" placeholder="如 本地网关（LiteLLM）"></div>
+        </div>
+        <label class="f" for="ceUrl">网关地址</label>
+        <input type="text" id="ceUrl" placeholder="http://127.0.0.1:4000 或 https://api.deepseek.com">
+        <label class="ck" style="margin-top:10px"><input type="checkbox" id="ceLocal"> 本地部署（允许并发测试；云端强制单发）</label>
+      </div>
+      <div class="dsec">
+        <div class="ds-t">API KEY</div>
+        <div class="btnrow" style="margin:0">
+          <input type="password" id="ceKey" style="flex:1" placeholder="已配置或留空则保持不变" autocomplete="off">
+          <button class="btn-ghost danger" onclick="ceClearKey()">清除 Key</button>
+        </div>
+        <div class="hint">只写入服务端 .env，页面永不回显；留空保持不变</div>
+      </div>
+      <div class="dsec">
+        <div class="ds-t">部署环境</div>
+        <div class="hint" style="margin:0 0 4px">模型 → 量化/硬件/框架/参数/max_ctx；测速卡片 meta 与超窗钳制的来源</div>
+        <div id="ceDeps"></div>
+        <button class="btn-ghost" onclick="ceDepAdd()" style="margin-top:10px">+ 添加部署环境</button>
+      </div>
+    </div>
+    <footer class="dr-foot">
+      <button class="btn-primary" id="btnCeSave" onclick="ceSave()">保存配置</button>
+      <span class="hint" style="margin:0">名称决定 .env 的 key 映射，创建后建议不改名</span>
+    </footer>
+  </aside>
+</div>
+
 <div id="offChartBox" aria-hidden="true"><div id="offChart"></div></div>
 
 <script>
@@ -546,11 +629,13 @@ function syncDeployCard(){
   </div>`).join("");
 }
 
-/* ---------------- 配置编辑器（ADR-0026）：provider / 部署环境写回 config.json 与 .env ---------------- */
-state.cfgEdit = { providers: [], keyClear: false };
-function ceCurrent(){ return state.cfgEdit.providers.find(p => p.name === $("#ceProv").value); }
+/* ---------------- 配置编辑器（ADR-0026/0027）：抽屉承载，provider / 部署环境写回
+   config.json 与 .env；表单改动先暂存内存（ceStash），切换/增删不重丢，保存才上行 -------- */
+state.cfgEdit = { providers: [], keyClear: false, dirty: false, selName: "", lastFocus: null };
+function ceCurrent(){ return state.cfgEdit.providers.find(p => p.name === state.cfgEdit.selName) || null; }
 function initCfgEditor(keepName){
   state.cfgEdit.providers = state.providers.map(p => ({...p, deployments:(p.deployments||[]).map(d => ({...d}))}));
+  state.cfgEdit.dirty = false;
   renderCeProv(keepName);
 }
 function renderCeProv(keepName){
@@ -559,8 +644,15 @@ function renderCeProv(keepName){
   sel.innerHTML = state.cfgEdit.providers.map(p =>
     `<option value="${esc(p.name)}">${esc(p.label || p.name)}（${esc(p.name)}）</option>`).join("");
   if([...sel.options].some(o => o.value === keep)) sel.value = keep;
+  state.cfgEdit.selName = sel.value;
   fillCfgForm();
 }
+/* 切换编辑目标：先把当前表单改动暂存回内存（含部署环境），再切——改动不丢 */
+$("#ceProv").addEventListener("change", () => {
+  ceStash();
+  state.cfgEdit.selName = $("#ceProv").value;
+  fillCfgForm();
+});
 function fillCfgForm(){
   const p = ceCurrent();
   if(!p) return;
@@ -568,14 +660,49 @@ function fillCfgForm(){
   $("#ceLabel").value = p.label;
   $("#ceUrl").value = p.gateway_url;
   $("#ceLocal").checked = !!p.local;
-  state.keyClear = false;
+  state.cfgEdit.keyClear = false;
   $("#ceKey").value = "";
   $("#ceKey").placeholder = p.has_key ? "已配置（留空保持不变）" : "未配置";
   renderCeDeps();
 }
+/* 抽屉开合：浮于所有阶段之上；未保存改动关闭前确认；ESC / 遮罩点击可关 */
+function openCfgDrawer(){
+  state.cfgEdit.lastFocus = document.activeElement;
+  const root = $("#drawerRoot");
+  root.hidden = false;
+  requestAnimationFrame(() => requestAnimationFrame(() => root.classList.add("open")));
+  document.addEventListener("keydown", onDrawerKey);
+  $("#ceProv").focus();
+}
+function closeCfgDrawer(){
+  if(state.cfgEdit.dirty &&
+     !confirm("配置有未保存的修改，确定关闭？（只有「保存配置」才会写入服务端）")) return;
+  document.removeEventListener("keydown", onDrawerKey);
+  const root = $("#drawerRoot");
+  root.classList.remove("open");
+  setTimeout(() => { root.hidden = true; }, 300);
+  initCfgEditor(state.cfgEdit.selName);   // 丢弃未保存改动，回到服务端权威状态
+  const lf = state.cfgEdit.lastFocus;
+  if(lf && lf.isConnected) lf.focus();
+}
+function onDrawerKey(e){
+  if(e.key === "Escape"){ closeCfgDrawer(); return; }
+  if(e.key !== "Tab") return;   // 焦点圈定在抽屉内
+  const f = [...$("#cfgDrawer").querySelectorAll("button,input,select,textarea")]
+    .filter(el => !el.disabled && el.offsetParent !== null);
+  if(!f.length) return;
+  if(e.shiftKey && document.activeElement === f[0]){ f[f.length-1].focus(); e.preventDefault(); }
+  else if(!e.shiftKey && document.activeElement === f[f.length-1]){ f[0].focus(); e.preventDefault(); }
+}
+/* 抽屉内任何字段改动都标记未保存（关闭守卫用）；仅切换编辑目标不算改动 */
+$("#cfgDrawer").addEventListener("input", e => {
+  if(e.target.id !== "ceProv") state.cfgEdit.dirty = true;
+});
 function ceAdd(){
+  ceStash();
   const name = "provider-" + Date.now().toString(36).slice(-4);
   state.cfgEdit.providers.push({name, label:"", gateway_url:"", local:false, deployments:[], has_key:false});
+  state.cfgEdit.dirty = true;
   renderCeProv(name);
   $("#ceName").focus();
 }
@@ -583,50 +710,83 @@ function ceDel(){
   const p = ceCurrent();
   if(!p || !confirm(`删除 provider「${p.label || p.name}」？对应 .env 的 Key 行不会自动删除，可先「清除 Key」。`)) return;
   state.cfgEdit.providers = state.cfgEdit.providers.filter(x => x.name !== p.name);
+  state.cfgEdit.dirty = true;
   renderCeProv(state.cfgEdit.providers[0]?.name);
 }
 function ceClearKey(){
-  state.keyClear = true;
+  state.cfgEdit.keyClear = true;
   $("#ceKey").value = "";
   $("#ceKey").placeholder = "保存后将清除 .env 中的 Key";
 }
-$("#ceKey").addEventListener("input", () => { state.keyClear = false; });   // 重新输入即取消清除
+$("#ceKey").addEventListener("input", () => { state.cfgEdit.keyClear = false; });   // 重新输入即取消清除
+/* 部署条目：头部行（点击折叠/展开）+ 删除按钮 + 字段体；标签输入实时同步到头部 */
 function renderCeDeps(){
   const p = ceCurrent();
   const box = $("#ceDeps");
-  box.innerHTML = (p.deployments || []).map(d => `
-    <div class="dep-edit" style="border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-top:10px;background:var(--bg)">
-      <div class="grid2">
-        <div><label class="f" style="margin-top:0">部署标签</label><input type="text" class="d-label" value="${esc(d.label||"")}"></div>
-        <div><label class="f" style="margin-top:0">适用模型（逗号分隔）</label><input type="text" class="d-models" value="${esc((d.models||[]).join(", "))}"></div>
+  box.innerHTML = (p.deployments || []).map((d, i) => `
+    <div class="dep-edit${d._collapsed ? " collapsed" : ""}">
+      <div class="dep-head">
+        <svg class="ic chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+        <span class="t"><span class="tt">${esc(d.label || `部署环境 ${i+1}`)}</span>${(d.models||[]).length ? `<small>　${esc(d.models.join("、"))}</small>` : ""}</span>
+        <button type="button" class="icon-btn danger dep-del" aria-label="删除此部署">
+          <svg class="ic" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        </button>
       </div>
-      <div class="grid2">
-        <div><label class="f">量化（卡片首格展示）</label><input type="text" class="d-quant" value="${esc(d.quant||"")}"></div>
-        <div><label class="f">上下文上限 max_ctx（tokens）</label><input type="number" class="d-maxctx" value="${d.max_ctx||""}" placeholder="如 196608"></div>
+      <div class="dep-body">
+        <div class="grid2">
+          <div><label class="f">部署标签</label><input type="text" class="d-label" value="${esc(d.label||"")}"></div>
+          <div><label class="f">适用模型（逗号分隔）</label><input type="text" class="d-models" value="${esc((d.models||[]).join(", "))}"></div>
+        </div>
+        <div class="grid2">
+          <div><label class="f">量化（卡片首格展示）</label><input type="text" class="d-quant" value="${esc(d.quant||"")}"></div>
+          <div><label class="f">上下文上限 max_ctx（tokens）</label><input type="number" class="d-maxctx" value="${d.max_ctx||""}" placeholder="如 196608"></div>
+        </div>
+        <label class="f">硬件环境</label><input type="text" class="d-hardware" value="${esc(d.hardware||"")}">
+        <label class="f">推理框架</label><input type="text" class="d-framework" value="${esc(d.framework||"")}">
+        <label class="f">核心参数</label><input type="text" class="d-params" value="${esc(d.params||"")}">
       </div>
-      <label class="f">硬件环境</label><input type="text" class="d-hardware" value="${esc(d.hardware||"")}">
-      <label class="f">推理框架</label><input type="text" class="d-framework" value="${esc(d.framework||"")}">
-      <label class="f">核心参数</label><input type="text" class="d-params" value="${esc(d.params||"")}">
-      <button class="btn-ghost dep-del" style="margin-top:8px">删除此部署</button>
     </div>`).join("") || '<span class="hint">暂无部署环境；本地模型建议配一条（量化/硬件/框架/参数/max_ctx）</span>';
 }
 $("#ceDeps").addEventListener("click", e => {
-  const b = e.target.closest(".dep-del");
-  if(!b) return;
-  b.closest(".dep-edit").remove();
+  const del = e.target.closest(".dep-del");
+  if(del){
+    const p = ceCurrent();
+    const idx = [...document.querySelectorAll("#ceDeps .dep-edit")].indexOf(del.closest(".dep-edit"));
+    ceStash();
+    p.deployments.splice(idx, 1);
+    state.cfgEdit.dirty = true;
+    renderCeDeps();
+    return;
+  }
+  const head = e.target.closest(".dep-head");
+  if(head) head.closest(".dep-edit").classList.toggle("collapsed");
+});
+$("#ceDeps").addEventListener("input", e => {
+  if(e.target.classList.contains("d-label")){
+    const tt = e.target.closest(".dep-edit").querySelector(".dep-head .tt");
+    tt.textContent = e.target.value.trim() || "部署环境";
+  }
 });
 function ceDepAdd(){
+  ceStash();
   const p = ceCurrent();
   (p.deployments || (p.deployments = [])).push({});
+  state.cfgEdit.dirty = true;
   renderCeDeps();
+  const items = document.querySelectorAll("#ceDeps .dep-edit");
+  const lastEl = items[items.length-1];
+  if(lastEl){ lastEl.querySelector(".d-label").focus(); lastEl.scrollIntoView({block:"nearest"}); }
 }
-function collectCeForm(){
+/* 把当前表单（含部署环境 DOM）暂存回内存数据源；折叠状态也跟随保存 */
+function ceStash(){
   const p = ceCurrent();
+  if(!p) return;
   p.name = $("#ceName").value.trim();
   p.label = $("#ceLabel").value.trim();
   p.gateway_url = $("#ceUrl").value.trim();
   p.local = $("#ceLocal").checked;
-  p.deployments = [...document.querySelectorAll("#ceDeps .dep-edit")].map(el => ({
+  const prev = p.deployments || [];
+  p.deployments = [...document.querySelectorAll("#ceDeps .dep-edit")].map((el, i) => ({
     label: el.querySelector(".d-label").value.trim(),
     models: el.querySelector(".d-models").value.split(/[,，]/).map(s => s.trim()).filter(Boolean),
     quant: el.querySelector(".d-quant").value.trim(),
@@ -634,25 +794,33 @@ function collectCeForm(){
     hardware: el.querySelector(".d-hardware").value.trim(),
     framework: el.querySelector(".d-framework").value.trim(),
     params: el.querySelector(".d-params").value.trim(),
+    _collapsed: el.classList.contains("collapsed") || prev[i]?._collapsed || undefined,
   }));
-  return p;
 }
 async function ceSave(){
-  const p = collectCeForm();
-  if(!p.name || !p.gateway_url){ setPill("provider 名称与网关地址不能为空", "err"); return; }
+  ceStash();
+  const p = ceCurrent();
+  if(!p || !p.name || !p.gateway_url){ setPill("provider 名称与网关地址不能为空", "err"); return; }
   const keyVal = $("#ceKey").value.trim();
-  const r = await fetch("/api/config", {method:"PUT", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({providers: state.cfgEdit.providers.map(q => ({
-      name:q.name, label:q.label, gateway_url:q.gateway_url, local:q.local,
-      deployments:q.deployments}))})});
-  if(!r.ok){ const d = await r.json().catch(()=>({})); return setPill("保存失败：" + (d.detail || ("HTTP " + r.status)), "err"); }
-  if(state.keyClear || keyVal){
-    const kr = await fetch("/api/config/key", {method:"PUT", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({provider: p.name, key: keyVal, clear: state.keyClear})});
-    if(!kr.ok){ const d = await kr.json().catch(()=>({})); return setPill("配置已保存，但 Key 写入失败：" + (d.detail || kr.status), "err"); }
+  const btn = $("#btnCeSave");
+  btn.disabled = true; btn.textContent = "保存中…";
+  try{
+    const r = await fetch("/api/config", {method:"PUT", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({providers: state.cfgEdit.providers.map(q => ({
+        name:q.name, label:q.label, gateway_url:q.gateway_url, local:q.local,
+        deployments:(q.deployments||[]).map(({_collapsed, ...d}) => d)}))})});
+    if(!r.ok){ const d = await r.json().catch(()=>({})); return setPill("保存失败：" + (d.detail || ("HTTP " + r.status)), "err"); }
+    if(state.cfgEdit.keyClear || keyVal){
+      const kr = await fetch("/api/config/key", {method:"PUT", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({provider: p.name, key: keyVal, clear: state.cfgEdit.keyClear})});
+      if(!kr.ok){ const d = await kr.json().catch(()=>({})); return setPill("配置已保存，但 Key 写入失败：" + (d.detail || kr.status), "err"); }
+    }
+    state.cfgEdit.dirty = false;
+    setPill("配置已保存并即时生效", "");
+    await reloadConfig(p.name);
+  } finally {
+    btn.disabled = false; btn.textContent = "保存配置";
   }
-  setPill("配置已保存并即时生效", "");
-  await reloadConfig(p.name);
 }
 /* 保存后整体重载：provider 下拉/编辑器/部署展示/并发 UI/模型列表全部跟随新配置 */
 async function reloadConfig(keepName){
@@ -665,6 +833,7 @@ async function reloadConfig(keepName){
     `<option value="${esc(p.name)}">${esc(p.label)}（${esc(p.gateway_url.replace(/^https?:\/\//,""))}）</option>`).join("");
   if([...sel.options].some(o => o.value === keep)) sel.value = keep;
   state.cfgEdit.providers = state.providers.map(p => ({...p, deployments:(p.deployments||[]).map(d => ({...d}))}));
+  state.cfgEdit.dirty = false;
   renderCeProv(keep);
   const cp = currentProvider();
   $("#keyHint").innerHTML = !cp ? "" : (cp.has_key
@@ -676,16 +845,24 @@ async function reloadConfig(keepName){
 }
 
 /* ---------------- 阶段聚焦布局：idle 平铺配置 / run 实时事实 / done 统计分析 ---------------- */
+/* 由隐转显时附带一次轻微入场动画（250ms 位移+淡入，transform 不触发布局抖动） */
+function unhide(el, show){
+  if(!show){ el.hidden = true; return; }
+  if(el.hidden){
+    el.hidden = false;
+    el.classList.remove("reveal"); void el.offsetWidth; el.classList.add("reveal");
+  }
+}
 function setPhase(phase){
   state.phase = phase;
   document.body.dataset.phase = phase;
   const idle = phase === "idle";
   if(idle) document.body.classList.remove("config-force");
   $("#btnToggleCfg").hidden = idle;
-  $("#historyPanel").hidden = phase === "run";   // 历史与参数配置同级，测速中隐藏
-  $("#configPanel").hidden = !idle && !document.body.classList.contains("config-force");
-  $(".kpis").hidden = idle;
-  $("#liveCard").hidden = phase !== "run";
+  unhide($("#historyPanel"), phase !== "run");   // 历史与参数配置同级，测速中隐藏
+  unhide($("#configPanel"), idle || document.body.classList.contains("config-force"));
+  unhide($(".kpis"), !idle);
+  unhide($("#liveCard"), phase === "run");
   updateToggleText();
   showDataSections();
 }
@@ -693,7 +870,7 @@ function setPhase(phase){
 function toggleConfig(){
   if(state.phase === "idle") return;
   const show = document.body.classList.toggle("config-force");
-  $("#configPanel").hidden = !show;
+  unhide($("#configPanel"), show);
   updateToggleText();
 }
 function updateToggleText(){
@@ -756,7 +933,7 @@ async function startRun(){
     setPill("模型/场景/上下文/并发均不能为空", "err");
     if(state.phase !== "idle"){   // 校验失败时展开配置便于修改
       document.body.classList.add("config-force");
-      $("#configPanel").hidden = false;
+      unhide($("#configPanel"), true);
       updateToggleText();
     }
     return;
@@ -985,13 +1162,13 @@ function showDataSections(){
   const run = state.phase === "run";
   const cc = $("#chartCard");
   const wasHidden = cc.hidden;
-  cc.hidden = !has || run;   // 图表属统计分析，完成后才展示
+  unhide(cc, has && !run);   // 图表属统计分析，完成后才展示
   if(wasHidden && !cc.hidden){
     // echarts 在隐藏容器内渲染为 0 尺寸：先显示，再 rAF 构建/重绘
     requestAnimationFrame(() => renderCharts());
   }
-  $("#cardCard").hidden = !has || run;
-  $("#resultCard").hidden = !has;         // 明细表是事实，运行中即累积展示
+  unhide($("#cardCard"), has && !run);
+  unhide($("#resultCard"), has);   // 明细表是事实，运行中即累积展示
 }
 function renderAll(){
   showDataSections();
