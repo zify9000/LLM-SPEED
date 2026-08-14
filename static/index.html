@@ -691,6 +691,8 @@ function finishRun(msg, cls){
   setPill(msg, cls || "");
   loadHistoryList();
   $("#kpiReqs").innerHTML = '0 <small>个</small>';
+  // 完成自动生成测速卡片（ADR-0025）：与历史载入路径一致；无任何测速点跳过
+  if(state.points.size) genCards();
 }
 
 /* ---------------- KPI ---------------- */
@@ -723,6 +725,13 @@ function kpiPush(vSel, wrapSel, fillSel, val, label){
   wrap.title = `${label}：${peak} tok/s`;
   $(fillSel).style.width = (peak ? Math.min(100, val/peak*100) : 0) + "%";
 }
+/* prefill 等待期估值同步 KPI 主数值（ADR-0025）：与实时表同值、以「≈」明示
+   未实测；估值从高往低收敛，**不参与峰值**（峰值条/悬浮峰值只由首 token
+   实测帧与点级权威值推进），既动态又不污染峰值 */
+function kpiPushEst(vSel, val){
+  const el = $(vSel);
+  el.innerHTML = `≈ ${val} <small>tok/s</small>`;
+}
 
 /* ---------------- 实时表格 ---------------- */
 function updateLive(t){
@@ -747,7 +756,10 @@ function updateLive(t){
       // 首 token 到达：prefill 实测读数（请求级），即刻刷新 KPI，不等整点完成（ADR-0018）
       if(t.speed) kpiPush("#kpiPrefill", "#prefillBarWrap", "#prefillBarFill", t.speed, "最快 Prefill");
     } else if(t.speed){
-      c[8].textContent = "≈" + t.speed + " tok/s";   // 等待期估值：若此刻完成的 prefill 速度
+      // 等待期估值：若此刻完成的 prefill 速度。实时表与 KPI 同步显示（标 ≈），
+      // 首 token 实测帧到达后 KPI 切换为实测值（ADR-0018/0025）
+      c[8].textContent = "≈" + t.speed + " tok/s";
+      kpiPushEst("#kpiPrefill", t.speed);
     }
   }
   else if(t.phase === "decode"){
