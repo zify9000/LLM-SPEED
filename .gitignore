@@ -4,3 +4,5 @@ results/
 .pi/
 *.pyc
 .venv/
+.previewdeps/
+README.preview.html
