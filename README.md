@@ -64,5 +64,5 @@ results/           历次测速结果 JSON
 
 ## 🔗 深入
 
-- 测量口径全文：[`design/measurement.md`](design/measurement.md) · 每次取舍的来龙去脉：[`decision/INDEX.md`](decision/INDEX.md) · 产品边界：[`SOUL.md`](SOUL.md)
 - 回归测试：`python -m unittest discover -s tests -v` · 前端 JS 语法检查：`bash tests/check_frontend_js.sh`
+- 项目记忆文档（SOUL / design / decision / impl / ARCHITECTURE / PROGRESS）仅维护在本地工作区、不随仓库分发；测量口径与决策取舍请读本地 `design/measurement.md` 与 `decision/INDEX.md`
