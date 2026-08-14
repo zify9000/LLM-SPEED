@@ -1,0 +1,43 @@
+{
+  "providers": [
+    {
+      "name": "deepseek",
+      "label": "DeepSeek 云端",
+      "gateway_url": "https://api.deepseek.com"
+    },
+    {
+      "name": "qwen",
+      "label": "Qwen 云端",
+      "gateway_url": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode"
+    },
+    {
+      "name": "kimi",
+      "label": "Kimi 云端",
+      "gateway_url": "https://api.kimi.com/coding",
+      "deployments": [
+        {
+          "label": "Kimi K3",
+          "models": ["k3-256k"],
+          "max_ctx": 262144
+        }
+      ]
+    },
+    {
+      "name": "local",
+      "label": "本地网关（LiteLLM）",
+      "gateway_url": "http://127.0.0.1:4000",
+      "local": true,
+      "deployments": [
+        {
+          "label": "示例部署",
+          "models": ["your-model-name"],
+          "quant": "Q8_0",
+          "hardware": "示例：按实际填写",
+          "framework": "llama.cpp",
+          "params": "-c 196608 -b 16384 --cache-type-k/v q8_0",
+          "max_ctx": 196608
+        }
+      ]
+    }
+  ]
+}
