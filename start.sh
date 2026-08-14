@@ -26,7 +26,12 @@ fi
 if [ ! -f .env ]; then
   cp .env.example .env
   echo "[提示] 已从 .env.example 生成 .env——请先填入各 provider 的 API Key"
-  echo "       （也可以启动后在页面「Provider / 部署配置」卡片里配置）"
+  echo "       （也可以启动后在页面「Provider 管理」抽屉里配置）"
+fi
+
+if [ ! -f config.json ] && [ -f config.json.example ]; then
+  cp config.json.example config.json
+  echo "[提示] 已从 config.json.example 生成 config.json，请按需修改网关与部署映射"
 fi
 
 echo "[启动] http://127.0.0.1:${PORT:-8501}（HOST=${HOST:-127.0.0.1}，Ctrl+C 停止）"
