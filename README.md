@@ -57,3 +57,7 @@ config.json / .env  provider 配置与凭据（不入库）
 results/           历次测速结果 JSON
 ```
 
+## 📄 许可证
+
+本项目以 [Apache License 2.0](LICENSE) 发布。`corpus/code/` 内为第三方语料（llama.cpp 源码），遵循其自带许可证。
+
