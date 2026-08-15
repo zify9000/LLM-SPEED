@@ -1,11 +1,13 @@
-.env
-__pycache__/
-results/
+.venv/
 .pi/
 *.pyc
-.venv/
+__pycache__/
 .previewdeps/
-README.preview.html
+
+# 敏感配置及数据
+.env
+config.json
+results/
 
 # 项目记忆文档：仅本地工作区，不入库、不上云
 AGENTS.md
@@ -15,4 +17,4 @@ PROGRESS.md
 design/
 decision/
 impl/
-config.json
+

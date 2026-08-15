@@ -1,6 +1,0 @@
-# 开发/测试依赖：pip install -r requirements-dev.txt
-# 测试同时支持两种跑法（tests 用 stdlib unittest，pytest 为可选增强）：
-#   python3 -m unittest discover -s tests -v
-#   python3 -m pytest tests/ -q
-#   bash tests/check_frontend_js.sh   # 前端内联 JS 语法检查（需 node）
-pytest==9.1.0

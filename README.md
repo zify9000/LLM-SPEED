@@ -4,12 +4,7 @@
 
 一个 LLM 模型测速台，主打 **数据真实 · 过程可见 · 结论可分享**
 
-![Python](https://img.shields.io/badge/Python-3.13-3776AB?style=flat-square&logo=python&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi&logoColor=white)
-![前端](https://img.shields.io/badge/前端-原生JS_·_ECharts-5B8DEF?style=flat-square&logo=javascript&logoColor=white)
-![协议](https://img.shields.io/badge/协议-OpenAI_兼容-412991?style=flat-square&logo=openai&logoColor=white)
-
-**⚡ prefill / decode 分离计量** · **📏 0K~1M 上下文 × 并发 1/2** · **🎭 创意写作 · 代码生成** · **🛡️ Key 不出服务端**
+**⚡ prefill / decode 分离计量** · **📏 0K~1M 上下文 × 并发 ** · **🎭 创意写作 · 代码生成**
 
 </div>
 
@@ -62,7 +57,3 @@ config.json / .env  provider 配置与凭据（不入库）
 results/           历次测速结果 JSON
 ```
 
-## 🔗 深入
-
-- 回归测试：`python -m unittest discover -s tests -v` · 前端 JS 语法检查：`bash tests/check_frontend_js.sh`
-- 项目记忆文档（SOUL / design / decision / impl / ARCHITECTURE / PROGRESS）仅维护在本地工作区、不随仓库分发；测量口径与决策取舍请读本地 `design/measurement.md` 与 `decision/INDEX.md`
