@@ -20,6 +20,12 @@
 | --- | --- | --- |
 | 挂在 OpenAI 兼容网关后的模型（llama.cpp / vLLM / LiteLLM / 云端 API）一视同仁 | prefill 扣除实测网络往返、decode 滑窗差分并以 usage 权威回写、真实源码与公版文学文本撑上下文、随机 nonce 破 prefix cache：不注水，也不被水 | prefill 等待期估值逐秒收敛、decode 逐帧刷新；跑完自动生成折线图 + 测速卡片 PNG，一键分享 |
 
+## 🖼️ 测速卡片示例
+
+| DeepSeek 云端 · 0K~256K | Kimi 云端 · 0K~128K |
+| --- | --- |
+| ![deepseek-v4-pro 测速卡片](docs/images/speed-card-deepseek-v4-pro.png) | ![k3-256k 测速卡片](docs/images/speed-card-k3-256k.png) |
+
 ## 🚀 三分钟上手
 
 **1️⃣ 启动**
