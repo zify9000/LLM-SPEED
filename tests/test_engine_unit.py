@@ -1,23 +1,89 @@
-"""引擎纯逻辑回归测试：上下文构造（嵌套前缀/确定性/wrap/零输入）、复测聚合、错误语义化。
+"""引擎纯逻辑回归测试：上下文构造（嵌套前缀/确定性/模块块级/wrap/零输入）、
+复测聚合、错误语义化。
 
 运行（任一方式，无需 pytest 也可跑）：
     python3 -m unittest discover -s tests -v
     python3 -m pytest tests/ -v
 """
+import asyncio
+import time
 import unittest
+import unittest.mock
 
+import bench
 from bench import (
+    BenchRun,
+    SCENARIOS,
     _aggregate_reps,
     _classify_http_error,
     _fill,
+    _load_code_pool,
+    _make_module_stream,
     _make_stream,
     _median,
+    _net_elapsed,
     build_messages,
+    rate_prior,
 )
 
 
+class TestRatePrior(unittest.TestCase):
+    """prefill 速率先验曲线：log2(ctx) 分段线性插值 + 末段斜率外推 + 钳制。"""
+
+    def test_empty_and_single(self):
+        self.assertIsNone(rate_prior([], 4096))
+        self.assertEqual(rate_prior([(2048, 500.0)], 65536), 500.0)   # 单点平推
+        self.assertEqual(rate_prior([(2048, 500.0)], 1024), 500.0)    # 低于首点取首点
+
+    def test_interpolation(self):
+        pts = [(4096, 400.0), (16384, 800.0)]   # 每翻倍 +400
+        self.assertAlmostEqual(rate_prior(pts, 8192), 600.0)          # log2 中点
+        self.assertAlmostEqual(rate_prior(pts, 4096), 400.0)
+        self.assertAlmostEqual(rate_prior(pts, 16384), 800.0)
+
+    def test_extrapolation_falling(self):
+        pts = [(16384, 931.1), (32768, 852.8), (65536, 682.0)]
+        # 末段斜率 -170.8/翻倍 → 128K ≈ 511.2（真实值 506.9）
+        self.assertAlmostEqual(rate_prior(pts, 131072), 511.2, places=1)
+
+    def test_extrapolation_clamps(self):
+        # 下降趋势过猛时下钳 0.35×
+        pts = [(4096, 1000.0), (8192, 100.0)]
+        self.assertAlmostEqual(rate_prior(pts, 65536), 35.0)          # 0.35×100
+        # 上升趋势上钳 1.3×
+        pts = [(4096, 100.0), (8192, 1000.0)]
+        self.assertAlmostEqual(rate_prior(pts, 65536), 1300.0)        # 1.3×1000
+
+    def test_real_curve_replay(self):
+        """用户 8/12 实测曲线（creative）：16K 峰 931.1 → 192K 415.3。"""
+        pts = [(4096, 624.6), (8192, 777.6), (16384, 931.1),
+               (32768, 852.8), (65536, 682.0), (131072, 506.9)]
+        # 64K→128K 趋势外推 192K（=1.5×128K，log2 差 0.585）：506.9−175.1×0.585≈404.5
+        self.assertAlmostEqual(rate_prior(pts, 196608), 404.5, places=1)
+        # 曲内点取实测
+        self.assertAlmostEqual(rate_prior(pts, 32768), 852.8)
+
+
+class TestNetElapsed(unittest.TestCase):
+    """净耗时换算：RTT 扣减封顶为实测值一半，基线抖动超过小 TTFT 时不爆炸。"""
+
+    def test_normal_deduction(self):
+        self.assertAlmostEqual(_net_elapsed(10.0, 0.2), 9.8)
+
+    def test_rtt_exceeds_elapsed_capped(self):
+        # rtt(0.368) > ttft(0.346) 的真实案例：原 1e-3 下界产出 79000 tok/s
+        self.assertAlmostEqual(_net_elapsed(0.346, 0.368), 0.173)
+
+    def test_none_and_zero_rtt(self):
+        self.assertAlmostEqual(_net_elapsed(5.0, None), 5.0)
+        self.assertAlmostEqual(_net_elapsed(5.0, 0.0), 5.0)
+
+    def test_zero_elapsed_no_division_by_zero(self):
+        self.assertGreater(_net_elapsed(0.0, 0.1), 0)
+
+
 class TestFillStream(unittest.TestCase):
-    """ADR-0022 确定性嵌套语料流的关键性质。"""
+    """ADR-0005 确定性嵌套语料流的关键性质。"""
 
     def setUp(self):
         self.stream = _make_stream(["甲" * 100, "乙" * 200, "丙" * 300])
@@ -45,9 +111,57 @@ class TestFillStream(unittest.TestCase):
         self.assertEqual(_fill("", 10), "")
 
 
+class TestModuleStream(unittest.TestCase):
+    """ADR-0005 模块块级语料流：块间乱序（确定性）、块内保序（上下文关联性）。"""
+
+    BLOCKS = [["甲" * 100, "乙" * 200], ["丙" * 300], ["丁" * 150, "戊" * 250]]
+
+    def test_deterministic(self):
+        self.assertEqual(_make_module_stream(self.BLOCKS),
+                         _make_module_stream(self.BLOCKS))
+
+    def test_blocks_contiguous_and_ordered(self):
+        """块内文件必须相邻且保持给定顺序（模块关联性）；块次序允许乱序。"""
+        items = _make_module_stream(self.BLOCKS).split("\n\n")
+        self.assertEqual(len(items), sum(len(b) for b in self.BLOCKS))
+        pos = {s: i for i, s in enumerate(items)}
+        for block in self.BLOCKS:
+            idxs = [pos[s] for s in block]
+            self.assertEqual(idxs, sorted(idxs))                     # 块内保序
+            self.assertEqual(idxs, list(range(idxs[0], idxs[0] + len(idxs))))   # 块内相邻
+
+    def test_flat_stream_properties_carry_over(self):
+        """嵌套前缀前提不变：同一流截取仍互为前缀（校准精确记账不受影响）。"""
+        stream = _make_module_stream(self.BLOCKS)
+        self.assertTrue(_fill(stream, 500).startswith(_fill(stream, 200)))
+
+    def test_load_code_pool_groups_by_directory(self):
+        """真实语料：同目录文件聚为一块，块内文件名排序，过短文件跳过。"""
+        blocks = _load_code_pool()
+        self.assertTrue(blocks)
+        for block in blocks:
+            self.assertTrue(all(len(t) >= 2000 for t in block))
+
+    def test_load_code_pool_fallback(self):
+        """corpus 目录缺失时回退内置合成模块池（每条自成一个模块块）。"""
+        with unittest.mock.patch.object(bench, "CORPUS_CODE_DIR", "/nonexistent-dir"):
+            self.assertEqual(_load_code_pool(), [[s] for s in bench._CODE_POOL])
+
+
+class TestScenarioPriors(unittest.TestCase):
+    """ADR-0006 输入系数分场景先验：探测校准失败路径的兜底默认值。"""
+
+    def test_in_cpt_priors(self):
+        for sc in SCENARIOS.values():
+            self.assertGreater(sc["in_cpt"], 0.5)
+        # 实测序：C/C++ 代码的字符/token 远高于中文散文（3.9 vs 1.5）
+        self.assertGreater(SCENARIOS["code"]["in_cpt"],
+                           SCENARIOS["creative"]["in_cpt"])
+
+
 class TestBuildMessages(unittest.TestCase):
     def test_zero_input_branch(self):
-        """ctx=0：不注入参考材料，一句话命题，填充字符数为 0（ADR-0016）。"""
+        """ctx=0：不注入参考材料，一句话命题，填充字符数为 0（ADR-0005）。"""
         msgs, est, filler_n = build_messages("creative", 0, 1.8, "n")
         self.assertEqual(filler_n, 0)
         self.assertEqual(len(msgs), 2)
@@ -67,7 +181,7 @@ class TestBuildMessages(unittest.TestCase):
 
 
 class TestAggregateReps(unittest.TestCase):
-    """ADR-0013 复测取中位：标量中位、decode 中位的一次、all_ok 多数决。"""
+    """ADR-0006 复测取中位：标量中位、decode 中位的一次、all_ok 多数决。"""
 
     def _rep(self, decode, all_ok=True):
         return {
@@ -98,9 +212,72 @@ class TestAggregateReps(unittest.TestCase):
         self.assertEqual(_median([1, 4]), 2.5)
         self.assertEqual(_median([4, 1, 9, 2]), 3.0)
 
+    def test_max_gap_takes_worst_across_reps(self):
+        """停滞诊断 max_gap_s 取各次复测最差（max，不是中位）；无停滞不产出该键。"""
+        reps = [self._rep(50), self._rep(40), self._rep(30)]
+        reps[0]["max_gap_s"], reps[1]["max_gap_s"], reps[2]["max_gap_s"] = 1.5, 7.0, 2.0
+        agg = _aggregate_reps(reps)
+        self.assertEqual(agg["max_gap_s"], 7.0)              # 各次最差，非中位 2.0
+        self.assertNotIn("max_gap_s", _aggregate_reps([self._rep(1), self._rep(2)]))
+
+    def test_all_failed_pool_falls_back_to_reps(self):
+        """all_ok 全 False：聚合池回退为 reps 本身，标量中位照常算，all_ok=False。"""
+        reps = [self._rep(50, all_ok=False), self._rep(10, all_ok=False),
+                self._rep(30, all_ok=False)]
+        agg = _aggregate_reps(reps)
+        self.assertFalse(agg["all_ok"])
+        self.assertEqual(agg["decode_tok_s"], 30)            # 回退池的中位
+        self.assertEqual(agg["n_reps"], 3)
+
+    def test_decode_adj_in_median(self):
+        """decode_tok_s_adj（空窗校正口径）参与聚合中位；缺该值的复测不计入。"""
+        reps = [self._rep(50), self._rep(10), self._rep(30)]
+        reps[0]["decode_tok_s_adj"] = 60.0
+        reps[1]["decode_tok_s_adj"] = 10.0
+        reps[2]["decode_tok_s_adj"] = 40.0
+        agg = _aggregate_reps(reps)
+        self.assertEqual(agg["decode_tok_s_adj"], 40.0)      # [60,10,40] 中位
+        reps[2]["decode_tok_s_adj"] = None                   # 该次无校正口径
+        agg2 = _aggregate_reps(reps)
+        self.assertEqual(agg2["decode_tok_s_adj"], 35.0)     # 仅 [60,10] 中位
+
+
+class TestInterruptible(unittest.IsolatedAsyncioTestCase):
+    """_interruptible：探测/RTT 基线等不经 _run_point 任务集的路径，停止也要即时生效。"""
+
+    async def test_normal_returns_value(self):
+        run = BenchRun({})
+
+        async def work():
+            await asyncio.sleep(0.01)
+            return 42
+
+        self.assertEqual(await run._interruptible(work()), 42)
+
+    async def test_stop_cancels_promptly(self):
+        run = BenchRun({})
+        started, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def hanging():
+            started.set()
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        task = asyncio.create_task(run._interruptible(hanging()))
+        await started.wait()
+        run.stop()
+        t0 = time.monotonic()
+        self.assertIsNone(await asyncio.wait_for(task, timeout=5))
+        self.assertLess(time.monotonic() - t0, 2.0,
+                        "停止后未及时返回（0.2s 轮询应远小于 2s）")
+        self.assertTrue(cancelled.is_set(), "被包装的任务必须收到取消")
+
 
 class TestClassifyHttpError(unittest.TestCase):
-    """ADR-0014/0020 错误语义化。"""
+    """ADR-0008/0004 错误语义化。"""
 
     def test_gateway_timeout(self):
         for code in (502, 503, 504):
@@ -110,7 +287,7 @@ class TestClassifyHttpError(unittest.TestCase):
     def test_context_exceeded(self):
         self.assertIn("上下文窗口", _classify_http_error(
             400, '{"error":{"message":"context length exceeds limit"}}'))
-        # Kimi 用 401 报超窗（ADR-0020）
+        # Kimi 用 401 报超窗（ADR-0004）
         self.assertIn("上下文窗口", _classify_http_error(
             401, "invalid_authentication_error: input context exceeds the only allowed"))
 

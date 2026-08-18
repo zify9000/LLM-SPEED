@@ -37,6 +37,7 @@ if not exist config.json (
   )
 )
 
-echo [启动] http://127.0.0.1:8501（Ctrl+C 停止）
+if not defined PORT set PORT=8501
+echo [启动] http://127.0.0.1:%PORT%（Ctrl+C 停止）
 python server.py
 pause

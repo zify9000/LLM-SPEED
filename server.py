@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import re
+import stat
 import time
 
 import httpx
@@ -34,23 +35,37 @@ def _load_dotenv():
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+                k, v = k.strip(), v.strip()
+                if v.startswith('"'):   # 写侧 json.dumps 加引号（值含 # 等），读侧对称解码
+                    try:
+                        v = json.loads(v)
+                    except ValueError:
+                        v = v.strip('"')
+                else:
+                    v = v.strip("'")
+                os.environ.setdefault(k, v)
     except OSError:
         pass
 
 
 _load_dotenv()
 GLOBAL_API_KEY = os.environ.get("API_KEY", "")     # 兜底 key；仅存服务端，绝不下发前端
-GATEWAY_URL = os.environ.get("GATEWAY_URL", "")
 
 app = FastAPI(title="LLM-SPEED")
 
 RUNS: dict[str, BenchRun] = {}
+# _drive 后台任务强引用集：create_task 不保证持有引用，弱引用任务可能被 GC 提前回收
+_BG_TASKS: set[asyncio.Task] = set()
+
+# 网关能力记忆（进程级）：探测/400 回退得出的「不支持 thinking 参数」「模型
+# 温度受限」按 provider 缓存，下次测速直接跳过——同一能力不再每轮拿一次
+# 400 报错去试探（LiteLLM 后台的报错日志即来源于此）
+_CAP: dict[str, dict] = {}
 
 
 def load_config_file() -> tuple[dict, str | None]:
     """返回 (config, error)。解析失败不再静默吞掉：错误上浮到 /api/config，
-    前端显式提示，避免用户面对「配置坏了却只看到默认网关」的悬案。"""
+    前端显式提示，避免用户面对「配置坏了却只看到空 provider 列表」的悬案。"""
     if not os.path.exists(CONFIG_PATH):
         return {}, None
     try:
@@ -66,36 +81,45 @@ def _env_key_name(provider_name: str) -> str:
     return "API_KEY_" + re.sub(r"[^A-Z0-9]", "_", provider_name.upper())
 
 
+def _provider_urls(p: dict) -> list[str]:
+    """provider 的候选网关地址列表：gateway_urls 优先，兼容旧字段 gateway_url。"""
+    urls = [str(u).strip() for u in (p.get("gateway_urls") or []) if str(u).strip()]
+    if not urls and p.get("gateway_url"):
+        urls = [str(p["gateway_url"]).strip()]
+    return urls
+
+
 def load_providers() -> list[dict]:
     """多 provider：config.json 的 providers 列表 + .env 的分 provider key。
 
-    key 查找顺序：API_KEY_<NAME> → 全局 API_KEY。全部缺失时回退单网关模式。
+    key 查找顺序：API_KEY_<NAME> → 全局 API_KEY。无 providers 时返回空列表
+    （前端空态引导新增；不再合成「默认网关」——ADR-0001：测速目标必须是用户
+    显式登记的 provider，凭空默认一个没有可服务的意图）。
     """
     d, _err = load_config_file()
     providers = []
     for p in d.get("providers") or []:
-        if not p.get("gateway_url"):
+        urls = _provider_urls(p)
+        if not urls:
             continue
-        name = p.get("name") or p["gateway_url"]
+        name = p.get("name") or urls[0]
         key = os.environ.get(_env_key_name(name), "") or GLOBAL_API_KEY
         providers.append({
             "name": name,
             "label": p.get("label") or name,
-            "gateway_url": p["gateway_url"],
+            "gateway_url": urls[0],          # 首选/回退地址（兼容字段）
+            "gateway_urls": urls,            # 多地址候选（本地场景内网+隧道，择优绕中继）
             "has_key": bool(key),
             "local": bool(p.get("local")),   # 本地 provider：跑并发测试；云端不跑
             "deployments": p.get("deployments") or [],   # 模型→部署环境（硬件/框架/参数）映射
         })
-    if not providers:
-        url = GATEWAY_URL or d.get("gateway_url", "http://127.0.0.1:4000")
-        providers.append({"name": "default", "label": "默认网关",
-                          "gateway_url": url, "has_key": bool(GLOBAL_API_KEY),
-                          "local": True, "deployments": []})
     return providers
 
 
 def resolve_provider(name: str | None) -> dict:
     providers = load_providers()
+    if not providers:
+        raise HTTPException(400, "尚未配置 provider：请在「Provider 管理」中新增")
     if name:
         for p in providers:
             if p["name"] == name:
@@ -129,6 +153,41 @@ def provider_key(p: dict) -> str:
     return os.environ.get(_env_key_name(p["name"]), "") or GLOBAL_API_KEY
 
 
+async def _probe_url(url: str, headers: dict, timeout: float = 3.0) -> float | None:
+    """探测候选网关地址的可达性与延迟（GET /models，/v1 两种前缀都试）。
+    返回秒级延迟；不可达/服务端错误返回 None。"""
+    try:
+        async with httpx.AsyncClient(
+                base_url=url.rstrip("/"), headers=headers,
+                timeout=httpx.Timeout(connect=timeout, read=timeout,
+                                      write=timeout, pool=timeout)) as c:
+            t = time.perf_counter()
+            for path in ("/v1/models", "/models"):
+                r = await c.get(path)
+                if r.status_code != 404:
+                    return (time.perf_counter() - t) if r.status_code < 500 else None
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+async def pick_gateway_url(p: dict) -> tuple[str, float | None]:
+    """多地址择优：**按配置顺序取第一个可达地址**（用户把内网等优选地址排前，
+    可达即绕开隧道等传输中继；不可达自动落到下一个）。并发探测、取可达者中
+    顺序最前；全部不可达回退首个（由测速引擎报出真实错误）。
+    返回 (选中地址, 延迟秒)。"""
+    urls = p.get("gateway_urls") or [p["gateway_url"]]
+    if len(urls) == 1:
+        return urls[0], None
+    key = provider_key(p)
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    lats = await asyncio.gather(*(_probe_url(u, headers) for u in urls))
+    for u, lat in zip(urls, lats):
+        if lat is not None:
+            return u, lat
+    return urls[0], None
+
+
 @app.get("/")
 async def index():
     return FileResponse(os.path.join(BASE, "static", "index.html"))
@@ -149,18 +208,28 @@ async def get_config():
 
 
 # ---------------------------------------------------------------------------
-# 配置写入（ADR-0026）：页面编辑 provider / 部署环境，服务端校验后原子写回
+# 配置写入（ADR-0001）：页面编辑 provider / 部署环境，服务端校验后原子写回
 # config.json；API Key 单向上行写入 .env，永不回显前端
 # ---------------------------------------------------------------------------
 
 _PROVIDER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
-def _atomic_write(path: str, text: str):
+def _atomic_write(path: str, text: str, private: bool = False):
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.replace(tmp, path)   # 原子替换，写坏一半不会毁掉旧配置
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        if private:   # 凭据类文件（.env）：沿用原文件权限，新建收紧为 0o600
+            os.chmod(tmp, stat.S_IMODE(os.stat(path).st_mode)
+                     if os.path.exists(path) else 0o600)
+        os.replace(tmp, path)   # 原子替换，写坏一半不会毁掉旧配置
+    except BaseException:
+        try:
+            os.unlink(tmp)      # 失败路径清理 .tmp 残渣
+        except OSError:
+            pass
+        raise
 
 
 def _validate_providers(providers) -> list[dict]:
@@ -178,9 +247,27 @@ def _validate_providers(providers) -> list[dict]:
         if name in seen:
             raise HTTPException(400, f"provider 名称重复: {name}")
         seen.add(name)
-        gw = str(p.get("gateway_url") or "").strip()
-        if not gw.startswith(("http://", "https://")):
-            raise HTTPException(400, f"{name} 的网关地址必须以 http(s):// 开头")
+        # 网关地址：gateway_urls（多地址，本地场景内网+隧道择优）优先，
+        # 兼容旧单地址字段 gateway_url；至少一个，全部必须 http(s)://
+        urls_in = p.get("gateway_urls")
+        if urls_in is None:
+            gw = str(p.get("gateway_url") or "").strip()
+            urls = [gw] if gw else []
+        else:
+            if not isinstance(urls_in, list):
+                raise HTTPException(400, f"{name} 的 gateway_urls 必须是数组")
+            urls = []
+            for u in urls_in:
+                u = str(u).strip()
+                if u and u not in urls:
+                    urls.append(u)
+        if not urls:
+            raise HTTPException(400, f"{name} 至少配置一个网关地址")
+        if len(urls) > 8:
+            raise HTTPException(400, f"{name} 网关地址最多 8 个")
+        for u in urls:
+            if not u.startswith(("http://", "https://")):
+                raise HTTPException(400, f"{name} 的网关地址必须以 http(s):// 开头: {u!r}")
         deps = []
         for d in p.get("deployments") or []:
             if not isinstance(d, dict):
@@ -196,12 +283,13 @@ def _validate_providers(providers) -> list[dict]:
             }
             if isinstance(max_ctx, (int, float)) and not isinstance(max_ctx, bool) \
                     and int(max_ctx) > 0:
-                dep["max_ctx"] = int(max_ctx)   # 超窗钳制来源（ADR-0014），非正数视为未配置
+                dep["max_ctx"] = int(max_ctx)   # 超窗钳制来源（ADR-0005），非正数视为未配置
             deps.append(dep)
         out.append({
             "name": name,
             "label": (str(p.get("label") or "").strip() or name)[:64],
-            "gateway_url": gw,
+            "gateway_url": urls[0],      # 兼容字段=首选地址
+            "gateway_urls": urls,
             "local": bool(p.get("local")),
             "deployments": deps,
         })
@@ -212,7 +300,10 @@ def _validate_providers(providers) -> list[dict]:
 async def put_config(body: dict):
     """整表替换 config.json 的 providers（部署环境随 provider 内嵌）。"""
     providers = _validate_providers(body.get("providers"))
-    d, _err = load_config_file()
+    d, err = load_config_file()
+    if err:
+        # 解析失败时 d={}：以空底整表覆盖会丢光其他顶层键，拒绝写入（ADR-0001）
+        raise HTTPException(409, f"config.json 已损坏，拒绝覆盖写入（{err}），请先手工修复")
     d["providers"] = providers
     _atomic_write(CONFIG_PATH, json.dumps(d, ensure_ascii=False, indent=2) + "\n")
     return {"ok": True, "providers": len(providers)}
@@ -238,26 +329,25 @@ async def put_config_key(body: dict):
     if os.path.exists(env_path):
         with open(env_path, encoding="utf-8") as f:
             lines = f.read().splitlines()
-    lines = [l for l in lines if not l.startswith(env_name + "=")]
+    # 按解析出的 key 名过滤旧行（容忍 `API_KEY_X = "old"` 空格写法）——
+    # startswith 漏匹配会让旧行残留，重启后旧值复活（改 key 假生效）
+    lines = [l for l in lines
+             if (l.split("=", 1)[0].strip() if "=" in l else "") != env_name]
     if not clear and key:
         lines.append(f'{env_name}={json.dumps(key, ensure_ascii=False)}')  # 加引号，值含 # 等也不破坏解析
         os.environ[env_name] = key
     else:
         os.environ[env_name] = ""   # 空值回退全局 API_KEY（load_providers 语义）
-    _atomic_write(env_path, "\n".join(lines) + "\n")
+    _atomic_write(env_path, "\n".join(lines) + "\n", private=True)
     return {"ok": True}
 
 
 @app.get("/api/models")
-async def list_models(provider: str | None = None, gateway: str | None = None):
+async def list_models(provider: str | None = None):
     """透传网关的模型列表；API Key 由服务端注入，不经前端。"""
-    if provider:
-        p = resolve_provider(provider)
-        base_url, key = p["gateway_url"], provider_key(p)
-    else:
-        base_url, key = (gateway or GATEWAY_URL), GLOBAL_API_KEY
-    if not base_url:
-        raise HTTPException(400, "缺少网关地址")
+    # 旧 gateway= 自定义地址参数已删除（ADR-0001）：它把全局 key 发往任意提交地址
+    p = resolve_provider(provider)   # 缺省取首个 provider
+    base_url, key = (await pick_gateway_url(p))[0], provider_key(p)
     headers = {}
     if key:
         headers["Authorization"] = f"Bearer {key}"
@@ -278,16 +368,43 @@ async def list_models(provider: str | None = None, gateway: str | None = None):
     return {"models": ids}
 
 
+def _validate_bench_cfg(cfg: dict):
+    """测速矩阵四要素钳制（ADR-0001）：类型/范围/条数不合法一律 400——畸形 ctx
+    （如 1e9）会让引擎按档位构造 GB 级 prompt，直接打爆内存。"""
+    models, scens = cfg["models"], cfg["scenarios"]
+    ctxs, concs = cfg["ctx_list"], cfg["concurrencies"]
+    if not isinstance(models, list) or len(models) > 32 or any(
+            not isinstance(m, str) or not m.strip() for m in models):
+        raise HTTPException(400, "models 须为 ≤32 个非空字符串")
+    if not isinstance(scens, list) or any(
+            not isinstance(s, str) or s not in SCENARIOS for s in scens):
+        raise HTTPException(400, f"scenarios 须取自白名单: {sorted(SCENARIOS)}")
+    if not isinstance(ctxs, list) or len(ctxs) > 16 or any(
+            not isinstance(c, (int, float)) or isinstance(c, bool)
+            or not 0 <= c <= 4 * 1048576 for c in ctxs):
+        raise HTTPException(400, "ctx_list 须为 ≤16 档、逐值 0~4M（对齐前端自定义档位上限）")
+    if not isinstance(concs, list) or len(concs) > 8 or any(
+            not isinstance(c, int) or isinstance(c, bool)
+            or not 1 <= c <= 64 for c in concs):
+        raise HTTPException(400, "concurrencies 须为 ≤8 个、逐值 1~64 的整数")
+
+
 @app.post("/api/bench/start")
 async def bench_start(cfg: dict):
     _purge_finished_runs()
     for field in ("models", "scenarios", "ctx_list", "concurrencies"):
         if not cfg.get(field):
             raise HTTPException(400, f"缺少配置项: {field}")
+    _validate_bench_cfg(cfg)
     # provider 解析：服务端注入网关地址与 key，客户端不接触凭据
     if cfg.get("provider"):
         p = resolve_provider(cfg["provider"])
-        cfg["gateway_url"] = p["gateway_url"]
+        url, url_lat = await pick_gateway_url(p)   # 多地址择优（内网可达即绕开隧道中继）
+        cfg["gateway_url"] = url
+        if len(p.get("gateway_urls") or []) > 1:
+            cfg["url_choice"] = {"chosen": url, "candidates": len(p["gateway_urls"]),
+                                 "latency_ms": (round(url_lat * 1000)
+                                                if url_lat is not None else None)}
         cfg["provider_label"] = p["label"]
         # 本地/云端标记随存档与 cfg 事件下发：卡片对本地部署隐去网关地址
         cfg["provider_local"] = bool(p.get("local"))
@@ -295,7 +412,7 @@ async def bench_start(cfg: dict):
         # 部署环境（硬件/框架/参数）跟随被测模型，由服务端按映射注入并随结果存档
         cfg["model_info"] = match_deployments(p, cfg.get("models") or [])
         # 部署的实际上下文上限（deployments[].max_ctx）：超限档位由测速引擎跳过，
-        # 避免构造出必然 400 的超窗 prompt（ADR-0013）
+        # 避免构造出必然 400 的超窗 prompt（ADR-0005）
         cfg["model_max_ctx"] = {
             m: int(dep["max_ctx"])
             for dep in p.get("deployments") or [] if dep.get("max_ctx")
@@ -303,17 +420,33 @@ async def bench_start(cfg: dict):
         }
         if not p["local"]:
             # 云端不做并发/吞吐测试：响应不受控、可能调度到不同推理设备，
-            # 服务端强制单发，不信任前端传参（ADR-0009）
+            # 服务端强制单发，不信任前端传参（ADR-0003）
             cfg["concurrencies"] = [1]
-    elif cfg.get("gateway_url"):
-        cfg["api_key"] = GLOBAL_API_KEY
-        cfg["provider_local"] = True   # 自定义网关视为本地部署，卡片隐去地址
+        # 网关能力记忆下发：已知不支持 thinking / 温度受限的，不再试探（免 400）
+        cap = _CAP.get(p["name"])
+        if cap:
+            cfg["thinking_unsupported"] = cap["thinking_unsupported"]
+            cfg["temperature_locked"] = cap["temperature_locked"]
     else:
-        raise HTTPException(400, "缺少 provider 或 gateway_url")
+        # 旧 gateway_url 自定义地址分支已删除（ADR-0001）：它把全局 key 发往任意提交地址
+        raise HTTPException(400, "缺少 provider")
     run = BenchRun(cfg, results_dir=RESULTS_DIR)
     RUNS[run.run_id] = run
-    asyncio.create_task(run.run())
+    t = asyncio.create_task(_drive(run, cfg.get("provider")))
+    _BG_TASKS.add(t)                        # 持强引用防 GC 提前回收任务
+    t.add_done_callback(_BG_TASKS.discard)
     return {"run_id": run.run_id}
+
+
+async def _drive(run: BenchRun, provider_name: str | None):
+    """驱动一次测速，结束后收割网关能力结论（thinking/温度参数支持度），
+    供下次测速免 400 试探。"""
+    await run.run()
+    if provider_name:
+        _CAP[provider_name] = {
+            "thinking_unsupported": run.thinking_unsupported,
+            "temperature_locked": sorted(run.temperature_locked),
+        }
 
 
 def _purge_finished_runs(ttl_s: float = 2 * 3600):
@@ -340,9 +473,11 @@ async def bench_events(run_id: str):
         raise HTTPException(404, "run not found")
 
     async def gen():
-        # 订阅扇出（ADR-0021）：每连接独立队列，先注册再回放历史——注册与回放
-        # 之间到达的新事件会重复，前端按 seq 去重；旧连接残留不再抢事件
-        q: asyncio.Queue = asyncio.Queue()
+        # 订阅扇出（ADR-0009）：每连接独立队列，先注册再回放历史——注册与回放
+        # 之间到达的新事件会重复，前端按 seq 去重；旧连接残留不再抢事件。
+        # 队列设上限：慢客户端积压撞顶由 bench.emit 摘除该订阅并补终止帧，
+        # 前端 EventSource 重连后按 seq 去重回放历史兜底（ADR-0009）
+        q: asyncio.Queue = asyncio.Queue(maxsize=2000)
         run.subs.add(q)
         try:
             for ev in run.history:
@@ -367,7 +502,7 @@ async def bench_events(run_id: str):
 
 @app.get("/api/bench/active")
 async def bench_active():
-    """进行中的测速任务（多标签页入口：任意页面可进入正在跑的任务，ADR-0021）。"""
+    """进行中的测速任务（多标签页入口：任意页面可进入正在跑的任务，ADR-0009）。"""
     out = []
     for r in RUNS.values():
         if r.finished_at is not None:
@@ -402,6 +537,8 @@ async def bench_history():
 
 @app.get("/api/bench/history/{run_id}")
 async def bench_history_detail(run_id: str):
+    if any(c in run_id for c in "/\\") or ".." in run_id:   # 与 delete 对称的路径穿越防护
+        raise HTTPException(400, "非法 run_id")
     path = os.path.join(RESULTS_DIR, f"{run_id}.json")
     if not os.path.exists(path):
         raise HTTPException(404, "not found")

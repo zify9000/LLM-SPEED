@@ -90,10 +90,16 @@ nav .tag{font-size:12px; color:var(--ink-4)}
 #prefillBarWrap > div{background:linear-gradient(90deg,#818CF8,#4F46E5)}
 
 /* ============ 布局（配置平铺 + 主区，随阶段聚焦） ============ */
-.cfg-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:20px;
+/* 三张配置卡钉死 3 等分栏：第 4 张卡（部署环境，随勾选模型显隐）整行通铺，
+   不再参与 auto-fit 分栏——否则它一出现，前三栏宽度就被重新均分（勾选模型
+   时布局跳动） */
+.cfg-grid{display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:20px;
   align-items:stretch; margin-bottom:20px}
 .cfg-grid .card{margin-bottom:0}
-@media (max-width:1100px){ .kpis{grid-template-columns:repeat(2,1fr)} }
+#deployCard{grid-column:1/-1}
+@media (max-width:1100px){ .kpis{grid-template-columns:repeat(2,1fr)}
+  .cfg-grid{grid-template-columns:1fr 1fr} }
+@media (max-width:720px){ .cfg-grid{grid-template-columns:1fr} }
 .card{background:var(--card); border:1px solid var(--border); border-radius:12px;
   box-shadow:var(--shadow); margin-bottom:20px}
 .card-head{padding:14px 20px; border-bottom:1px solid var(--border);
@@ -128,8 +134,16 @@ textarea{resize:vertical; min-height:auto}
   transition:background .12s}
 .ck:hover{background:var(--bg)}
 .ck input{accent-color:var(--primary); width:14px; height:14px; cursor:pointer}
+/* 自定义上下文档位：包裹行承载删除按钮（内置档无包裹、不可删） */
+.ckwrap{display:inline-flex; align-items:center; border-radius:6px; transition:background .12s}
+.ckwrap:hover{background:var(--bg)}
+.ckwrap .ck:hover{background:transparent}
+.ctx-del{width:18px; height:18px; padding:0; margin:0 4px 0 -2px; border-radius:4px;
+  background:transparent; color:var(--ink-4); font-size:14px; line-height:1;
+  display:inline-flex; align-items:center; justify-content:center}
+.ctx-del:hover{background:var(--red-soft); color:var(--red)}
 
-/* ============ Provider / 部署配置抽屉（与测速配置完全分离，ADR-0027） ============ */
+/* ============ Provider / 部署配置抽屉（与测速配置完全分离，ADR-0011） ============ */
 #drawerRoot{position:fixed; inset:0; z-index:100}
 #drawerScrim{position:absolute; inset:0; background:rgba(17,24,39,.45);
   opacity:0; transition:opacity .2s ease; cursor:default}
@@ -157,6 +171,10 @@ textarea{resize:vertical; min-height:auto}
 .dep-edit{border:1px solid var(--border); border-radius:10px; background:var(--bg); margin-top:10px;
   transition:border-color .15s}
 .dep-edit:focus-within{border-color:var(--border-2)}
+/* 网关地址行（可多条） */
+.url-row{display:flex; gap:6px; align-items:center}
+.url-row + .url-row{margin-top:6px}
+.url-row input{flex:1; min-width:0}
 .dep-head{display:flex; align-items:center; gap:8px; padding:9px 8px 9px 12px;
   cursor:pointer; user-select:none; border-radius:10px}
 .dep-head .chev{transition:transform .18s ease; color:var(--ink-4)}
@@ -302,10 +320,13 @@ tr.fade td{opacity:.45}
       <button id="btnStart" class="btn-primary" onclick="startRun()">
         <svg class="ic" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><polygon points="6 3 20 12 6 21 6 3"/></svg>开始测速</button>
       <button id="btnStop" class="btn-ghost" onclick="stopRun()" hidden>
-        <svg class="ic" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>停止</button>
+        <svg class="ic" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg><span>停止</span></button>
     </div>
   </div>
   <div id="statusMsg" aria-live="polite"></div>
+  <div id="cdnWarn" role="alert" hidden
+       style="background:var(--red-soft); color:var(--red); border:1px solid #FECACA;
+              border-radius:8px; padding:8px 12px; margin-bottom:16px; font-size:13px"></div>
 
   <!-- ========== 配置区（始终位于控制台上方：空闲时平铺展示；测速/完成后自动隐藏，
        「展开配置」唤回时也悬于 KPI/实时表/图表之上，不嵌入主区） ========== -->
@@ -343,7 +364,7 @@ tr.fade td{opacity:.45}
                    onkeydown="if(event.key==='Enter')addCustomCtx()">
             <button class="btn-ghost" onclick="addCustomCtx()">添加</button>
           </div>
-          <div class="hint">部署上限非标准 2 的幂（如 192K）时，用自定义档位补上末尾一档</div>
+          <div class="hint">自定义档按数值插入上方序列，点档位后的 × 可删除；部署上限非标准 2 的幂（如 192K）时用它补档</div>
           <div id="concWrap">
             <label class="f">并发数</label>
             <div id="concList" class="ckrow"></div>
@@ -356,7 +377,12 @@ tr.fade td{opacity:.45}
         <div class="card-head"><h3>请求参数</h3></div>
         <div class="card-body">
           <div class="grid2">
-            <div><label class="f" for="fMaxTokens">单请求最大输出 tokens</label><input type="number" id="fMaxTokens" value="1024"></div>
+            <div><label class="f" for="fMaxTokens">单请求最大输出 tokens</label>
+              <select id="fMaxTokens">
+                <option value="256">256</option>
+                <option value="512">512</option>
+                <option value="1024" selected>1024</option>
+              </select></div>
             <div><label class="f" for="fRepeats">每点重复次数（取中位）</label><input type="number" id="fRepeats" value="1" min="1" max="5"></div>
           </div>
           <div class="hint">云端读数有调度抖动，关键点建议 3 次取中位；本地稳定环境保持 1 即可</div>
@@ -364,10 +390,11 @@ tr.fade td{opacity:.45}
           <input type="number" id="fTimeout" value="1200">
           <label class="f" for="fThinking">思考模式</label>
           <select id="fThinking">
-            <option value="disabled" selected>禁用（推荐）</option>
-            <option value="enabled">启用（思考流计入测速）</option>
-            <option value="auto">跟随服务端默认</option>
+            <option value="auto" selected>跟随服务端默认（按模型默认形态测速）</option>
+            <option value="disabled">禁用思考（只测正文速度）</option>
+            <option value="enabled">启用思考（思考流计入测速）</option>
           </select>
+          <div class="hint">按模型的实际使用形态选择：有的模型默认思考效果更好，有的相反</div>
         </div>
       </div>
 
@@ -464,7 +491,7 @@ tr.fade td{opacity:.45}
       </div>
   </section>
 </div>
-<!-- ========== Provider / 部署配置抽屉：页面级配置，与测速配置分离（ADR-0027） ========== -->
+<!-- ========== Provider / 部署配置抽屉：页面级配置，与测速配置分离（ADR-0011） ========== -->
 <div id="drawerRoot" hidden>
   <div id="drawerScrim" onclick="closeCfgDrawer()"></div>
   <aside id="cfgDrawer" role="dialog" aria-modal="true" aria-labelledby="cfgDrawerTitle">
@@ -494,8 +521,10 @@ tr.fade td{opacity:.45}
           <div><label class="f" for="ceLabel">显示标签</label>
             <input type="text" id="ceLabel" placeholder="如 本地网关（LiteLLM）"></div>
         </div>
-        <label class="f" for="ceUrl">网关地址</label>
-        <input type="text" id="ceUrl" placeholder="http://127.0.0.1:4000 或 https://api.deepseek.com">
+        <label class="f">网关地址（可多个，按顺序取第一个可达）</label>
+        <div id="ceUrls"></div>
+        <button class="btn-ghost" onclick="ceUrlAdd()" style="margin-top:6px">+ 添加地址</button>
+        <div class="hint">把优选地址（如内网）排在前面：可达即绕开隧道等传输中继，不可达自动落到下一个</div>
         <label class="ck" style="margin-top:10px"><input type="checkbox" id="ceLocal"> 本地部署（允许并发测试；云端强制单发）</label>
       </div>
       <div class="dsec">
@@ -528,40 +557,68 @@ const $ = s => document.querySelector(s);
 const SCEN_LABEL = {creative:"创意写作", code:"代码生成"};
 const fmtK = v => !v ? "0K"
   : v>=1048576 ? (v/1048576).toFixed(v%1048576?1:0)+"M"
-  : v>=1024 ? (v/1024).toFixed(v%1024?1:0)+"K" : v;
+  : v>=1024 ? (v/1024).toFixed(v%1024?1:0)+"K" : String(v);
 const esc = s => String(s).replace(/[&<>"']/g, c =>
   ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+/* provider 下拉的地址文本：多地址时显示「首选 +N」，全文在抽屉编辑器里维护 */
+const provUrlText = p => {
+  const urls = (p.gateway_urls && p.gateway_urls.length) ? p.gateway_urls : [p.gateway_url || ""];
+  const first = String(urls[0]).replace(/^https?:\/\//,"");
+  return urls.length > 1 ? `${first} +${urls.length - 1}` : first;
+};
 const fmtNum = v => v==null ? "-" : Math.round(v).toLocaleString("en-US");
 const round1 = v => Math.round(v*10)/10;
 
 const state = {points:new Map(), es:null, runId:null, running:false, cfg:null, maxSeq:-1,
   activeReqs:new Set(), donePoints:0, totalPoints:0, providers:[], phase:"idle",
+  preMeasured:new Set(),   // 已出 prefill 实测帧的点（livePointKey）——估值帧不再回退其 KPI
   charts:[]};   // 平铺图表的 echarts 实例（重建/resize 用）
 let offChart;
 
 /* ---------------- 初始化 ---------------- */
 async function init(){
-  const cfg = await (await fetch("/api/config")).json();
+  let cfg;
+  try{ cfg = await (await fetch("/api/config")).json(); }
+  catch(e){ setPill("配置加载失败：" + e.message, "err"); return; }
   state.providers = cfg.providers || [];
   const sel = $("#fProvider");
   sel.innerHTML = state.providers.map(p =>
-    `<option value="${esc(p.name)}">${esc(p.label)}（${esc(p.gateway_url.replace(/^https?:\/\//,""))}）</option>`).join("");
+    `<option value="${esc(p.name)}">${esc(p.label)}（${esc(provUrlText(p))}）</option>`).join("");
   if(cfg.config_error) setPill(cfg.config_error, "err");   // config.json 坏了不静默
+  // 恢复上次选择的 provider（localStorage 记忆）；无记录/已失效回退首个有 Key 的
+  const savedProv = loadProviderSel();
   const firstWithKey = state.providers.find(p=>p.has_key);
-  if(firstWithKey) sel.value = firstWithKey.name;
+  if(savedProv && state.providers.some(p => p.name === savedProv)) sel.value = savedProv;
+  else if(firstWithKey) sel.value = firstWithKey.name;
   $("#scenarioList").innerHTML = cfg.scenarios.map(s => ckHtml("scen", s.key, s.label, true)).join("");
-  $("#ctxList").innerHTML = cfg.ctx_list.map(v => ckHtml("ctx", v, fmtK(v), v<=32768)).join("");
   state.defCtx = cfg.ctx_list.map(Number);
-  loadCustomCtx();
+  renderCtxList();
   $("#concList").innerHTML = cfg.concurrencies.map(v => ckHtml("conc", v, v+" 并发", Number(v)===1)).join("");
   onProviderChange();
   setPhase("idle");   // 刚启动：平铺全部配置，不展示测速组件
-  offChart = echarts.init($("#offChart"));
+  // CDN 降级：echarts/html2canvas 缺失时明确告警（不静默半死）——图表/卡片导出
+  // 降级，配置、测速与历史记录不受影响
+  const cdnMiss = [!window.echarts && "ECharts（速度曲线/卡片内嵌图表）",
+                   !window.html2canvas && "html2canvas（卡片 PNG 导出）"].filter(Boolean);
+  if(cdnMiss.length){
+    const w = $("#cdnWarn");
+    w.textContent = "⚠ CDN 资源加载失败：" + cdnMiss.join("、") + " 不可用；测速、配置与历史记录不受影响";
+    w.hidden = false;
+  }
+  offChart = window.echarts ? echarts.init($("#offChart")) : null;
   window.addEventListener("resize", () => state.charts.forEach(c => c.resize()));
   $("#modelList").addEventListener("change", () => { saveModelSel(); syncDeployCard(); });   // 勾选模型→记忆选择+联动部署环境展示
-  initCfgEditor(sel.value);   // Provider/部署配置编辑器（ADR-0026）
+  // 单请求最大输出 tokens：选项式（256/512/1024），记忆最近一次选择
+  const savedMt = loadMaxTokens();
+  if(savedMt && [...$("#fMaxTokens").options].some(o => o.value === savedMt))
+    $("#fMaxTokens").value = savedMt;
+  $("#fMaxTokens").addEventListener("change", saveMaxTokens);
+  initCfgEditor(sel.value);   // Provider/部署配置编辑器（ADR-0001）
   refreshModels();
   loadHistoryList();
+  // 页面空闲时轮询其他标签页/会话发起的进行中任务（重绘入口条）；
+  // 本页 run 进行中不轮询——SSE 事件流即权威事实
+  setInterval(() => { if(!state.running) renderActiveRuns(); }, 20000);
 }
 function ckHtml(group, val, label, on){
   // 模型名等外部字符串统一转义：网关响应、历史存档均可控面之外
@@ -575,34 +632,80 @@ function parseCtx(s){
   const u = m[2].toLowerCase();
   return Math.round(parseFloat(m[1]) * (u==="k" ? 1024 : u==="m" ? 1048576 : 1));
 }
-function loadCustomCtx(){
+/* 自定义上下文档位：部署上限非标准 2 的幂（如 192K）时补档，localStorage 记忆。
+   渲染时与内置档合并按数值升序插入原序列（不再一律甩到末尾），自定义档带 × 删除 */
+function customCtxList(){
   let saved = [];
   try{ saved = JSON.parse(localStorage.getItem("llmspeed.customCtx") || "[]"); }catch(e){}
-  saved.filter(v => Number.isInteger(v) && v > 0 && !state.defCtx.includes(v))
-    .forEach(v => $("#ctxList").insertAdjacentHTML("beforeend", ckHtml("ctx", v, fmtK(v), true)));
+  return [...new Set(saved.filter(v => Number.isInteger(v) && v > 0
+      && v <= 4*1048576 && !state.defCtx.includes(v)))].sort((a,b)=>a-b);
 }
-function saveCustomCtx(){
-  const customs = [...document.querySelectorAll('.ck input[data-g=ctx]')]
-    .map(i => +i.value).filter(v => !state.defCtx.includes(v));
-  localStorage.setItem("llmspeed.customCtx", JSON.stringify(customs));
+/* 重绘上下文档序列；checked 为要保留勾选状态的数值集合（增删档后调用），
+   缺省按初始规则（内置 ≤32K、自定义档全选） */
+function renderCtxList(checked){
+  const customs = new Set(customCtxList());
+  const all = [...new Set([...state.defCtx, ...customs])].sort((a,b)=>a-b);
+  $("#ctxList").innerHTML = all.map(v => {
+    const on = checked ? checked.has(v) : (customs.has(v) || v <= 32768);
+    const ck = ckHtml("ctx", v, fmtK(v), on);
+    return customs.has(v)
+      ? `<span class="ckwrap">${ck}<button type="button" class="ctx-del" data-v="${v}" title="删除自定义档位" aria-label="删除自定义档位 ${fmtK(v)}">×</button></span>`
+      : ck;
+  }).join("");
 }
+/* 删除自定义档（事件委托；按钮在 label 外的包裹行里，不会误触勾选） */
+$("#ctxList").addEventListener("click", e => {
+  const del = e.target.closest(".ctx-del");
+  if(!del) return;
+  e.preventDefault();
+  const v = +del.dataset.v;
+  const checked = new Set(checkedVals("ctx").map(Number));
+  checked.delete(v);
+  localStorage.setItem("llmspeed.customCtx",
+    JSON.stringify(customCtxList().filter(x => x !== v)));
+  renderCtxList(checked);
+  setPill(`已删除自定义档位 ${fmtK(v)}`, "");
+});
 function addCustomCtx(){
   const v = parseCtx($("#fCustomCtx").value);
   if(!v) return setPill("自定义档位格式无效：支持 196608 / 192K / 1M", "err");
   if(v > 4*1048576) return setPill("自定义档位过大（上限 4M）", "err");
   if([...document.querySelectorAll('.ck input[data-g=ctx]')].some(i => +i.value === v))
     return setPill(`档位 ${fmtK(v)} 已存在`, "err");
-  $("#ctxList").insertAdjacentHTML("beforeend", ckHtml("ctx", v, fmtK(v), true));
+  const checked = new Set(checkedVals("ctx").map(Number));
+  checked.add(v);
+  localStorage.setItem("llmspeed.customCtx",
+    JSON.stringify([...customCtxList(), v].sort((a,b)=>a-b)));
+  renderCtxList(checked);
   $("#fCustomCtx").value = "";
-  saveCustomCtx();
   setPill(`已添加自定义档位 ${fmtK(v)}`, "");
 }
 function currentProvider(){ return state.providers.find(p => p.name === $("#fProvider").value); }
+/* provider 选择记忆（与模型勾选记忆同级）：用户显式切换时持久化，
+   下次进页面默认选回；localStorage 不可用时静默降级为不记忆 */
+const PROVIDER_SEL_KEY = "llmspeed.provider";
+function loadProviderSel(){
+  try { return localStorage.getItem(PROVIDER_SEL_KEY) || null; } catch { return null; }
+}
+function saveProviderSel(){
+  try { localStorage.setItem(PROVIDER_SEL_KEY, $("#fProvider").value); } catch {}
+}
+/* 单请求最大输出 tokens 记忆（选项式 256/512/1024） */
+const MAX_TOKENS_KEY = "llmspeed.maxTokens";
+function loadMaxTokens(){
+  try { return localStorage.getItem(MAX_TOKENS_KEY) || null; } catch { return null; }
+}
+function saveMaxTokens(){
+  try { localStorage.setItem(MAX_TOKENS_KEY, $("#fMaxTokens").value); } catch {}
+}
 function onProviderChange(){
+  saveProviderSel();
   const p = currentProvider();
-  $("#keyHint").innerHTML = !p ? "" : (p.has_key
-    ? `API Key 已由服务端 .env 提供（${p.name}）`
-    : `该 provider 未配置 API Key（.env 的 API_KEY_${p.name.toUpperCase()}），云端模型将无法认证`);
+  $("#keyHint").innerHTML = !p
+    ? `尚未配置 Provider —— 点击右上角「Provider 管理」新增（写入服务端 config.json 与 .env，即时生效）`
+    : (p.has_key
+    ? `API Key 已由服务端 .env 提供（${esc(p.name)}）`
+    : `该 provider 未配置 API Key（.env 的 API_KEY_${esc(p.name.toUpperCase())}），云端模型将无法认证`);
   syncDeployCard();
   syncConcurrencyUI();
   refreshModels();
@@ -617,7 +720,7 @@ function syncConcurrencyUI(){
    一个 provider 可挂多套部署（deployments），勾选的模型命中哪套就展示哪套 */
 function syncDeployCard(){
   const sel = checkedVals("model");
-  // 部署环境仅本地部署展示；云端 deployments 只用于 max_ctx 钳制（ADR-0020）
+  // 部署环境仅本地部署展示；云端 deployments 只用于 max_ctx 钳制（ADR-0004）
   const deps = !currentProvider()?.local ? [] : (currentProvider()?.deployments || [])
     .filter(d => (d.models || []).some(m => sel.includes(m)));
   $("#deployCard").hidden = deps.length === 0;
@@ -629,12 +732,14 @@ function syncDeployCard(){
   </div>`).join("");
 }
 
-/* ---------------- 配置编辑器（ADR-0026/0027）：抽屉承载，provider / 部署环境写回
+/* ---------------- 配置编辑器（ADR-0001/0011）：抽屉承载，provider / 部署环境写回
    config.json 与 .env；表单改动先暂存内存（ceStash），切换/增删不重丢，保存才上行 -------- */
 state.cfgEdit = { providers: [], keyClear: false, dirty: false, selName: "", lastFocus: null };
 function ceCurrent(){ return state.cfgEdit.providers.find(p => p.name === state.cfgEdit.selName) || null; }
 function initCfgEditor(keepName){
-  state.cfgEdit.providers = state.providers.map(p => ({...p, deployments:(p.deployments||[]).map(d => ({...d}))}));
+  state.cfgEdit.providers = state.providers.map(p => ({...p,
+    gateway_urls: [...(p.gateway_urls?.length ? p.gateway_urls : (p.gateway_url ? [p.gateway_url] : []))],
+    deployments:(p.deployments||[]).map(d => ({...d}))}));
   state.cfgEdit.dirty = false;
   renderCeProv(keepName);
 }
@@ -655,19 +760,64 @@ $("#ceProv").addEventListener("change", () => {
 });
 function fillCfgForm(){
   const p = ceCurrent();
-  if(!p) return;
+  if(!p){   // provider 删光：清空表单，避免残留上一个条目的字段
+    $("#ceName").value = ""; $("#ceLabel").value = "";
+    $("#ceUrls").innerHTML = ""; $("#ceLocal").checked = false;
+    state.cfgEdit.keyClear = false;
+    $("#ceKey").value = ""; $("#ceKey").placeholder = "未配置";
+    $("#ceDeps").innerHTML = "";
+    return;
+  }
   $("#ceName").value = p.name;
   $("#ceLabel").value = p.label;
-  $("#ceUrl").value = p.gateway_url;
+  renderCeUrls();
   $("#ceLocal").checked = !!p.local;
   state.cfgEdit.keyClear = false;
   $("#ceKey").value = "";
   $("#ceKey").placeholder = p.has_key ? "已配置（留空保持不变）" : "未配置";
   renderCeDeps();
 }
+/* 网关地址行：gateway_urls 数组渲染；删除按钮仅在多行时可用（至少保留一条）。
+   gateway_urls 存在（含 ceStash 暂存的空数组）即以它为准——空数组渲染单行空输入，
+   不回退旧 gateway_url；回退仅服务从未有 gateway_urls 字段的遗留数据 */
+function renderCeUrls(){
+  const p = ceCurrent();
+  const raw = p.gateway_urls != null ? p.gateway_urls : [p.gateway_url || ""];
+  const urls = raw.length ? raw : [""];
+  $("#ceUrls").innerHTML = urls.map(u => `
+    <div class="url-row">
+      <input type="text" class="ce-url" value="${esc(u)}" placeholder="http://127.0.0.1:4000 或 https://api.deepseek.com">
+      <button type="button" class="icon-btn danger url-del" aria-label="删除此地址" ${urls.length <= 1 ? "disabled" : ""}>
+        <svg class="ic" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+      </button>
+    </div>`).join("");
+}
+$("#ceUrls").addEventListener("click", e => {
+  const del = e.target.closest(".url-del");
+  if(!del) return;
+  const idx = [...document.querySelectorAll("#ceUrls .url-row")].indexOf(del.closest(".url-row"));
+  ceStash();
+  ceCurrent().gateway_urls.splice(idx, 1);
+  state.cfgEdit.dirty = true;
+  renderCeUrls();
+});
+function ceUrlAdd(){
+  ceStash();
+  const p = ceCurrent();
+  (p.gateway_urls || (p.gateway_urls = [])).push("");
+  state.cfgEdit.dirty = true;
+  renderCeUrls();
+  const rows = document.querySelectorAll("#ceUrls .ce-url");
+  rows[rows.length - 1]?.focus();
+}
 /* 抽屉开合：浮于所有阶段之上；未保存改动关闭前确认；ESC / 遮罩点击可关 */
+let drawerHideTimer = null;   // 关 drawer 的 300ms 退场计时：重开时须撤销，否则动画中途被 hidden
 function openCfgDrawer(){
   state.cfgEdit.lastFocus = document.activeElement;
+  // 编辑目标跟随测速配置面板当前选中的 provider，两处保持对应
+  // （打开时编辑器必为干净态：关闭路径已 confirm 丢弃或保存回服务端权威态）
+  if(state.cfgEdit.selName !== $("#fProvider").value) renderCeProv($("#fProvider").value);
+  clearTimeout(drawerHideTimer);
   const root = $("#drawerRoot");
   root.hidden = false;
   requestAnimationFrame(() => requestAnimationFrame(() => root.classList.add("open")));
@@ -680,7 +830,7 @@ function closeCfgDrawer(){
   document.removeEventListener("keydown", onDrawerKey);
   const root = $("#drawerRoot");
   root.classList.remove("open");
-  setTimeout(() => { root.hidden = true; }, 300);
+  drawerHideTimer = setTimeout(() => { root.hidden = true; }, 300);
   initCfgEditor(state.cfgEdit.selName);   // 丢弃未保存改动，回到服务端权威状态
   const lf = state.cfgEdit.lastFocus;
   if(lf && lf.isConnected) lf.focus();
@@ -783,7 +933,8 @@ function ceStash(){
   if(!p) return;
   p.name = $("#ceName").value.trim();
   p.label = $("#ceLabel").value.trim();
-  p.gateway_url = $("#ceUrl").value.trim();
+  p.gateway_urls = [...document.querySelectorAll("#ceUrls .ce-url")]
+    .map(i => i.value.trim()).filter(Boolean);
   p.local = $("#ceLocal").checked;
   const prev = p.deployments || [];
   p.deployments = [...document.querySelectorAll("#ceDeps .dep-edit")].map((el, i) => ({
@@ -800,14 +951,14 @@ function ceStash(){
 async function ceSave(){
   ceStash();
   const p = ceCurrent();
-  if(!p || !p.name || !p.gateway_url){ setPill("provider 名称与网关地址不能为空", "err"); return; }
+  if(!p || !p.name || !(p.gateway_urls || []).length){ setPill("provider 名称与网关地址不能为空", "err"); return; }
   const keyVal = $("#ceKey").value.trim();
   const btn = $("#btnCeSave");
   btn.disabled = true; btn.textContent = "保存中…";
   try{
     const r = await fetch("/api/config", {method:"PUT", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({providers: state.cfgEdit.providers.map(q => ({
-        name:q.name, label:q.label, gateway_url:q.gateway_url, local:q.local,
+        name:q.name, label:q.label, gateway_urls:q.gateway_urls || [], local:q.local,
         deployments:(q.deployments||[]).map(({_collapsed, ...d}) => d)}))})});
     if(!r.ok){ const d = await r.json().catch(()=>({})); return setPill("保存失败：" + (d.detail || ("HTTP " + r.status)), "err"); }
     if(state.cfgEdit.keyClear || keyVal){
@@ -830,15 +981,18 @@ async function reloadConfig(keepName){
   const sel = $("#fProvider");
   const keep = keepName || sel.value;
   sel.innerHTML = state.providers.map(p =>
-    `<option value="${esc(p.name)}">${esc(p.label)}（${esc(p.gateway_url.replace(/^https?:\/\//,""))}）</option>`).join("");
+    `<option value="${esc(p.name)}">${esc(p.label)}（${esc(provUrlText(p))}）</option>`).join("");
   if([...sel.options].some(o => o.value === keep)) sel.value = keep;
-  state.cfgEdit.providers = state.providers.map(p => ({...p, deployments:(p.deployments||[]).map(d => ({...d}))}));
+  state.cfgEdit.providers = state.providers.map(p => ({...p,
+    gateway_urls: [...(p.gateway_urls?.length ? p.gateway_urls : (p.gateway_url ? [p.gateway_url] : []))],
+    deployments:(p.deployments||[]).map(d => ({...d}))}));
   state.cfgEdit.dirty = false;
   renderCeProv(keep);
   const cp = currentProvider();
   $("#keyHint").innerHTML = !cp ? "" : (cp.has_key
-    ? `API Key 已由服务端 .env 提供（${cp.name}）`
-    : `该 provider 未配置 API Key（.env 的 API_KEY_${cp.name.toUpperCase()}），云端模型将无法认证`);
+    ? `API Key 已由服务端 .env 提供（${esc(cp.name)}）`
+    : `该 provider 未配置 API Key（.env 的 API_KEY_${esc(cp.name.toUpperCase())}），云端模型将无法认证`);
+  saveProviderSel();   // 保持记忆与实际选中一致（编辑对象被删除等回退场景自愈）
   syncDeployCard();
   syncConcurrencyUI();
   refreshModels();
@@ -899,6 +1053,11 @@ function selAllModels(on){
 }
 async function refreshModels(){
   const box = $("#modelList");
+  if(!currentProvider()){   // 空 provider 列表：不请求后端，直接引导新增（ADR-0001）
+    box.innerHTML = '<span class="hint" style="margin:0">新增 Provider 后在此选择被测模型</span>';
+    syncDeployCard();
+    return;
+  }
   box.innerHTML = '<span class="hint" style="margin:0">加载中…</span>';
   try{
     const r = await fetch(`/api/models?provider=${encodeURIComponent($("#fProvider").value)}`);
@@ -939,28 +1098,35 @@ async function startRun(){
     return;
   }
   state.points.clear(); state.maxSeq = -1; state.activeReqs.clear();
+  state.preMeasured.clear();
   state.donePoints = 0;
   state.totalPoints = cfg.models.length * cfg.scenarios.length * cfg.ctx_list.length * cfg.concurrencies.length;
   $("#liveTable tbody").innerHTML = "";
   renderAll(); resetKpis();
   $("#progWrap").hidden = false;
   $("#progFill").style.width = "0%";
-  const r = await fetch("/api/bench/start", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(cfg)});
+  let r;
+  try{ r = await fetch("/api/bench/start", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(cfg)}); }
+  catch(e){ setPill("启动请求发送失败：" + e.message, "err"); return; }
+  if(!r.ok){
+    const d = await r.json().catch(() => ({}));   // 错误体未必是 JSON
+    setPill(d.detail || "启动失败", "err");
+    return;
+  }
   const d = await r.json();
-  if(!r.ok){ setPill(d.detail || "启动失败", "err"); return; }
   state.runId = d.run_id; state.running = true;
   // 本地先记一份（cfg 事件到达后即被服务端权威配置覆盖）
   const cp = currentProvider();
   state.cfg = {...cfg, provider_label: cp?.label, provider_local: cp?.local,
                gateway_url: cp?.gateway_url};
-  $("#btnStart").hidden = true; $("#btnStop").hidden = false; $("#btnDl").disabled = true;
+  $("#btnStart").hidden = true; $("#btnStop").hidden = false; setStopBtn(false); $("#btnDl").disabled = true;
   setPhase("run");         // 测速中：隐藏配置，只展实时事实
   setPill("测速运行中…", "run");
   if(state.es) state.es.close();
   state.es = new EventSource(`/api/bench/events/${d.run_id}`);
   wireEvents();
 }
-/* SSE 断线分级（ADR-0024）：网络瞬断（CONNECTING）仅提示自动重连；
+/* SSE 断线分级（ADR-0011）：网络瞬断（CONNECTING）仅提示自动重连；
    流永久关闭（CLOSED，如服务重启后 run 已不在）时按 active → 历史存档
    分级兜底，不再静默卡死在 run 阶段 */
 function wireEvents(){
@@ -976,7 +1142,14 @@ async function recoverClosedStream(){
   if(!rid || !state.running) return;
   try {
     const act = await (await fetch("/api/bench/active")).json();
-    if((act.runs||[]).some(r => r.run_id === rid)) return;   // 服务端仍在跑，ES 会自行重连
+    if((act.runs||[]).some(r => r.run_id === rid)){
+      // 服务端仍在跑：readyState=CLOSED 的 EventSource 规范上不再自动重连，
+      // 显式重建接续（历史事件回放 + seq 去重，幂等）
+      if(state.es) state.es.close();
+      state.es = new EventSource(`/api/bench/events/${rid}`);
+      wireEvents();
+      return;
+    }
     const h = await fetch(`/api/bench/history/${encodeURIComponent(rid)}`);
     if(h.ok){
       hydrateArchive(await h.json());   // 已结束但事件未放完：存档兜底
@@ -992,7 +1165,21 @@ async function recoverClosedStream(){
   }
 }
 async function stopRun(){
-  if(state.runId) await fetch(`/api/bench/stop/${state.runId}`, {method:"POST"});
+  if(!state.runId) return;
+  // 即时反馈：引擎可能正处探测/长 prefill 中，终态以 SSE stopped 事件为准
+  setStopBtn(true);
+  setPill("正在停止…", "run");
+  try{
+    const r = await fetch(`/api/bench/stop/${state.runId}`, {method:"POST"});
+    if(!r.ok) throw new Error("HTTP " + r.status);
+  }
+  catch(e){ setStopBtn(false); setPill("停止请求发送失败：" + e.message, "err"); }
+}
+/* 停止按钮两态：「停止」/ 点击后等待引擎确认的「停止中…」（禁用防重复点击） */
+function setStopBtn(stopping){
+  const btn = $("#btnStop");
+  btn.disabled = stopping;
+  btn.querySelector("span").textContent = stopping ? "停止中…" : "停止";
 }
 function setPill(msg, cls){
   $("#statusText").textContent = msg;
@@ -1030,7 +1217,7 @@ function finishRun(msg, cls){
   setPill(msg, cls || "");
   loadHistoryList();
   $("#kpiReqs").innerHTML = '0 <small>个</small>';
-  // 完成自动生成测速卡片（ADR-0025）：与历史载入路径一致；无任何测速点跳过
+  // 完成自动生成测速卡片（ADR-0011）：与历史载入路径一致；无任何测速点跳过
   if(state.points.size) genCards();
 }
 
@@ -1064,7 +1251,7 @@ function kpiPush(vSel, wrapSel, fillSel, val, label){
   wrap.title = `${label}：${peak} tok/s`;
   $(fillSel).style.width = (peak ? Math.min(100, val/peak*100) : 0) + "%";
 }
-/* prefill 等待期估值同步 KPI 主数值（ADR-0025）：与实时表同值、以「≈」明示
+/* prefill 等待期估值同步 KPI 主数值（ADR-0007）：与实时表同值、以「≈」明示
    未实测；估值从高往低收敛，**不参与峰值**（峰值条/悬浮峰值只由首 token
    实测帧与点级权威值推进），既动态又不污染峰值 */
 function kpiPushEst(vSel, val){
@@ -1073,6 +1260,8 @@ function kpiPushEst(vSel, val){
 }
 
 /* ---------------- 实时表格 ---------------- */
+/* tick tag = model|scen|ctx|conc|repN|rN（bench.py）：前 4 段即点标识 */
+const livePointKey = tag => tag.split("|").slice(0, 4).join("|");
 function updateLive(t){
   const tb = $("#liveTable tbody");
   let tr = tb.querySelector(`tr[data-tag="${CSS.escape(t.tag)}"]`);
@@ -1092,13 +1281,19 @@ function updateLive(t){
   if(t.phase === "prefill"){
     c[5].textContent = "prefill 中"; c[5].style.color = "var(--yellow)"; c[5].style.fontWeight = "500";
     if(t.ttft != null){
-      // 首 token 到达：prefill 实测读数（请求级），即刻刷新 KPI，不等整点完成（ADR-0018）
-      if(t.speed) kpiPush("#kpiPrefill", "#prefillBarWrap", "#prefillBarFill", t.speed, "最快 Prefill");
+      // 首 token 到达：prefill 实测读数（请求级），即刻刷新 KPI 与实时表
+      // （覆盖等待期的 ≈ 估值），不等整点完成（ADR-0007）
+      if(t.speed){
+        kpiPush("#kpiPrefill", "#prefillBarWrap", "#prefillBarFill", t.speed, "最快 Prefill");
+        c[8].textContent = t.speed + " tok/s";
+        state.preMeasured.add(livePointKey(t.tag));   // 本点已有实测：后续估值帧不再回退 KPI
+      }
     } else if(t.speed){
       // 等待期估值：若此刻完成的 prefill 速度。实时表与 KPI 同步显示（标 ≈），
-      // 首 token 实测帧到达后 KPI 切换为实测值（ADR-0018/0025）
+      // 首 token 实测帧到达后 KPI 切换为实测值（ADR-0007）
       c[8].textContent = "≈" + t.speed + " tok/s";
-      kpiPushEst("#kpiPrefill", t.speed);
+      // conc≥2 时 r0 已出实测而 r1 仍在等待：估值帧不把 KPI 主数值退回「≈」
+      if(!state.preMeasured.has(livePointKey(t.tag))) kpiPushEst("#kpiPrefill", t.speed);
     }
   }
   else if(t.phase === "decode"){
@@ -1113,9 +1308,9 @@ function updateLive(t){
     state.activeReqs.delete(t.tag); updateKpis();
   }
   if(t.ttft != null) c[6].textContent = t.ttft + "s";
-  if(t.tokens) c[7].textContent = Math.round(t.tokens);
-  if(t.phase === "decode" && t.speed) c[8].textContent = t.speed + " tok/s";
-  if(t.elapsed) c[9].textContent = t.elapsed + "s";
+  if(t.tokens != null) c[7].textContent = Math.round(t.tokens);
+  if(t.phase === "decode" && t.speed != null) c[8].textContent = t.speed + " tok/s";
+  if(t.elapsed != null) c[9].textContent = t.elapsed + "s";
 }
 function markLiveDone(p){
   const prefix = `${p.model}|${p.scenario}|${p.ctx_target}|${p.concurrency}|`;
@@ -1134,8 +1329,12 @@ function markLiveDone(p){
 
 /* ---------------- 数据存储与全局渲染 ---------------- */
 const pointKey = p => `${p.model}|${p.scenario}|${p.ctx_target}|${p.concurrency}`;
-// Prefill 展示口径：优先扣 RTT 的净值（ADR-0013），旧存档无该字段时回退毛值
+// Prefill 展示口径：优先扣 RTT 的净值（ADR-0006），旧存档无该字段时回退毛值
 const preOf = p => p.prefill_net_tok_s ?? p.prefill_tok_s;
+// Decode 展示口径：点带显著空窗（max_gap_s>3，传输/调度停滞）且引擎给出
+// 校正口径时取校正值——停滞拖尾只污染毛窗口，校正值更接近服务端真实节奏；
+// 无停滞时与毛值一致，旧存档无 adj 字段回退毛值
+const decOf = p => (p.max_gap_s > 3 && p.decode_tok_s_adj) ? p.decode_tok_s_adj : p.decode_tok_s;
 function addPoint(p){
   if(!state.points.has(pointKey(p))) state.donePoints++;
   state.points.set(pointKey(p), p);
@@ -1143,9 +1342,11 @@ function addPoint(p){
   renderAll();
   const pv = preOf(p);
   if(pv) kpiPush("#kpiPrefill", "#prefillBarWrap", "#prefillBarFill", pv, "最快 Prefill");
-  if(p.decode_tok_s){
-    // 点完成回写权威读数：主数值=最终窗口均值，峰值对比沿用实时逻辑（ADR-0012）
-    kpiPush("#kpiDecode", "#decodeBarWrap", "#decodeBarFill", p.decode_tok_s, "最快 Decode");
+  const dv = decOf(p);
+  if(dv){
+    // 点完成回写权威读数：主数值=最终窗口均值（停滞点取空窗校正口径），
+    // 峰值对比沿用实时逻辑（ADR-0007）
+    kpiPush("#kpiDecode", "#decodeBarWrap", "#decodeBarFill", dv, "最快 Decode");
   }
 }
 /* 结果全量平铺（ADR：模型/场景筛选下拉已移除）——固定排序：
@@ -1162,7 +1363,7 @@ function showDataSections(){
   const run = state.phase === "run";
   const cc = $("#chartCard");
   const wasHidden = cc.hidden;
-  unhide(cc, has && !run);   // 图表属统计分析，完成后才展示
+  unhide(cc, has && !run && !!window.echarts);   // 图表属统计分析，完成后才展示；echarts 缺失（CDN 降级）不展空壳
   if(wasHidden && !cc.hidden){
     // echarts 在隐藏容器内渲染为 0 尺寸：先显示，再 rAF 构建/重绘
     requestAnimationFrame(() => renderCharts());
@@ -1185,14 +1386,21 @@ function renderResultTable(){
     const reqErr = p.reqs.filter(r=>r.err);
     let st = p.all_ok ? "✓ 成功" : (reqErr.length===p.reqs.length ? "✗ 失败" : `部分 ${p.reqs.length-reqErr.length}/${p.reqs.length}`);
     if(p.n_reps > 1) st += ` · 中位×${p.n_reps}`;
+    // decode 中途空窗警示：相邻内容块间隔 >3s 说明传输/服务端调度有停滞，
+    // 毛窗口被拖尾——decode 列已按扣除空窗校正显示（标*），仍标记提示该点
+    // 受过停滞影响（实测隧道拥塞曾把窗口放大 14 倍）
+    const gapWarn = p.max_gap_s > 3
+      ? ` <span style="color:var(--yellow);cursor:help" title="decode 中途最长空窗 ${p.max_gap_s}s（网络传输或服务端调度停滞）；decode 列已按扣除空窗校正（标*），毛值受拖尾不可用于跨次比较">⚠空窗${p.max_gap_s}s</span>` : "";
     const preTitle = p.prefill_net_tok_s != null && p.rtt_ms != null
-      ? ` title="净口径：已扣除网络往返 ${p.rtt_ms}ms（毛值 ${p.prefill_tok_s ?? "-"}）"` : "";
+      ? ` title="净口径：已扣除网络往返 ${esc(p.rtt_ms)}ms（毛值 ${esc(p.prefill_tok_s ?? "-")}）"` : "";
+    const decCorrected = p.max_gap_s > 3 && p.decode_tok_s_adj && p.decode_tok_s_adj !== p.decode_tok_s;
+    const decTitle = decCorrected ? ` title="已扣除空窗（原始窗口含最长 ${esc(p.max_gap_s)}s 停滞，毛值 ${esc(p.decode_tok_s ?? "-")}）"` : "";
     return `<tr class="${p.all_ok?"":"err"}">
       <td>${esc(p.model)}</td><td>${SCEN_LABEL[p.scenario]||esc(p.scenario)}</td><td>${fmtK(p.ctx_target)}</td><td>${p.concurrency}</td>
       <td>${p.prompt_tokens ?? "-"}</td><td>${p.cache_hit_tokens ? fmtK(p.cache_hit_tokens) : "-"}</td><td>${p.ttft_s ?? "-"}</td><td${preTitle}>${preOf(p) ?? "-"}</td>
-      <td>${p.decode_tok_s ?? "-"}</td><td ${showTotal?"":"hidden"}>${p.decode_total_tok_s ?? "-"}</td><td>${p.out_tokens ?? "-"}</td>
-      <td>${p.finish==="length" ? "截断" : (p.finish!=null ? esc(String(p.finish)) : "-")}</td><td>${st}</td></tr>`;
-  }).join("") : `<tr class="empty-row"><td colspan="${showTotal?13:12}">该筛选条件下暂无结果</td></tr>`;
+      <td${decTitle}>${decOf(p) ?? "-"}${decCorrected ? "*" : ""}</td><td ${showTotal?"":"hidden"}>${p.decode_total_tok_s ?? "-"}</td><td>${p.out_tokens ?? "-"}</td>
+      <td>${p.finish==="length" ? "截断" : (p.finish!=null ? esc(String(p.finish)) : "-")}</td><td>${st}${gapWarn}</td></tr>`;
+  }).join("") : `<tr class="empty-row"><td colspan="${showTotal?13:12}">暂无测速点</td></tr>`;
 }
 
 /* ---------------- 折线图（类别轴 4K/8K/16K，数值取整） ---------------- */
@@ -1203,7 +1411,7 @@ function buildChartOpt(pts, metric, title){
   const STYLE = {"1":{color:"#4F46E5", symbol:"circle"}, "2":{color:"#9333EA", symbol:"triangle"}};
   const isPre = metric==="prefill";
   const single = concs.length===1;   // 单并发时并发数无增量信息，图例直接标指标名
-  const getVal = isPre ? preOf : (p=>p.decode_tok_s);
+  const getVal = isPre ? preOf : decOf;
   const ttftOf = p => p.ttft_net_s ?? p.ttft_s;   // 与 prefill 同取净口径
   const mk = (getv, conc, name, dashed, color, yAxisIndex) => ({
     name, type:"line", symbolSize:8, symbol: STYLE[String(conc)]?.symbol || "circle",
@@ -1248,7 +1456,7 @@ function buildChartOpt(pts, metric, title){
 /* 速度曲线按模型 × 场景平铺：两个场景同屏对比，多模型各自成块 */
 function renderCharts(){
   const box = $("#chartList");
-  if(!box || $("#chartCard").hidden) return;
+  if(!box || $("#chartCard").hidden || !window.echarts) return;   // echarts 缺失（CDN 降级）跳过
   state.charts.forEach(c => c.dispose());
   state.charts = [];
   box.innerHTML = "";
@@ -1261,10 +1469,10 @@ function renderCharts(){
     blk.innerHTML =
       (models.length > 1 ? `<h4 class="cm-title">${esc(m)}</h4>` : "") +
       scens.map(sc => `<div class="cm-scen">
-        <div class="cm-scen-name">${SCEN_LABEL[sc] || sc}</div>
+        <div class="cm-scen-name">${SCEN_LABEL[sc] || esc(sc)}</div>
         <div class="grid2">
-          <div class="chartbox" data-scen="${sc}" data-metric="prefill" role="img" aria-label="Prefill / TTFT 折线图"></div>
-          <div class="chartbox" data-scen="${sc}" data-metric="decode" role="img" aria-label="Decode 折线图"></div>
+          <div class="chartbox" data-scen="${esc(sc)}" data-metric="prefill" role="img" aria-label="Prefill / TTFT 折线图"></div>
+          <div class="chartbox" data-scen="${esc(sc)}" data-metric="decode" role="img" aria-label="Decode 折线图"></div>
         </div></div>`).join("");
     box.appendChild(blk);
     blk.querySelectorAll(".chartbox").forEach(el => {
@@ -1293,7 +1501,7 @@ function scenarioStats(pts){
   const ok = pts.filter(p=>p.all_ok);
   const withCtx = (arr) => arr.reduce((m,p)=>p.v>m.v?{v:p.v,ctx:p.ctx}:m, {v:-Infinity,ctx:null});
   const pre = ok.map(p=>({v:preOf(p), ctx:p.ctx_target})).filter(x=>x.v!=null);
-  const dec = ok.map(p=>({v:p.decode_tok_s, ctx:p.ctx_target})).filter(x=>x.v!=null);
+  const dec = ok.map(p=>({v:decOf(p), ctx:p.ctx_target})).filter(x=>x.v!=null);
   const preRange = pre.length ? [Math.min(...pre.map(x=>x.v)), Math.max(...pre.map(x=>x.v))] : null;
   const decRange = dec.length ? [Math.min(...dec.map(x=>x.v)), Math.max(...dec.map(x=>x.v))] : null;
   const prePeak = pre.length ? withCtx(pre) : null;
@@ -1301,7 +1509,7 @@ function scenarioStats(pts){
   const concs = [...new Set(ok.map(p=>p.concurrency))].sort((a,b)=>a-b);
   const baseConc = concs[0];
   const preAvg = pre.length ? pre.reduce((a,x)=>a+x.v,0)/pre.length : null;   // 全档上下文均值
-  const baseDec = ok.filter(p=>p.concurrency===baseConc).map(p=>p.decode_tok_s).filter(v=>v!=null);
+  const baseDec = ok.filter(p=>p.concurrency===baseConc).map(p=>decOf(p)).filter(v=>v!=null);
   const baseDecAvg = baseDec.length ? baseDec.reduce((a,b)=>a+b,0)/baseDec.length : null;
   const hiConc = concs.length > 1 ? concs[concs.length-1] : null;
   const hiVals = hiConc ? ok.filter(p=>p.concurrency===hiConc)
@@ -1317,13 +1525,16 @@ function cardHTML(model){
   // 本地部署隐去网关地址（内网 IP/端口无对外意义）；未知来源默认隐去
   const isLocal = state.cfg?.provider_local ?? currentProvider()?.local ?? true;
   const gw = isLocal ? "" : (state.cfg?.gateway_url || currentProvider()?.gateway_url || "").replace(/^https?:\/\//,"");
+  // 思考口径按存档点位实测推导（reqs[].reason_chars），跨模式/跨模型自明（ADR-0004）
+  const hasReason = all.some(p => (p.reqs || []).some(r => (r.reason_chars || 0) > 0));
   const provLine = [prov, gw].filter(Boolean).join(" · ") +
     ` · 并发 ${[...new Set(all.map(p=>p.concurrency))].sort((a,b)=>a-b).join(" / ")}` +
-    ` · 上下文 ${fmtK(Math.min(...all.map(p=>p.ctx_target)))}~${fmtK(Math.max(...all.map(p=>p.ctx_target)))}`;
+    ` · 上下文 ${fmtK(Math.min(...all.map(p=>p.ctx_target)))}~${fmtK(Math.max(...all.map(p=>p.ctx_target)))}` +
+    ` · ${hasReason ? "思考流计入测速" : "只测正文速度"}`;
 
   // meta：首格固定「模型 = 模型名 · 量化」（deployments[].quant，未配只显模型名），
   // 其后硬件/框架/参数；仅本地部署展示——云端 deployments 只承载 max_ctx 钳制
-  // （ADR-0020），其 label 命中映射会产出「部署: 模型名」噪声单元格
+  // （ADR-0004），其 label 命中映射会产出「部署: 模型名」噪声单元格
   const mi = isLocal ? modelInfo(model) : null;
   const meta = mi ? [
     ["模型", model + (mi.quant ? ` · ${mi.quant}` : "")],
@@ -1359,11 +1570,11 @@ function cardHTML(model){
       <div class="t">${s.baseDecAvg ? "≈ " + round1(s.hiTotal/s.baseDecAvg) + " × 单请求" : ""}</div></div>`);
     const chartImgs = imgs[sc] || {};
     return `<div class="sc-scen-block">
-      <div class="sc-scen-head"><span class="bar"></span><span class="name">${SCEN_LABEL[sc]||sc}</span></div>
+      <div class="sc-scen-head"><span class="bar"></span><span class="name">${SCEN_LABEL[sc]||esc(sc)}</span></div>
       <div class="sc-stats">${cells.join("")}</div>
       <div class="sc-charts">
-        ${chartImgs.prefill ? `<div class="sc-chart-cell"><img src="${chartImgs.prefill}" alt="${sc} prefill 曲线"><div class="cap">Prefill / TTFT · ${SCEN_LABEL[sc]||sc}</div></div>` : ""}
-        ${chartImgs.decode ? `<div class="sc-chart-cell"><img src="${chartImgs.decode}" alt="${sc} decode 曲线"><div class="cap">Decode · ${SCEN_LABEL[sc]||sc}</div></div>` : ""}
+        ${chartImgs.prefill ? `<div class="sc-chart-cell"><img src="${chartImgs.prefill}" alt="${esc(sc)} prefill 曲线"><div class="cap">Prefill / TTFT · ${SCEN_LABEL[sc]||esc(sc)}</div></div>` : ""}
+        ${chartImgs.decode ? `<div class="sc-chart-cell"><img src="${chartImgs.decode}" alt="${esc(sc)} decode 曲线"><div class="cap">Decode · ${SCEN_LABEL[sc]||esc(sc)}</div></div>` : ""}
       </div>
     </div>`;
   }).join("");
@@ -1379,7 +1590,7 @@ function cardHTML(model){
           <div class="sc-sub">Local LLM Speed Report · prefill / decode</div>
         </div>
       </div>
-      <div class="sc-date">测试时间<br>${state.cfg?.started_at || new Date().toLocaleString("zh-CN")}</div>
+      <div class="sc-date">测试时间<br>${esc(state.cfg?.started_at || new Date().toLocaleString("zh-CN"))}</div>
     </div>
     <div class="sc-model">${esc(model)}</div>
     <div class="sc-prov">${esc(provLine)}</div>
@@ -1396,9 +1607,10 @@ function genCards(){
   $("#btnDl").disabled = false;
   $("#cardWrap").scrollIntoView({behavior:"smooth", block:"nearest"});
 }
-/* 离屏渲染各场景图表并导出 base64 */
+/* 离屏渲染各场景图表并导出 base64；echarts 缺失（CDN 降级）时无图可导，返回空集（卡片仍生成，仅无内嵌图） */
 function captureScenarioCharts(model, scens){
   const out = {};
+  if(!offChart) return out;
   for(const sc of scens){
     const pts = [...state.points.values()].filter(p => p.model===model && p.scenario===sc);
     if(!pts.length) continue;
@@ -1410,10 +1622,11 @@ function captureScenarioCharts(model, scens){
   }
   return out;
 }
-/* 多模型卡片合并为单张纵向长图导出（ADR-0024 部分取代 ADR-0023 的逐张导出）：
+/* 多模型卡片合并为单张纵向长图导出（ADR-0011，部分取代旧版逐张导出）：
    异步渲染后再多次 a.click() 会被浏览器当作无手势的多文件下载拦截；
    先逐卡 canvas 渲染、再拼接成一张图一次点击，可靠且单文件更易分享 */
 async function downloadCard(){
+  if(!window.html2canvas){ setPill("html2canvas 未加载（CDN 降级），无法导出 PNG", "err"); return; }
   const cards = [...document.querySelectorAll("#cardWrap .speed-card")];
   if(!cards.length) return;
   const parts = [];
@@ -1439,13 +1652,15 @@ async function downloadCard(){
 
 /* ---------------- 历史记录 ---------------- */
 async function loadHistoryList(){
-  const d = await (await fetch("/api/bench/history")).json();
+  let d;
+  try{ d = await (await fetch("/api/bench/history")).json(); }
+  catch(e){ $("#historySel").innerHTML = '<option value="">历史列表加载失败</option>'; return; }
   $("#historySel").innerHTML = d.history.map(h =>
     `<option value="${esc(h.run_id)}">${esc(h.started_at||"")} · ${(h.models||[]).map(esc).join(",")} · ${h.n_points}点</option>`).join("")
     || '<option value="">暂无记录</option>';
   renderActiveRuns();
 }
-/* 进行中的任务（多标签页入口，ADR-0021）：任意标签页可进入正在跑的测速 */
+/* 进行中的任务（多标签页入口，ADR-0009）：任意标签页可进入正在跑的测速 */
 async function renderActiveRuns(){
   const box = $("#activeRuns");
   let runs = [];
@@ -1464,12 +1679,13 @@ function enterRun(rid, totalPoints){
   if(state.running && state.runId === rid) return;
   if(state.es) state.es.close();
   state.points.clear(); state.maxSeq = -1; state.activeReqs.clear();
+  state.preMeasured.clear();
   state.donePoints = 0; state.totalPoints = totalPoints || 0;
   $("#liveTable tbody").innerHTML = "";
   renderAll(); resetKpis();
   $("#progWrap").hidden = false;
   state.runId = rid; state.running = true; state.cfg = null;   // cfg 事件随回放到达
-  $("#btnStart").hidden = true; $("#btnStop").hidden = false; $("#btnDl").disabled = true;
+  $("#btnStart").hidden = true; $("#btnStop").hidden = false; setStopBtn(false); $("#btnDl").disabled = true;
   setPhase("run");
   setPill("测速运行中…", "run");
   state.es = new EventSource(`/api/bench/events/${rid}`);
@@ -1486,16 +1702,21 @@ async function clearHistory(){
   await fetch("/api/bench/history", {method:"DELETE"});
   await loadHistoryList();
 }
-/* 历史存档/断线兜底的公共水合路径：points、进度、cfg（含 provider 回切） */
+/* 历史存档/断线兜底的公共水合路径：runId、points、进度、cfg（含 provider 回切） */
 function hydrateArchive(d){
+  state.runId = d.run_id;   // 下载 PNG 文件名跟随当前数据所属 run
   state.points.clear();
   (d.results||[]).forEach(p => state.points.set(pointKey(p), p));
   state.donePoints = state.points.size;
   state.totalPoints = state.points.size;
+  bumpProgress();   // 断线兜底路径借此刷新「已完成测试点」KPI 与进度条（loadHistory 随后自覆写）
   if(d.cfg){
     state.cfg = {...d.cfg, started_at: d.started_at};
     if(d.cfg.provider && [...$("#fProvider").options].some(o => o.value === d.cfg.provider)){
       $("#fProvider").value = d.cfg.provider;   // 部署环境跟随记录所属 provider
+      // 与 onProviderChange 同套联动（属临时查看态：不写 provider 选择记忆）
+      syncConcurrencyUI();
+      refreshModels();
     }
     syncDeployCard();
   }

@@ -6,15 +6,12 @@ __pycache__/
 
 # 敏感配置及数据
 .env
+.env.tmp
 config.json
+config.json.tmp
 results/
 
 # 项目记忆文档：仅本地工作区，不入库、不上云
 AGENTS.md
-SOUL.md
-ARCHITECTURE.md
-PROGRESS.md
-design/
-decision/
-impl/
+.memoZ/
 

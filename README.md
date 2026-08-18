@@ -4,7 +4,7 @@
 
 一个 LLM 模型测速台，主打 **数据真实 · 过程可见 · 结论可分享**
 
-**⚡ prefill / decode 分离计量** · **📏 0K~1M 上下文 × 并发 ** · **🎭 创意写作 · 代码生成**
+**⚡ prefill / decode 分离计量** · **📏 0K~1M 上下文 × 并发** · **🎭 创意写作 · 代码生成**
 
 </div>
 
@@ -53,11 +53,13 @@ flowchart LR
 ## 📁 项目结构
 
 ```
+start.sh / start.bat  一键启动（建虚拟环境、装依赖、生成配置、起服务）
 server.py          FastAPI 服务端（provider 解析 + 测速任务 + SSE + 历史 + 配置写入）
 bench.py           测速引擎（prompt 构造、流式计时、矩阵调度）
 static/index.html  单页前端（ECharts 图表 + html2canvas 卡片 + 配置编辑）
 mock_server.py     假 OpenAI 网关（自测）
 corpus/            真实语料（code: llama.cpp 源码 / creative: 公版《红楼梦》）
+docs/images/       测速卡片示例图（README 引用）
 tests/             回归测试
 config.json / .env  provider 配置与凭据（不入库）
 results/           历次测速结果 JSON
