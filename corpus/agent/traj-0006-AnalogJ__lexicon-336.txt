@@ -1,0 +1,858 @@
+[ai]
+It seems that the `auth_token` is not being set in the `config` object. This might be due to the way the `config` object is being created or initialized.
+
+To fix this, we need to ensure that the `auth_token` is correctly set in the `config` object. We should check the code where the `config` object is created to ensure that it includes the `auth_token`.
+
+Let's start by checking the code where the `config` object is created. The `Provider` class includes a `__init__` method that is likely to be involved in setting the `config` object. We should look at the `__init__` method of the `Provider` class to see if it is setting the `config` object correctly.
+
+```
+open lexicon/providers/base.py 37
+```
+
+[user]
+[File: /lexicon/lexicon/providers/base.py (134 lines total)]
+(21 more lines above)
+22:    ttl
+23:    priority
+24:    identifier
+25:
+26:    The provider_env_cli_options will also contain any Provider specific options:
+27:
+28:    auth_username
+29:    auth_token
+30:    auth_password
+31:    ...
+32:
+33:    :param config: is a ConfigResolver object that contains all the options
+34:    for this provider, merged from CLI and Env variables.
+35:    """
+36:
+37:    def __init__(self, config):
+38:        if not isinstance(config, ConfigResolver):
+39:            # If config is a plain dict, we are in a legacy situation.
+40:            # To protect the Provider API, the legacy dict is handled in a
+41:            # correctly defined ConfigResolver.
+42:            self.config = legacy_config_resolver(config)
+43:        else:
+44:            self.config = config
+45:
+46:        # Default ttl
+47:        self.config.with_dict({'ttl': 3600})
+48:
+49:        self.provider_name = self.config.resolve(
+50:            'lexicon:provider_name') or self.config.resolve('lexicon:provider')
+51:        self.domain = self.config.resolve('lexicon:domain')
+52:        self.domain_id = None
+53:
+54:    # Authenticate against provider,
+55:    # Make any requests required to get the domain's id for this provider,
+56:    # so it can be used in subsequent calls.
+57:    # Should throw an error if authentication fails for any reason,
+58:    # of if the domain does not exist.
+59:    def authenticate(self):
+60:        raise NotImplementedError("Providers should implement this!")
+61:
+62:    # Create record. If record already exists with the same content, do nothing'
+63:    def create_record(self, type, name, content):
+64:        raise NotImplementedError("Providers should implement this!")
+65:
+66:    # List all records. Return an empty list if no records found
+67:    # type, name and content are used to filter records.
+68:    # If possible filter during the query, otherwise filter after response is received.
+69:    def list_records(self, type=None, name=None, content=None):
+70:        raise NotImplementedError("Providers should implement this!")
+71:
+72:    # Update a record. Identifier must be specified.
+73:    def update_record(self, identifier, type=None, name=None, content=None):
+74:        raise NotImplementedError("Providers should implement this!")
+75:
+76:    # Delete an existing record.
+77:    # If record does not exist, do nothing.
+78:    # If an identifier is specified, use it, otherwise do a lookup using type, name and content.
+79:    def delete_record(self, identifier=None, type=None, name=None, content=None):
+80:        raise NotImplementedError("Providers should implement this!")
+81:
+82:    # Helpers
+83:    def _request(self, action='GET',  url='/', data=None, query_params=None):
+84:        raise NotImplementedError("Providers should implement this!")
+85:
+86:    def _get(self, url='/', query_params=None):
+87:        return self._request('GET', url, query_params=query_params)
+88:
+89:    def _post(self, url='/', data=None, query_params=None):
+90:        return self._request('POST', url, data=data, query_params=query_params)
+91:
+92:    def _put(self, url='/', data=None, query_params=None):
+93:        return self._request('PUT', url, data=data, query_params=query_params)
+94:
+95:    def _delete(self, url='/', query_params=None):
+96:        return self._request('DELETE', url, query_params=query_params)
+97:
+98:    def _fqdn_name(self, record_name):
+99:        # strip trailing period from fqdn if present
+100:        record_name = record_name.rstrip('.')
+101:        # check if the record_name is fully specified
+102:        if not record_name.endswith(self.domain):
+103:            record_name = "{0}.{1}".format(record_name, self.domain)
+104:        return "{0}.".format(record_name)  # return the fqdn name
+105:
+106:    def _full_name(self, record_name):
+107:        # strip trailing period from fqdn if present
+108:        record_name = record_name.rstrip('.')
+109:        # check if the record_name is fully specified
+110:        if not record_name.endswith(self.domain):
+111:            record_name = "{0}.{1}".format(record_name, self.domain)
+112:        return record_name
+113:
+114:    def _relative_name(self, record_name):
+115:        # strip trailing period from fqdn if present
+116:        record_name = record_name.rstrip('.')
+117:        # check if the record_name is fully specified
+118:        if record_name.endswith(self.domain):
+119:            record_name = record_name[:-len(self.domain)]
+120:            record_name = record_name.rstrip('.')
+121:        return record_name
+(13 more lines below)
+
+(Open file: /lexicon/lexicon/providers/base.py)
+(Current directory: /lexicon)
+bash-$
+
+[ai]
+The `__init__` method of the `BaseProvider` class is responsible for setting the `config` object. It checks if the `config` is an instance of `ConfigResolver` and sets it accordingly.
+
+However, it seems that the `auth_token` is not being set in the `config` object. This might be due to the way the `config` object is being created or initialized.
+
+To fix this, we need to ensure that the `auth_token` is correctly set in the `config` object. We should check the code where the `config` object is created to ensure that it includes the `auth_token`.
+
+Let's start by checking the code where the `config` object is created. The `Provider` class includes a `__init__` method that is likely to be involved in setting the `config` object. We should look at the `__init__` method of the `Provider` class to see if it is setting the `config` object correctly.
+
+```
+open lexicon/providers/memset.py 20
+```
+
+[user]
+[File: /lexicon/lexicon/providers/memset.py (147 lines total)]
+(4 more lines above)
+5:import requests
+6:from lexicon.providers.base import Provider as BaseProvider
+7:
+8:
+9:LOGGER = logging.getLogger(__name__)
+10:
+11:NAMESERVER_DOMAINS = ['memset.com']
+12:
+13:
+14:def ProviderParser(subparser):
+15:    subparser.add_argument(
+16:        "--auth-token", help="specify API key for authentication")
+17:
+18:
+19:class Provider(BaseProvider):
+20:    def __init__(self, config):
+21:        super(Provider, self).__init__(config)
+22:        self.domain_id = None
+23:        self.api_endpoint = 'https://api.memset.com/v1/json'
+24:
+25:    def authenticate(self):
+26:        payload = self._get('/dns.zone_domain_info', {
+27:            'domain': self.domain
+28:        })
+29:        if not payload['zone_id']:
+30:            raise Exception('No domain found')
+31:        self.domain_id = payload['zone_id']
+32:
+33:    # Create record. If record already exists with the same content, do nothing'
+34:    def create_record(self, type, name, content):
+35:        data = {'type': type, 'record': self._relative_name(
+36:            name), 'address': content}
+37:        if self._get_lexicon_option('ttl'):
+38:            data['ttl'] = self._get_lexicon_option('ttl')
+39:        data['zone_id'] = self.domain_id
+40:        check_exists = self.list_records(type=type, name=name, content=content)
+41:        if not len(check_exists) > 0:
+42:            payload = self._get('/dns.zone_record_create', data)
+43:            if payload['id']:
+44:                self._get('/dns.reload')
+45:                LOGGER.debug('create_record: %s', payload['id'])
+46:                return payload['id']
+47:        else:
+48:            return check_exists
+49:
+50:    # List all records. Return an empty list if no records found
+51:    # type, name and content are used to filter records.
+52:    # If possible filter during the query, otherwise filter after response is received.
+53:    def list_records(self, type=None, name=None, content=None):
+54:        payload = self._get('/dns.zone_info', {
+55:            'id': self.domain_id
+56:        })
+57:        records = []
+58:        for record in payload['records']:
+59:            processed_record = {
+60:                'type': record['type'],
+61:                'name': self._full_name(record['record']),
+62:                'ttl': record['ttl'],
+63:                'content': record['address'],
+64:                'id': record['id']
+65:            }
+66:            if name:
+67:                name = self._full_name(name)
+68:            if (processed_record['type'] == type):
+69:                if (name is not None and content is not None):
+70:                    if processed_record['name'] == name and processed_record['content'] == content:
+71:                        records.append(processed_record)
+72:                elif (name is not None and content is None):
+73:                    if processed_record['name'] == name:
+74:                        records.append(processed_record)
+75:                elif (name is None and content is not None):
+76:                    if processed_record['content'] == content:
+77:                        records.append(processed_record)
+78:                else:
+79:                    records.append(processed_record)
+80:
+81:        LOGGER.debug('list_records: %s', records)
+82:        return records
+83:
+84:    # Create or update a record.
+85:    def update_record(self, identifier, type=None, name=None, content=None):
+86:        data = {}
+87:        if not identifier:
+88:            records = self.list_records(type, self._relative_name(name))
+89:            if len(records) == 1:
+90:                identifier = records[0]['id']
+91:            else:
+92:                raise Exception('Record identifier could not be found.')
+93:        if type:
+94:            data['type'] = type
+95:        if name:
+96:            data['record'] = self._relative_name(name)
+97:        if content:
+98:            data['address'] = content
+99:        if self._get_lexicon_option('ttl'):
+100:            data['ttl'] = self._get_lexicon_option('ttl')
+101:        data['id'] = identifier
+102:        data['zone_id'] = self.domain_id
+103:
+104:        payload = self._get('/dns.zone_record_update', data)
+(43 more lines below)
+
+(Open file: /lexicon/lexicon/providers/memset.py)
+(Current directory: /lexicon)
+bash-$
+
+[ai]
+It seems that the `auth_token` is not being set in the `config` object. This might be due to the way the `config` object is being created or initialized.
+
+To fix this, we need to ensure that the `auth_token` is correctly set in the `config` object. We should check the code where the `config` object is created to ensure that it includes the `auth_token`.
+
+Let's start by checking the code where the `config` object is created. The `Provider` class includes a `__init__` method that is likely to be involved in setting the `config` object. We should look at the `__init__` method of the `Provider` class to see if it is setting the `config` object correctly.
+
+```
+open lexicon/providers/base.py 37
+```
+
+[user]
+[File: /lexicon/lexicon/providers/base.py (134 lines total)]
+(21 more lines above)
+22:    ttl
+23:    priority
+24:    identifier
+25:
+26:    The provider_env_cli_options will also contain any Provider specific options:
+27:
+28:    auth_username
+29:    auth_token
+30:    auth_password
+31:    ...
+32:
+33:    :param config: is a ConfigResolver object that contains all the options
+34:    for this provider, merged from CLI and Env variables.
+35:    """
+36:
+37:    def __init__(self, config):
+38:        if not isinstance(config, ConfigResolver):
+39:            # If config is a plain dict, we are in a legacy situation.
+40:            # To protect the Provider API, the legacy dict is handled in a
+41:            # correctly defined ConfigResolver.
+42:            self.config = legacy_config_resolver(config)
+43:        else:
+44:            self.config = config
+45:
+46:        # Default ttl
+47:        self.config.with_dict({'ttl': 3600})
+48:
+49:        self.provider_name = self.config.resolve(
+50:            'lexicon:provider_name') or self.config.resolve('lexicon:provider')
+51:        self.domain = self.config.resolve('lexicon:domain')
+52:        self.domain_id = None
+53:
+54:    # Authenticate against provider,
+55:    # Make any requests required to get the domain's id for this provider,
+56:    # so it can be used in subsequent calls.
+57:    # Should throw an error if authentication fails for any reason,
+58:    # of if the domain does not exist.
+59:    def authenticate(self):
+60:        raise NotImplementedError("Providers should implement this!")
+61:
+62:    # Create record. If record already exists with the same content, do nothing'
+63:    def create_record(self, type, name, content):
+64:        raise NotImplementedError("Providers should implement this!")
+65:
+66:    # List all records. Return an empty list if no records found
+67:    # type, name and content are used to filter records.
+68:    # If possible filter during the query, otherwise filter after response is received.
+69:    def list_records(self, type=None, name=None, content=None):
+70:        raise NotImplementedError("Providers should implement this!")
+71:
+72:    # Update a record. Identifier must be specified.
+73:    def update_record(self, identifier, type=None, name=None, content=None):
+74:        raise NotImplementedError("Providers should implement this!")
+75:
+76:    # Delete an existing record.
+77:    # If record does not exist, do nothing.
+78:    # If an identifier is specified, use it, otherwise do a lookup using type, name and content.
+79:    def delete_record(self, identifier=None, type=None, name=None, content=None):
+80:        raise NotImplementedError("Providers should implement this!")
+81:
+82:    # Helpers
+83:    def _request(self, action='GET',  url='/', data=None, query_params=None):
+84:        raise NotImplementedError("Providers should implement this!")
+85:
+86:    def _get(self, url='/', query_params=None):
+87:        return self._request('GET', url, query_params=query_params)
+88:
+89:    def _post(self, url='/', data=None, query_params=None):
+90:        return self._request('POST', url, data=data, query_params=query_params)
+91:
+92:    def _put(self, url='/', data=None, query_params=None):
+93:        return self._request('PUT', url, data=data, query_params=query_params)
+94:
+95:    def _delete(self, url='/', query_params=None):
+96:        return self._request('DELETE', url, query_params=query_params)
+97:
+98:    def _fqdn_name(self, record_name):
+99:        # strip trailing period from fqdn if present
+100:        record_name = record_name.rstrip('.')
+101:        # check if the record_name is fully specified
+102:        if not record_name.endswith(self.domain):
+103:            record_name = "{0}.{1}".format(record_name, self.domain)
+104:        return "{0}.".format(record_name)  # return the fqdn name
+105:
+106:    def _full_name(self, record_name):
+107:        # strip trailing period from fqdn if present
+108:        record_name = record_name.rstrip('.')
+109:        # check if the record_name is fully specified
+110:        if not record_name.endswith(self.domain):
+111:            record_name = "{0}.{1}".format(record_name, self.domain)
+112:        return record_name
+113:
+114:    def _relative_name(self, record_name):
+115:        # strip trailing period from fqdn if present
+116:        record_name = record_name.rstrip('.')
+117:        # check if the record_name is fully specified
+118:        if record_name.endswith(self.domain):
+119:            record_name = record_name[:-len(self.domain)]
+120:            record_name = record_name.rstrip('.')
+121:        return record_name
+(13 more lines below)
+
+(Open file: /lexicon/lexicon/providers/base.py)
+(Current directory: /lexicon)
+bash-$
+
+[ai]
+The `__init__` method of the `BaseProvider` class is responsible for setting the `config` object. It checks if the `config` is an instance of `ConfigResolver` and sets it accordingly.
+
+However, it seems that the `auth_token` is not being set in the `config` object. This might be due to the way the `config` object is being created or initialized.
+
+To fix this, we need to ensure that the `auth_token` is correctly set in the `config` object. We should check the code where the `config` object is created to ensure that it includes the `auth_token`.
+
+Let's start by checking the code where the `config` object is created. The `Provider` class includes a `__init__` method that is likely to be involved in setting the `config` object. We should look at the `__init__` method of the `Provider` class to see if it is setting the `config` object correctly.
+
+```
+open lexicon/providers/memset.py 20
+```
+
+[user]
+[File: /lexicon/lexicon/providers/memset.py (147 lines total)]
+(4 more lines above)
+5:import requests
+6:from lexicon.providers.base import Provider as BaseProvider
+7:
+8:
+9:LOGGER = logging.getLogger(__name__)
+10:
+11:NAMESERVER_DOMAINS = ['memset.com']
+12:
+13:
+14:def ProviderParser(subparser):
+15:    subparser.add_argument(
+16:        "--auth-token", help="specify API key for authentication")
+17:
+18:
+19:class Provider(BaseProvider):
+20:    def __init__(self, config):
+21:        super(Provider, self).__init__(config)
+22:        self.domain_id = None
+23:        self.api_endpoint = 'https://api.memset.com/v1/json'
+24:
+25:    def authenticate(self):
+26:        payload = self._get('/dns.zone_domain_info', {
+27:            'domain': self.domain
+28:        })
+29:        if not payload['zone_id']:
+30:            raise Exception('No domain found')
+31:        self.domain_id = payload['zone_id']
+32:
+33:    # Create record. If record already exists with the same content, do nothing'
+34:    def create_record(self, type, name, content):
+35:        data = {'type': type, 'record': self._relative_name(
+36:            name), 'address': content}
+37:        if self._get_lexicon_option('ttl'):
+38:            data['ttl'] = self._get_lexicon_option('ttl')
+39:        data['zone_id'] = self.domain_id
+40:        check_exists = self.list_records(type=type, name=name, content=content)
+41:        if not len(check_exists) > 0:
+42:            payload = self._get('/dns.zone_record_create', data)
+43:            if payload['id']:
+44:                self._get('/dns.reload')
+45:                LOGGER.debug('create_record: %s', payload['id'])
+46:                return payload['id']
+47:        else:
+48:            return check_exists
+49:
+50:    # List all records. Return an empty list if no records found
+51:    # type, name and content are used to filter records.
+52:    # If possible filter during the query, otherwise filter after response is received.
+53:    def list_records(self, type=None, name=None, content=None):
+54:        payload = self._get('/dns.zone_info', {
+55:            'id': self.domain_id
+56:        })
+57:        records = []
+58:        for record in payload['records']:
+59:            processed_record = {
+60:                'type': record['type'],
+61:                'name': self._full_name(record['record']),
+62:                'ttl': record['ttl'],
+63:                'content': record['address'],
+64:                'id': record['id']
+65:            }
+66:            if name:
+67:                name = self._full_name(name)
+68:            if (processed_record['type'] == type):
+69:                if (name is not None and content is not None):
+70:                    if processed_record['name'] == name and processed_record['content'] == content:
+71:                        records.append(processed_record)
+72:                elif (name is not None and content is None):
+73:                    if processed_record['name'] == name:
+74:                        records.append(processed_record)
+75:                elif (name is None and content is not None):
+76:                    if processed_record['content'] == content:
+77:                        records.append(processed_record)
+78:                else:
+79:                    records.append(processed_record)
+80:
+81:        LOGGER.debug('list_records: %s', records)
+82:        return records
+83:
+84:    # Create or update a record.
+85:    def update_record(self, identifier, type=None, name=None, content=None):
+86:        data = {}
+87:        if not identifier:
+88:            records = self.list_records(type, self._relative_name(name))
+89:            if len(records) == 1:
+90:                identifier = records[0]['id']
+91:            else:
+92:                raise Exception('Record identifier could not be found.')
+93:        if type:
+94:            data['type'] = type
+95:        if name:
+96:            data['record'] = self._relative_name(name)
+97:        if content:
+98:            data['address'] = content
+99:        if self._get_lexicon_option('ttl'):
+100:            data['ttl'] = self._get_lexicon_option('ttl')
+101:        data['id'] = identifier
+102:        data['zone_id'] = self.domain_id
+103:
+104:        payload = self._get('/dns.zone_record_update', data)
+(43 more lines below)
+
+(Open file: /lexicon/lexicon/providers/memset.py)
+(Current directory: /lexicon)
+bash-$
+
+[ai]
+It seems that the `auth_token` is not being set in the `config` object. This might be due to the way the `config` object is being created or initialized.
+
+To fix this, we need to ensure that the `auth_token` is correctly set in the `config` object. We should check the code where the `config` object is created to ensure that it includes the `auth_token`.
+
+Let's start by checking the code where the `config` object is created. The `Provider` class includes a `__init__` method that is likely to be involved in setting the `config` object. We should look at the `__init__` method of the `Provider` class to see if it is setting the `config` object correctly.
+
+```
+open lexicon/providers/base.py 37
+```
+
+[user]
+[File: /lexicon/lexicon/providers/base.py (134 lines total)]
+(21 more lines above)
+22:    ttl
+23:    priority
+24:    identifier
+25:
+26:    The provider_env_cli_options will also contain any Provider specific options:
+27:
+28:    auth_username
+29:    auth_token
+30:    auth_password
+31:    ...
+32:
+33:    :param config: is a ConfigResolver object that contains all the options
+34:    for this provider, merged from CLI and Env variables.
+35:    """
+36:
+37:    def __init__(self, config):
+38:        if not isinstance(config, ConfigResolver):
+39:            # If config is a plain dict, we are in a legacy situation.
+40:            # To protect the Provider API, the legacy dict is handled in a
+41:            # correctly defined ConfigResolver.
+42:            self.config = legacy_config_resolver(config)
+43:        else:
+44:            self.config = config
+45:
+46:        # Default ttl
+47:        self.config.with_dict({'ttl': 3600})
+48:
+49:        self.provider_name = self.config.resolve(
+50:            'lexicon:provider_name') or self.config.resolve('lexicon:provider')
+51:        self.domain = self.config.resolve('lexicon:domain')
+52:        self.domain_id = None
+53:
+54:    # Authenticate against provider,
+55:    # Make any requests required to get the domain's id for this provider,
+56:    # so it can be used in subsequent calls.
+57:    # Should throw an error if authentication fails for any reason,
+58:    # of if the domain does not exist.
+59:    def authenticate(self):
+60:        raise NotImplementedError("Providers should implement this!")
+61:
+62:    # Create record. If record already exists with the same content, do nothing'
+63:    def create_record(self, type, name, content):
+64:        raise NotImplementedError("Providers should implement this!")
+65:
+66:    # List all records. Return an empty list if no records found
+67:    # type, name and content are used to filter records.
+68:    # If possible filter during the query, otherwise filter after response is received.
+69:    def list_records(self, type=None, name=None, content=None):
+70:        raise NotImplementedError("Providers should implement this!")
+71:
+72:    # Update a record. Identifier must be specified.
+73:    def update_record(self, identifier, type=None, name=None, content=None):
+74:        raise NotImplementedError("Providers should implement this!")
+75:
+76:    # Delete an existing record.
+77:    # If record does not exist, do nothing.
+78:    # If an identifier is specified, use it, otherwise do a lookup using type, name and content.
+79:    def delete_record(self, identifier=None, type=None, name=None, content=None):
+80:        raise NotImplementedError("Providers should implement this!")
+81:
+82:    # Helpers
+83:    def _request(self, action='GET',  url='/', data=None, query_params=None):
+84:        raise NotImplementedError("Providers should implement this!")
+85:
+86:    def _get(self, url='/', query_params=None):
+87:        return self._request('GET', url, query_params=query_params)
+88:
+89:    def _post(self, url='/', data=None, query_params=None):
+90:        return self._request('POST', url, data=data, query_params=query_params)
+91:
+92:    def _put(self, url='/', data=None, query_params=None):
+93:        return self._request('PUT', url, data=data, query_params=query_params)
+94:
+95:    def _delete(self, url='/', query_params=None):
+96:        return self._request('DELETE', url, query_params=query_params)
+97:
+98:    def _fqdn_name(self, record_name):
+99:        # strip trailing period from fqdn if present
+100:        record_name = record_name.rstrip('.')
+101:        # check if the record_name is fully specified
+102:        if not record_name.endswith(self.domain):
+103:            record_name = "{0}.{1}".format(record_name, self.domain)
+104:        return "{0}.".format(record_name)  # return the fqdn name
+105:
+106:    def _full_name(self, record_name):
+107:        # strip trailing period from fqdn if present
+108:        record_name = record_name.rstrip('.')
+109:        # check if the record_name is fully specified
+110:        if not record_name.endswith(self.domain):
+111:            record_name = "{0}.{1}".format(record_name, self.domain)
+112:        return record_name
+113:
+114:    def _relative_name(self, record_name):
+115:        # strip trailing period from fqdn if present
+116:        record_name = record_name.rstrip('.')
+117:        # check if the record_name is fully specified
+118:        if record_name.endswith(self.domain):
+119:            record_name = record_name[:-len(self.domain)]
+120:            record_name = record_name.rstrip('.')
+121:        return record_name
+(13 more lines below)
+
+(Open file: /lexicon/lexicon/providers/base.py)
+(Current directory: /lexicon)
+bash-$
+
+[ai]
+The `__init__` method of the `BaseProvider` class is responsible for setting the `config` object. It checks if the `config` is an instance of `ConfigResolver` and sets it accordingly.
+
+However, it seems that the `auth_token` is not being set in the `config` object. This might be due to the way the `config` object is being created or initialized.
+
+To fix this, we need to ensure that the `auth_token` is correctly set in the `config` object. We should check the code where the `config` object is created to ensure that it includes the `auth_token`.
+
+Let's start by checking the code where the `config` object is created. The `Provider` class includes a `__init__` method that is likely to be involved in setting the `config` object. We should look at the `__init__` method of the `Provider` class to see if it is setting the `config` object correctly.
+
+```
+open lexicon/providers/memset.py 20
+```
+
+[user]
+[File: /lexicon/lexicon/providers/memset.py (147 lines total)]
+(4 more lines above)
+5:import requests
+6:from lexicon.providers.base import Provider as BaseProvider
+7:
+8:
+9:LOGGER = logging.getLogger(__name__)
+10:
+11:NAMESERVER_DOMAINS = ['memset.com']
+12:
+13:
+14:def ProviderParser(subparser):
+15:    subparser.add_argument(
+16:        "--auth-token", help="specify API key for authentication")
+17:
+18:
+19:class Provider(BaseProvider):
+20:    def __init__(self, config):
+21:        super(Provider, self).__init__(config)
+22:        self.domain_id = None
+23:        self.api_endpoint = 'https://api.memset.com/v1/json'
+24:
+25:    def authenticate(self):
+26:        payload = self._get('/dns.zone_domain_info', {
+27:            'domain': self.domain
+28:        })
+29:        if not payload['zone_id']:
+30:            raise Exception('No domain found')
+31:        self.domain_id = payload['zone_id']
+32:
+33:    # Create record. If record already exists with the same content, do nothing'
+34:    def create_record(self, type, name, content):
+35:        data = {'type': type, 'record': self._relative_name(
+36:            name), 'address': content}
+37:        if self._get_lexicon_option('ttl'):
+38:            data['ttl'] = self._get_lexicon_option('ttl')
+39:        data['zone_id'] = self.domain_id
+40:        check_exists = self.list_records(type=type, name=name, content=content)
+41:        if not len(check_exists) > 0:
+42:            payload = self._get('/dns.zone_record_create', data)
+43:            if payload['id']:
+44:                self._get('/dns.reload')
+45:                LOGGER.debug('create_record: %s', payload['id'])
+46:                return payload['id']
+47:        else:
+48:            return check_exists
+49:
+50:    # List all records. Return an empty list if no records found
+51:    # type, name and content are used to filter records.
+52:    # If possible filter during the query, otherwise filter after response is received.
+53:    def list_records(self, type=None, name=None, content=None):
+54:        payload = self._get('/dns.zone_info', {
+55:            'id': self.domain_id
+56:        })
+57:        records = []
+58:        for record in payload['records']:
+59:            processed_record = {
+60:                'type': record['type'],
+61:                'name': self._full_name(record['record']),
+62:                'ttl': record['ttl'],
+63:                'content': record['address'],
+64:                'id': record['id']
+65:            }
+66:            if name:
+67:                name = self._full_name(name)
+68:            if (processed_record['type'] == type):
+69:                if (name is not None and content is not None):
+70:                    if processed_record['name'] == name and processed_record['content'] == content:
+71:                        records.append(processed_record)
+72:                elif (name is not None and content is None):
+73:                    if processed_record['name'] == name:
+74:                        records.append(processed_record)
+75:                elif (name is None and content is not None):
+76:                    if processed_record['content'] == content:
+77:                        records.append(processed_record)
+78:                else:
+79:                    records.append(processed_record)
+80:
+81:        LOGGER.debug('list_records: %s', records)
+82:        return records
+83:
+84:    # Create or update a record.
+85:    def update_record(self, identifier, type=None, name=None, content=None):
+86:        data = {}
+87:        if not identifier:
+88:            records = self.list_records(type, self._relative_name(name))
+89:            if len(records) == 1:
+90:                identifier = records[0]['id']
+91:            else:
+92:                raise Exception('Record identifier could not be found.')
+93:        if type:
+94:            data['type'] = type
+95:        if name:
+96:            data['record'] = self._relative_name(name)
+97:        if content:
+98:            data['address'] = content
+99:        if self._get_lexicon_option('ttl'):
+100:            data['ttl'] = self._get_lexicon_option('ttl')
+101:        data['id'] = identifier
+102:        data['zone_id'] = self.domain_id
+103:
+104:        payload = self._get('/dns.zone_record_update', data)
+(43 more lines below)
+
+(Open file: /lexicon/lexicon/providers/memset.py)
+(Current directory: /lexicon)
+bash-$
+
+[ai]
+It seems that the `auth_token` is not being set in the `config` object. This might be due to the way the `config` object is being created or initialized.
+
+To fix this, we need to ensure that the `auth_token` is correctly set in the `config` object. We should check the code where the `config` object is created to ensure that it includes the `auth_token`.
+
+Let's start by checking the code where the `config` object is created. The `Provider` class includes a `__init__` method that is likely to be involved in setting the `config` object. We should look at the `__init__` method of the `Provider` class to see if it is setting the `config` object correctly.
+
+```
+open lexicon/providers/base.py 37
+```
+
+[user]
+[File: /lexicon/lexicon/providers/base.py (134 lines total)]
+(21 more lines above)
+22:    ttl
+23:    priority
+24:    identifier
+25:
+26:    The provider_env_cli_options will also contain any Provider specific options:
+27:
+28:    auth_username
+29:    auth_token
+30:    auth_password
+31:    ...
+32:
+33:    :param config: is a ConfigResolver object that contains all the options
+34:    for this provider, merged from CLI and Env variables.
+35:    """
+36:
+37:    def __init__(self, config):
+38:        if not isinstance(config, ConfigResolver):
+39:            # If config is a plain dict, we are in a legacy situation.
+40:            # To protect the Provider API, the legacy dict is handled in a
+41:            # correctly defined ConfigResolver.
+42:            self.config = legacy_config_resolver(config)
+43:        else:
+44:            self.config = config
+45:
+46:        # Default ttl
+47:        self.config.with_dict({'ttl': 3600})
+48:
+49:        self.provider_name = self.config.resolve(
+50:            'lexicon:provider_name') or self.config.resolve('lexicon:provider')
+51:        self.domain = self.config.resolve('lexicon:domain')
+52:        self.domain_id = None
+53:
+54:    # Authenticate against provider,
+55:    # Make any requests required to get the domain's id for this provider,
+56:    # so it can be used in subsequent calls.
+57:    # Should throw an error if authentication fails for any reason,
+58:    # of if the domain does not exist.
+59:    def authenticate(self):
+60:        raise NotImplementedError("Providers should implement this!")
+61:
+62:    # Create record. If record already exists with the same content, do nothing'
+63:    def create_record(self, type, name, content):
+64:        raise NotImplementedError("Providers should implement this!")
+65:
+66:    # List all records. Return an empty list if no records found
+67:    # type, name and content are used to filter records.
+68:    # If possible filter during the query, otherwise filter after response is received.
+69:    def list_records(self, type=None, name=None, content=None):
+70:        raise NotImplementedError("Providers should implement this!")
+71:
+72:    # Update a record. Identifier must be specified.
+73:    def update_record(self, identifier, type=None, name=None, content=None):
+74:        raise NotImplementedError("Providers should implement this!")
+75:
+76:    # Delete an existing record.
+77:    # If record does not exist, do nothing.
+78:    # If an identifier is specified, use it, otherwise do a lookup using type, name and content.
+79:    def delete_record(self, identifier=None, type=None, name=None, content=None):
+80:        raise NotImplementedError("Providers should implement this!")
+81:
+82:    # Helpers
+83:    def _request(self, action='GET',  url='/', data=None, query_params=None):
+84:        raise NotImplementedError("Providers should implement this!")
+85:
+86:    def _get(self, url='/', query_params=None):
+87:        return self._request('GET', url, query_params=query_params)
+88:
+89:    def _post(self, url='/', data=None, query_params=None):
+90:        return self._request('POST', url, data=data, query_params=query_params)
+91:
+92:    def _put(self, url='/', data=None, query_params=None):
+93:        return self._request('PUT', url, data=data, query_params=query_params)
+94:
+95:    def _delete(self, url='/', query_params=None):
+96:        return self._request('DELETE', url, query_params=query_params)
+97:
+98:    def _fqdn_name(self, record_name):
+99:        # strip trailing period from fqdn if present
+100:        record_name = record_name.rstrip('.')
+101:        # check if the record_name is fully specified
+102:        if not record_name.endswith(self.domain):
+103:            record_name = "{0}.{1}".format(record_name, self.domain)
+104:        return "{0}.".format(record_name)  # return the fqdn name
+105:
+106:    def _full_name(self, record_name):
+107:        # strip trailing period from fqdn if present
+108:        record_name = record_name.rstrip('.')
+109:        # check if the record_name is fully specified
+110:        if not record_name.endswith(self.domain):
+111:            record_name = "{0}.{1}".format(record_name, self.domain)
+112:        return record_name
+113:
+114:    def _relative_name(self, record_name):
+115:        # strip trailing period from fqdn if present
+116:        record_name = record_name.rstrip('.')
+117:        # check if the record_name is fully specified
+118:        if record_name.endswith(self.domain):
+119:            record_name = record_name[:-len(self.domain)]
+120:            record_name = record_name.rstrip('.')
+121:        return record_name
+(13 more lines below)
+
+(Open file: /lexicon/lexicon/providers/base.py)
+(Current directory: /lexicon)
+bash-$
+
+[ai]
+The `__init__` method of the `BaseProvider` class is responsible for setting the `config` object. It checks if the `config` is an instance of `ConfigResolver` and sets it accordingly.
+
+However, it seems that the `auth_token` is not being set in the `config` object. This might be due to the way the `config` object is being created or initialized.
+
+To fix this, we need to ensure that the `auth_token` is correctly set in the `config` object. We should check the code where the `config` object is created to ensure that it includes the `auth_token`.
+
+Let's start by checking the code where the `config` object is created. The `Provider` class includes a `__init__` method that is likely to be involved in setting the `config` object. We should look at the `__init__` method of the `Provider` class to see if it is setting the `config` object correctly.
+
+```
+open lexicon/providers/memset.py 20
+```

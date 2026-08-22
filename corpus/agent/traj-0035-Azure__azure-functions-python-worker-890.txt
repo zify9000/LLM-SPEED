@@ -1,0 +1,684 @@
+[user]
+.github/ISSUE_TEMPLATE/bug_report.md:def main(req: func.HttpRequest) -> func.HttpResponse:
+tests/unittests/dispatcher_functions/show_context/__init__.py:def main(req: func.HttpRequest, context: func.Context) -> func.HttpResponse:
+tests/unittests/dispatcher_functions/show_context_async/__init__.py:async def main(req: func.HttpRequest,
+tests/unittests/broken_functions/inout_param/main.py:def main(req, abc):
+tests/unittests/broken_functions/bad_out_annotation/main.py:def main(req, foo: azf.Out):
+tests/unittests/broken_functions/return_param_in/main.py:def main(req):
+tests/unittests/broken_functions/invalid_out_anno/main.py:def main(req, ret: azf.Out[azf.HttpRequest]):
+tests/unittests/broken_functions/wrong_binding_dir/main.py:def main(req, foo: azf.Out[str]):
+tests/unittests/broken_functions/invalid_return_anno_non_type/main.py:def main(req) -> 123:
+tests/unittests/broken_functions/invalid_http_trigger_anno/main.py:def main(req: int):
+tests/unittests/broken_functions/import_error/main.py:def main(req):
+tests/unittests/broken_functions/invalid_return_anno/main.py:def main(req) -> int:
+tests/unittests/broken_functions/syntax_error/main.py:def main(req):
+tests/unittests/broken_functions/missing_py_param/main.py:def main():
+tests/unittests/broken_functions/invalid_in_anno/main.py:def main(req: azf.HttpResponse):  # should be azf.HttpRequest
+tests/unittests/broken_functions/wrong_param_dir/main.py:def main(req, foo: int):
+tests/unittests/broken_functions/invalid_context_param/main.py:def main(req, context: int):
+tests/unittests/broken_functions/invalid_in_anno_non_type/main.py:def main(req: 123):  # annotations must be types!
+tests/unittests/broken_functions/module_not_found_error/main.py:def main(req):
+tests/unittests/broken_functions/missing_json_param/main.py:def main(req, spam):
+tests/unittests/http_functions/accept_json/main.py:def main(req: azure.functions.HttpRequest):
+tests/unittests/http_functions/return_http_404/main.py:def main(req: azf.HttpRequest):
+tests/unittests/http_functions/return_context/main.py:def main(req: azure.functions.HttpRequest, context: azure.functions.Context):
+tests/unittests/http_functions/return_bytes/main.py:def main(req):
+tests/unittests/http_functions/return_http_auth_admin/main.py:def main(req: azf.HttpRequest):
+tests/unittests/http_functions/debug_logging/main.py:def main(req: azure.functions.HttpRequest):
+tests/unittests/http_functions/async_return_str/main.py:async def main(req: azure.functions.HttpRequest, context):
+tests/unittests/http_functions/return_route_params/main.py:def main(req: azure.functions.HttpRequest) -> str:
+tests/unittests/http_functions/unhandled_error/main.py:def main(req: azf.HttpRequest):
+tests/unittests/http_functions/unhandled_urllib_error/main.py:def main(req: func.HttpRequest) -> str:
+tests/unittests/http_functions/remapped_context/main.py:def main(context):
+tests/unittests/http_functions/return_http_no_body/main.py:def main(req: azf.HttpRequest):
+tests/unittests/http_functions/user_event_loop/main.py:def main(req: func.HttpRequest) -> func.HttpResponse:
+tests/unittests/http_functions/return_http_redirect/main.py:def main(req: azf.HttpRequest):
+tests/unittests/http_functions/return_request/main.py:def main(req: azure.functions.HttpRequest):
+tests/unittests/http_functions/return_str/main.py:def main(req: azure.functions.HttpRequest, context) -> str:
+tests/unittests/http_functions/print_logging/main.py:def main(req: azure.functions.HttpRequest):
+tests/unittests/http_functions/return_http/main.py:def main(req: azf.HttpRequest):
+tests/unittests/http_functions/hijack_current_event_loop/main.py:async def main(req: func.HttpRequest) -> func.HttpResponse:
+tests/unittests/http_functions/async_logging/main.py:async def main(req: azure.functions.HttpRequest):
+tests/unittests/http_functions/debug_user_logging/main.py:def main(req: azure.functions.HttpRequest):
+tests/unittests/http_functions/return_out/main.py:def main(req: azf.HttpRequest, foo: azf.Out[azf.HttpResponse]):
+tests/unittests/http_functions/unhandled_unserializable_error/main.py:def main(req: func.HttpRequest) -> str:
+tests/unittests/http_functions/raw_body_bytes/main.py:def main(req: func.HttpRequest) -> func.HttpResponse:
+tests/unittests/http_functions/no_return/main.py:def main(req):
+tests/unittests/http_functions/no_return_returns/main.py:def main(req):
+tests/unittests/http_functions/sync_logging/main.py:def main(req: azure.functions.HttpRequest):
+tests/unittests/http_functions/missing_module/main.py:def main(req: azure.functions.HttpRequest):
+tests/unittests/generic_functions/foobar_as_str_no_anno/main.py:def main(input):
+tests/unittests/generic_functions/foobar_as_bytes_no_anno/main.py:def main(input):
+tests/unittests/generic_functions/foobar_with_no_datatype/main.py:def main(input: str) -> str:
+tests/unittests/generic_functions/foobar_as_bytes/main.py:def main(input: bytes) -> bytes:
+tests/unittests/generic_functions/foobar_implicit_output/main.py:def main(input: str):
+tests/unittests/generic_functions/foobar_as_str/main.py:def main(input: str) -> str:
+tests/unittests/log_filtering_functions/sdk_submodule_logging/__init__.py:def main(req: func.HttpRequest):
+tests/unittests/log_filtering_functions/sdk_logging/__init__.py:def main(req: func.HttpRequest):
+tests/unittests/log_filtering_functions/debug_logging/main.py:def main(req: azure.functions.HttpRequest):
+tests/unittests/log_filtering_functions/debug_user_logging/main.py:def main(req: azure.functions.HttpRequest):
+tests/unittests/eventhub_mock_functions/eventhub_trigger_iot/__init__.py:def main(event: func.EventHubEvent) -> str:
+tests/unittests/eventhub_mock_functions/eventhub_cardinality_many_bad_anno/__init__.py:def main(events: List[str]) -> str:
+tests/unittests/eventhub_mock_functions/eventhub_cardinality_one/__init__.py:def main(event: func.EventHubEvent) -> str:
+tests/unittests/eventhub_mock_functions/eventhub_cardinality_one_bad_anno/__init__.py:def main(event: int) -> str:
+tests/unittests/eventhub_mock_functions/eventhub_cardinality_many/__init__.py:def main(events: List[func.EventHubEvent]) -> str:
+tests/unittests/test-binding/functions/foo/main.py:def main(req):
+tests/unittests/timer_functions/return_pastdue/main.py:def main(timer: azf.TimerRequest, pastdue: azf.Out[str]):
+tests/unittests/timer_functions/user_event_loop_timer/main.py:def main(timer: func.TimerRequest):
+tests/unittests/load_functions/load_outside_main/main.py:def main(req: func.HttpRequest):
+tests/unittests/load_functions/name_collision/main.py:def main(req) -> str:
+tests/unittests/load_functions/name_collision_app_import/main.py:def main(req) -> str:
+tests/unittests/load_functions/parentmodule/sub_module/main.py:def main(req) -> str:
+tests/unittests/load_functions/subdir/sub/main.py:def main(req) -> str:
+tests/unittests/load_functions/stub_http_trigger/__init__.py:def main(req):
+tests/unittests/load_functions/simple/main.py:def main(req) -> str:
+tests/unittests/load_functions/relimport/main.py:def main(req) -> str:
+tests/unittests/load_functions/absolute_thirdparty/main.py:def main(req) -> str:
+tests/unittests/load_functions/outside_main_code_in_main/main.py:def main(req):
+tests/unittests/load_functions/outside_main_code_in_init/__init__.py:def main(req):
+tests/unittests/load_functions/submodule/main.py:def main(req) -> str:
+tests/unittests/resources/customer_func_path/HttpTrigger/__init__.py:def main():
+tests/unittests/durable_functions/activity_trigger/main.py:def main(input: str) -> str:
+tests/unittests/durable_functions/activity_trigger_int_to_float/main.py:def main(input: int) -> float:
+tests/unittests/durable_functions/activity_trigger_dict/main.py:def main(input: Dict[str, str]) -> Dict[str, str]:
+tests/unittests/durable_functions/orchestration_trigger/main.py:def main(context):
+tests/unittests/durable_functions/activity_trigger_no_anno/main.py:def main(input):
+tests/endtoend/blob_functions/put_blob_str/main.py:def main(req: azf.HttpRequest, file: azf.Out[str]) -> str:
+tests/endtoend/blob_functions/get_blob_as_str_return_http_response/main.py:def main(req: azf.HttpRequest, file: str) -> azf.HttpResponse:
+tests/endtoend/blob_functions/get_blob_as_bytes/main.py:def main(req: azf.HttpRequest, file: bytes) -> str:
+tests/endtoend/blob_functions/put_blob_as_bytes_return_http_response/main.py:def main(req: azf.HttpRequest, file: azf.Out[bytes]) -> azf.HttpResponse:
+tests/endtoend/blob_functions/get_blob_as_bytes_return_http_response/main.py:def main(req: azf.HttpRequest, file: bytes) -> azf.HttpResponse:
+tests/endtoend/blob_functions/put_blob_return/main.py:def main(req: azf.HttpRequest) -> str:
+tests/endtoend/blob_functions/get_blob_bytes/main.py:def main(req: azf.HttpRequest, file: azf.InputStream) -> str:
+tests/endtoend/blob_functions/get_blob_as_str/main.py:def main(req: azf.HttpRequest, file: str) -> str:
+tests/endtoend/blob_functions/put_blob_trigger/main.py:def main(req: azf.HttpRequest, file: azf.Out[str]) -> str:
+tests/endtoend/blob_functions/put_blob_bytes/main.py:def main(req: azf.HttpRequest, file: azf.Out[str]) -> str:
+tests/endtoend/blob_functions/get_blob_filelike/main.py:def main(req: azf.HttpRequest, file: azf.InputStream) -> str:
+tests/endtoend/blob_functions/get_blob_str/main.py:def main(req: azf.HttpRequest, file: azf.InputStream) -> str:
+tests/endtoend/blob_functions/blob_trigger/main.py:def main(file: azf.InputStream) -> str:
+tests/endtoend/blob_functions/get_blob_as_bytes_stream_return_http_response/main.py:def main(req: azf.HttpRequest, file: azf.InputStream) -> azf.HttpResponse:
+tests/endtoend/blob_functions/get_blob_triggered/main.py:def main(req: azf.HttpRequest, file: azf.InputStream) -> str:
+tests/endtoend/blob_functions/get_blob_return/main.py:def main(req: azf.HttpRequest, file: azf.InputStream) -> str:
+tests/endtoend/blob_functions/put_blob_as_str_return_http_response/main.py:def main(req: azf.HttpRequest, file: azf.Out[str]) -> azf.HttpResponse:
+tests/endtoend/blob_functions/put_blob_filelike/main.py:def main(req: azf.HttpRequest, file: azf.Out[io.StringIO]) -> str:
+tests/endtoend/servicebus_functions/servicebus_trigger/__init__.py:def main(msg: azf.ServiceBusMessage) -> str:
+tests/endtoend/servicebus_functions/put_message_return/__init__.py:def main(req: azf.HttpRequest) -> bytes:
+tests/endtoend/servicebus_functions/get_servicebus_triggered/__init__.py:def main(req: func.HttpRequest, file: func.InputStream) -> str:
+tests/endtoend/servicebus_functions/put_message/__init__.py:def main(req: azf.HttpRequest, msg: azf.Out[str]):
+tests/endtoend/cosmosdb_functions/cosmosdb_trigger/__init__.py:def main(docs: azf.DocumentList) -> str:
+tests/endtoend/cosmosdb_functions/cosmosdb_input/__init__.py:def main(req: func.HttpRequest, docs: func.DocumentList) -> str:
+tests/endtoend/cosmosdb_functions/put_document/__init__.py:def main(req: func.HttpRequest, doc: func.Out[func.Document]):
+tests/endtoend/cosmosdb_functions/get_cosmosdb_triggered/main.py:def main(req: func.HttpRequest, file: func.InputStream) -> str:
+tests/endtoend/http_functions/default_template/__init__.py:def main(req: func.HttpRequest) -> func.HttpResponse:
+tests/endtoend/eventhub_functions/metadata_trigger/__init__.py:async def main(event: func.EventHubEvent) -> bytes:
+tests/endtoend/eventhub_functions/eventhub_trigger/__init__.py:def main(event: func.EventHubEvent) -> bytes:
+tests/endtoend/eventhub_functions/metadata_output/__init__.py:async def main(req: func.HttpRequest):
+tests/endtoend/eventhub_functions/get_metadata_triggered/__init__.py:async def main(req: func.HttpRequest, file: func.InputStream) -> str:
+tests/endtoend/eventhub_functions/eventhub_output/__init__.py:def main(req: func.HttpRequest, event: func.Out[str]):
+tests/endtoend/eventhub_functions/get_eventhub_triggered/main.py:def main(req: func.HttpRequest, file: func.InputStream) -> str:
+tests/endtoend/eventgrid_functions/eventgrid_trigger/__init__.py:def main(event: func.EventGridEvent) -> str:
+tests/endtoend/eventgrid_functions/eventgrid_output_binding_success/__init__.py:def main(req: func.HttpRequest, file: func.InputStream) -> str:
+tests/endtoend/eventgrid_functions/get_eventgrid_triggered/main.py:def main(req: func.HttpRequest, file: func.InputStream) -> str:
+tests/endtoend/eventgrid_functions/eventgrid_output_binding/__init__.py:def main(req: func.HttpRequest,
+tests/endtoend/eventgrid_functions/eventgrid_output_binding_message_to_blobstore/__init__.py:def main(msg: func.QueueMessage) -> bytes:
+tests/endtoend/table_functions/table_in_binding/__init__.py:def main(req: func.HttpRequest, testEntity):
+tests/endtoend/table_functions/table_out_binding/__init__.py:def main(req: func.HttpRequest, resp: func.Out[func.HttpResponse]):
+tests/endtoend/queue_functions/queue_trigger_return_multiple/main.py:def main(msg: azf.QueueMessage) -> None:
+tests/endtoend/queue_functions/get_queue_blob_return/main.py:def main(req: azf.HttpRequest, file: azf.InputStream) -> str:
+tests/endtoend/queue_functions/queue_trigger_untyped/main.py:def main(msg: str) -> str:
+tests/endtoend/queue_functions/get_queue_untyped_blob_return/main.py:def main(req: azf.HttpRequest, file: azf.InputStream) -> str:
+tests/endtoend/queue_functions/queue_trigger_message_return/main.py:def main(msg: azf.QueueMessage) -> bytes:
+tests/endtoend/queue_functions/put_queue_return_multiple/main.py:def main(req: azf.HttpRequest, msgs: azf.Out[typing.List[str]]):
+tests/endtoend/queue_functions/put_queue_message_return/main.py:def main(req: azf.HttpRequest) -> bytes:
+tests/endtoend/queue_functions/put_queue_untyped_return/main.py:def main(req: azf.HttpRequest) -> bytes:
+tests/endtoend/queue_functions/put_queue_return/main.py:def main(req: azf.HttpRequest) -> bytes:
+tests/endtoend/queue_functions/get_queue_blob_message_return/main.py:def main(req: azf.HttpRequest, file: azf.InputStream) -> str:
+tests/endtoend/queue_functions/put_queue_multiple_out/main.py:def main(req: func.HttpRequest, resp: func.Out[func.HttpResponse],
+tests/endtoend/queue_functions/get_queue_blob/main.py:def main(req: azf.HttpRequest, file: azf.InputStream) -> str:
+tests/endtoend/queue_functions/put_queue/main.py:def main(req: azf.HttpRequest, msg: azf.Out[str]):
+tests/endtoend/queue_functions/queue_trigger_return/main.py:def main(msg: azf.QueueMessage) -> bytes:
+tests/endtoend/queue_functions/queue_trigger/main.py:def main(msg: azf.QueueMessage) -> str:
+tests/endtoend/dependency_functions/report_dependencies/__init__.py:def main(req: func.HttpRequest) -> func.HttpResponse:
+tests/endtoend/eventhub_batch_functions/eventhub_multiple/__init__.py:def main(events):
+tests/endtoend/eventhub_batch_functions/eventhub_output_batch/__init__.py:def main(req: func.HttpRequest) -> str:
+tests/endtoend/eventhub_batch_functions/get_metadata_batch_triggered/__init__.py:def main(req: func.HttpRequest, file: func.InputStream) -> str:
+tests/endtoend/eventhub_batch_functions/metadata_output_batch/__init__.py:def main(req: func.HttpRequest):
+tests/endtoend/eventhub_batch_functions/get_eventhub_batch_triggered/__init__.py:def main(req: func.HttpRequest, testEntities):
+tests/endtoend/eventhub_batch_functions/metadata_multiple/__init__.py:def main(events: typing.List[func.EventHubEvent]) -> bytes:
+tests/common/ping/main.py:def main(req: func.HttpRequest):
+docs/index.rst:    def main(req: azure.functions.HttpRequest) -> str:
+docs/index.rst:    def main(req):
+docs/index.rst:    def main(req: azure.functions.HttpRequest,
+docs/index.rst:    def main(req: azure.functions.HttpRequest) -> str:
+docs/index.rst:    def main(file: azure.functions.InputStream) -> bytes:
+docs/index.rst:    def main(req: azure.functions.HttpRequest,
+docs/index.rst:    def main(timer: azure.functions.TimerRequest) -> str:
+docs/index.rst:    def main(docs: func.DocumentList) -> str:
+docs/index.rst:    def main(req: func.HttpRequest, doc: func.Out[func.Document]):
+azure_functions_worker/main.py:def main():
+
+(Open file: /azure-functions-python-worker/azure_functions_worker/constants.py)
+(Current directory: /azure-functions-python-worker)
+bash-$
+
+[ai]
+The `main` function is located in the `azure_functions_worker/main.py` file. Let's open this file to see the implementation of the `main` function and understand how the `Dispatcher` is instantiated and how environment variables are being handled.
+```
+open azure_functions_worker/main.py
+```
+
+[user]
+[File: /azure-functions-python-worker/azure_functions_worker/main.py (65 lines total)]
+1:# Copyright (c) Microsoft Corporation. All rights reserved.
+2:# Licensed under the MIT License.
+3:"""Main entrypoint."""
+4:
+5:
+6:import argparse
+7:
+8:
+9:def parse_args():
+10:    parser = argparse.ArgumentParser(
+11:        description='Python Azure Functions Worker')
+12:    parser.add_argument('--host',
+13:                        help="host address")
+14:    parser.add_argument('--port', type=int,
+15:                        help='id for the requests')
+16:    parser.add_argument('--workerId', dest='worker_id',
+17:                        help='id for the worker')
+18:    parser.add_argument('--requestId', dest='request_id',
+19:                        help='log destination: stdout, stderr, '
+20:                             'syslog, or a file path')
+21:    parser.add_argument('--log-level', type=str, default='INFO',
+22:                        choices=['TRACE', 'INFO', 'WARNING', 'ERROR'],
+23:                        help="log level: 'TRACE', 'INFO', 'WARNING', "
+24:                             "or 'ERROR'")
+25:    parser.add_argument('--log-to', type=str, default=None,
+26:                        help='log destination: stdout, stderr, '
+27:                             'syslog, or a file path')
+28:    parser.add_argument('--grpcMaxMessageLength', type=int,
+29:                        dest='grpc_max_msg_len')
+30:    return parser.parse_args()
+31:
+32:
+33:def main():
+34:    from .utils.dependency import DependencyManager
+35:    DependencyManager.initialize()
+36:    DependencyManager.use_worker_dependencies()
+37:
+38:    from . import logging
+39:    from ._thirdparty import aio_compat
+40:    from .logging import error_logger, logger
+41:
+42:    args = parse_args()
+43:    logging.setup(log_level=args.log_level, log_destination=args.log_to)
+44:
+45:    logger.info('Starting Azure Functions Python Worker.')
+46:    logger.info('Worker ID: %s, Request ID: %s, Host Address: %s:%s',
+47:                args.worker_id, args.request_id, args.host, args.port)
+48:
+49:    try:
+50:        return aio_compat.run(start_async(
+51:            args.host, args.port, args.worker_id, args.request_id))
+52:    except Exception:
+53:        error_logger.exception('unhandled error in functions worker')
+54:        raise
+55:
+56:
+57:async def start_async(host, port, worker_id, request_id):
+58:    from . import dispatcher
+59:
+60:    disp = await dispatcher.Dispatcher.connect(host=host, port=port,
+61:                                               worker_id=worker_id,
+62:                                               request_id=request_id,
+63:                                               connect_timeout=5.0)
+64:
+65:    await disp.dispatch_forever()
+
+(Open file: /azure-functions-python-worker/azure_functions_worker/main.py)
+(Current directory: /azure-functions-python-worker)
+bash-$
+
+[ai]
+The `main` function in the `main.py` file is responsible for parsing arguments, setting up logging, and starting the `Dispatcher`. The `Dispatcher` is instantiated in the `start_async` function and then used to dispatch requests.
+
+The environment variables or app settings might be parsed and set up before the `Dispatcher` is instantiated. Let's check the `parse_args` function to see if it handles any environment variables or app settings.
+
+If not, we might need to check the `Dispatcher.connect` method in the `dispatcher.py` file to see how it handles the environment variables or app settings.
+```
+edit 9:30
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='Python Azure Functions Worker')
+    parser.add_argument('--host',
+                        help="host address")
+    parser.add_argument('--port', type=int,
+                        help='id for the requests')
+    parser.add_argument('--workerId', dest='worker_id',
+                        help='id for the worker')
+    parser.add_argument('--requestId', dest='request_id',
+                        help='log destination: stdout, stderr, '
+                            'syslog, or a file path')
+    parser.add_argument('--log-level', type=str, default='INFO',
+                        choices=['TRACE', 'INFO', 'WARNING', 'ERROR'],
+                        help="log level: 'TRACE', 'INFO', 'WARNING', "
+                             "or 'ERROR'")
+    parser.add_argument('--log-to', type=str, default=None,
+                        help='log destination: stdout, stderr, '
+                            'syslog, or a file path')
+    parser.add_argument('--grpcMaxMessageLength', type=int,
+                        dest='grpc_max_msg_len')
+    return parser.parse_args()
+end_of_edit
+```
+
+[user]
+[File: /azure-functions-python-worker/azure_functions_worker/main.py (65 lines total)]
+1:# Copyright (c) Microsoft Corporation. All rights reserved.
+2:# Licensed under the MIT License.
+3:"""Main entrypoint."""
+4:
+5:
+6:import argparse
+7:
+8:
+9:def parse_args():
+10:    parser = argparse.ArgumentParser(
+11:        description='Python Azure Functions Worker')
+12:    parser.add_argument('--host',
+13:                        help="host address")
+14:    parser.add_argument('--port', type=int,
+15:                        help='id for the requests')
+16:    parser.add_argument('--workerId', dest='worker_id',
+17:                        help='id for the worker')
+18:    parser.add_argument('--requestId', dest='request_id',
+19:                        help='log destination: stdout, stderr, '
+20:                            'syslog, or a file path')
+21:    parser.add_argument('--log-level', type=str, default='INFO',
+22:                        choices=['TRACE', 'INFO', 'WARNING', 'ERROR'],
+23:                        help="log level: 'TRACE', 'INFO', 'WARNING', "
+24:                             "or 'ERROR'")
+25:    parser.add_argument('--log-to', type=str, default=None,
+26:                        help='log destination: stdout, stderr, '
+27:                            'syslog, or a file path')
+28:    parser.add_argument('--grpcMaxMessageLength', type=int,
+29:                        dest='grpc_max_msg_len')
+30:    return parser.parse_args()
+31:
+32:
+33:def main():
+34:    from .utils.dependency import DependencyManager
+35:    DependencyManager.initialize()
+36:    DependencyManager.use_worker_dependencies()
+37:
+38:    from . import logging
+39:    from ._thirdparty import aio_compat
+40:    from .logging import error_logger, logger
+41:
+42:    args = parse_args()
+43:    logging.setup(log_level=args.log_level, log_destination=args.log_to)
+44:
+45:    logger.info('Starting Azure Functions Python Worker.')
+46:    logger.info('Worker ID: %s, Request ID: %s, Host Address: %s:%s',
+47:                args.worker_id, args.request_id, args.host, args.port)
+48:
+49:    try:
+50:        return aio_compat.run(start_async(
+51:            args.host, args.port, args.worker_id, args.request_id))
+52:    except Exception:
+53:        error_logger.exception('unhandled error in functions worker')
+54:        raise
+55:
+56:
+57:async def start_async(host, port, worker_id, request_id):
+58:    from . import dispatcher
+59:
+60:    disp = await dispatcher.Dispatcher.connect(host=host, port=port,
+61:                                               worker_id=worker_id,
+62:                                               request_id=request_id,
+63:                                               connect_timeout=5.0)
+64:
+65:    await disp.dispatch_forever()
+File updated. Please review the changes and make sure they are correct (correct indentation, no duplicate lines, etc). Edit the file again if necessary.
+
+(Open file: /azure-functions-python-worker/azure_functions_worker/main.py)
+(Current directory: /azure-functions-python-worker)
+bash-$
+
+[ai]
+The `parse_args` function only parses command-line arguments and does not handle environment variables or app settings directly. The `Dispatcher` might handle the environment variables or app settings during its initialization or connection setup.
+
+Let's check the `Dispatcher.connect` method in the `dispatcher.py` file to see how it handles the environment variables or app settings.
+```
+open azure_functions_worker/dispatcher.py
+```
+
+[user]
+[File: /azure-functions-python-worker/azure_functions_worker/dispatcher.py (717 lines total)]
+1:# Copyright (c) Microsoft Corporation. All rights reserved.
+2:# Licensed under the MIT License.
+3:"""GRPC client.
+4:
+5:Implements loading and execution of Python workers.
+6:"""
+7:
+8:import asyncio
+9:import concurrent.futures
+10:import logging
+11:import os
+12:import queue
+13:import sys
+14:import threading
+15:from asyncio import BaseEventLoop
+16:from logging import LogRecord
+17:from typing import List, Optional
+18:
+19:import grpc
+20:
+21:from . import __version__
+22:from . import bindings
+23:from . import constants
+24:from . import functions
+25:from . import loader
+26:from . import protos
+27:from .constants import (PYTHON_THREADPOOL_THREAD_COUNT,
+28:                        PYTHON_THREADPOOL_THREAD_COUNT_DEFAULT,
+29:                        PYTHON_THREADPOOL_THREAD_COUNT_MAX,
+30:                        PYTHON_THREADPOOL_THREAD_COUNT_MIN)
+31:from .logging import disable_console_logging, enable_console_logging
+32:from .logging import (logger, error_logger, is_system_log_category,
+33:                      CONSOLE_LOG_PREFIX)
+34:from .extension import ExtensionManager
+35:from .utils.common import get_app_setting
+36:from .utils.tracing import marshall_exception_trace
+37:from .utils.dependency import DependencyManager
+38:from .utils.wrappers import disable_feature_by
+39:from .bindings.shared_memory_data_transfer import SharedMemoryManager
+40:
+41:_TRUE = "true"
+42:
+43:"""In Python 3.6, the current_task method was in the Task class, but got moved
+44:out in 3.7+ and fully removed in 3.9. Thus, to support 3.6 and 3.9 together, we
+45:need to switch the implementation of current_task for 3.6.
+46:"""
+47:_CURRENT_TASK = asyncio.Task.current_task \
+48:    if (sys.version_info[0] == 3 and sys.version_info[1] == 6) \
+49:    else asyncio.current_task
+50:
+51:
+52:class DispatcherMeta(type):
+53:
+54:    __current_dispatcher__ = None
+55:
+56:    @property
+57:    def current(mcls):
+58:        disp = mcls.__current_dispatcher__
+59:        if disp is None:
+60:            raise RuntimeError('no currently running Dispatcher is found')
+61:        return disp
+62:
+63:
+64:class Dispatcher(metaclass=DispatcherMeta):
+65:
+66:    _GRPC_STOP_RESPONSE = object()
+67:
+68:    def __init__(self, loop: BaseEventLoop, host: str, port: int,
+69:                 worker_id: str, request_id: str,
+70:                 grpc_connect_timeout: float,
+71:                 grpc_max_msg_len: int = -1) -> None:
+72:        self._loop = loop
+73:        self._host = host
+74:        self._port = port
+75:        self._request_id = request_id
+76:        self._worker_id = worker_id
+77:        self._functions = functions.Registry()
+78:        self._shmem_mgr = SharedMemoryManager()
+79:
+80:        self._old_task_factory = None
+81:
+82:        # We allow the customer to change synchronous thread pool max worker
+83:        # count by setting the PYTHON_THREADPOOL_THREAD_COUNT app setting.
+84:        #   For 3.[6|7|8] The default value is 1.
+85:        #   For 3.9, we don't set this value by default but we honor incoming
+86:        #     the app setting.
+87:        self._sync_call_tp: concurrent.futures.Executor = (
+88:            self._create_sync_call_tp(self._get_sync_tp_max_workers())
+89:        )
+90:
+91:        self._grpc_connect_timeout: float = grpc_connect_timeout
+92:        # This is set to -1 by default to remove the limitation on msg size
+93:        self._grpc_max_msg_len: int = grpc_max_msg_len
+94:        self._grpc_resp_queue: queue.Queue = queue.Queue()
+95:        self._grpc_connected_fut = loop.create_future()
+96:        self._grpc_thread: threading.Thread = threading.Thread(
+97:            name='grpc-thread', target=self.__poll_grpc)
+98:
+99:    def get_sync_tp_workers_set(self):
+100:        """We don't know the exact value of the threadcount set for the Python
+(617 more lines below)
+
+(Open file: /azure-functions-python-worker/azure_functions_worker/dispatcher.py)
+(Current directory: /azure-functions-python-worker)
+bash-$
+
+[ai]
+The `Dispatcher` class has a `connect` method that is used to instantiate it. The `connect` method is likely where the environment variables or app settings are handled.
+
+Let's navigate to the `connect` method in the `dispatcher.py` file to see how it handles the environment variables or app settings.
+```
+search_file "def connect("
+```
+
+[user]
+Found 1 matches for "def connect(" in /azure-functions-python-worker/azure_functions_worker/dispatcher.py:
+Line 109:    async def connect(cls, host: str, port: int, worker_id: str,
+End of matches for "def connect(" in /azure-functions-python-worker/azure_functions_worker/dispatcher.py
+
+(Open file: /azure-functions-python-worker/azure_functions_worker/dispatcher.py)
+(Current directory: /azure-functions-python-worker)
+bash-$
+
+[ai]
+The `connect` method is found at line 109 in the `dispatcher.py` file. Let's navigate to that line to see the implementation of the `connect` method and understand how it handles the environment variables or app settings.
+```
+goto 109
+```
+
+[user]
+[File: /azure-functions-python-worker/azure_functions_worker/dispatcher.py (717 lines total)]
+(93 more lines above)
+94:        self._grpc_resp_queue: queue.Queue = queue.Queue()
+95:        self._grpc_connected_fut = loop.create_future()
+96:        self._grpc_thread: threading.Thread = threading.Thread(
+97:            name='grpc-thread', target=self.__poll_grpc)
+98:
+99:    def get_sync_tp_workers_set(self):
+100:        """We don't know the exact value of the threadcount set for the Python
+101:         3.9 scenarios (as we'll start passing only None by default), and we
+102:         need to get that information.
+103:
+104:         Ref: concurrent.futures.thread.ThreadPoolExecutor.__init__._max_workers
+105:        """
+106:        return self._sync_call_tp._max_workers
+107:
+108:    @classmethod
+109:    async def connect(cls, host: str, port: int, worker_id: str,
+110:                      request_id: str, connect_timeout: float):
+111:        loop = asyncio.events.get_event_loop()
+112:        disp = cls(loop, host, port, worker_id, request_id, connect_timeout)
+113:        disp._grpc_thread.start()
+114:        await disp._grpc_connected_fut
+115:        logger.info('Successfully opened gRPC channel to %s:%s ', host, port)
+116:        return disp
+117:
+118:    async def dispatch_forever(self):
+119:        if DispatcherMeta.__current_dispatcher__ is not None:
+120:            raise RuntimeError('there can be only one running dispatcher per '
+121:                               'process')
+122:
+123:        self._old_task_factory = self._loop.get_task_factory()
+124:
+125:        loader.install()
+126:
+127:        DispatcherMeta.__current_dispatcher__ = self
+128:        try:
+129:            forever = self._loop.create_future()
+130:
+131:            self._grpc_resp_queue.put_nowait(
+132:                protos.StreamingMessage(
+133:                    request_id=self.request_id,
+134:                    start_stream=protos.StartStream(
+135:                        worker_id=self.worker_id)))
+136:
+137:            self._loop.set_task_factory(
+138:                lambda loop, coro: ContextEnabledTask(coro, loop=loop))
+139:
+140:            # Detach console logging before enabling GRPC channel logging
+141:            logger.info('Detaching console logging.')
+142:            disable_console_logging()
+143:
+144:            # Attach gRPC logging to the root logger. Since gRPC channel is
+145:            # established, should use it for system and user logs
+146:            logging_handler = AsyncLoggingHandler()
+147:            root_logger = logging.getLogger()
+148:
+149:            # Don't change this unless you read #780 and #745
+150:            root_logger.setLevel(logging.INFO)
+151:            root_logger.addHandler(logging_handler)
+152:            logger.info('Switched to gRPC logging.')
+153:            logging_handler.flush()
+154:
+155:            try:
+156:                await forever
+157:            finally:
+158:                logger.warning('Detaching gRPC logging due to exception.')
+159:                logging_handler.flush()
+160:                root_logger.removeHandler(logging_handler)
+161:
+162:                # Reenable console logging when there's an exception
+163:                enable_console_logging()
+164:                logger.warning('Switched to console logging due to exception.')
+165:        finally:
+166:            DispatcherMeta.__current_dispatcher__ = None
+167:
+168:            loader.uninstall()
+169:
+170:            self._loop.set_task_factory(self._old_task_factory)
+171:            self.stop()
+172:
+173:    def stop(self) -> None:
+174:        if self._grpc_thread is not None:
+175:            self._grpc_resp_queue.put_nowait(self._GRPC_STOP_RESPONSE)
+176:            self._grpc_thread.join()
+177:            self._grpc_thread = None
+178:
+179:        self._stop_sync_call_tp()
+180:
+181:    def on_logging(self, record: logging.LogRecord, formatted_msg: str) -> None:
+182:        if record.levelno >= logging.CRITICAL:
+183:            log_level = protos.RpcLog.Critical
+184:        elif record.levelno >= logging.ERROR:
+185:            log_level = protos.RpcLog.Error
+186:        elif record.levelno >= logging.WARNING:
+187:            log_level = protos.RpcLog.Warning
+188:        elif record.levelno >= logging.INFO:
+189:            log_level = protos.RpcLog.Information
+190:        elif record.levelno >= logging.DEBUG:
+191:            log_level = protos.RpcLog.Debug
+192:        else:
+193:            log_level = getattr(protos.RpcLog, 'None')
+(524 more lines below)
+
+(Open file: /azure-functions-python-worker/azure_functions_worker/dispatcher.py)
+(Current directory: /azure-functions-python-worker)
+bash-$
+
+[ai]
+The `connect` method is where the `Dispatcher` is instantiated and connected to the host. However, the handling of environment variables or app settings is not visible in this method. It is possible that the relevant code for handling `PYTHON_THREADPOOL_THREAD_COUNT` is in a different method or it might be handled directly by the `ThreadPoolExecutor`.
+
+Let's go back to the `main` method in the `main.py` file to double-check and see if there is any handling of environment variables or app settings that we might have missed.
+```
+open azure_functions_worker/main.py
+```
+
+[user]
+[File: /azure-functions-python-worker/azure_functions_worker/main.py (65 lines total)]
+1:# Copyright (c) Microsoft Corporation. All rights reserved.
+2:# Licensed under the MIT License.
+3:"""Main entrypoint."""
+4:
+5:
+6:import argparse
+7:
+8:
+9:def parse_args():
+10:    parser = argparse.ArgumentParser(
+11:        description='Python Azure Functions Worker')
+12:    parser.add_argument('--host',
+13:                        help="host address")
+14:    parser.add_argument('--port', type=int,
+15:                        help='id for the requests')
+16:    parser.add_argument('--workerId', dest='worker_id',
+17:                        help='id for the worker')
+18:    parser.add_argument('--requestId', dest='request_id',
+19:                        help='log destination: stdout, stderr, '
+20:                            'syslog, or a file path')
+21:    parser.add_argument('--log-level', type=str, default='INFO',
+22:                        choices=['TRACE', 'INFO', 'WARNING', 'ERROR'],
+23:                        help="log level: 'TRACE', 'INFO', 'WARNING', "
+24:                             "or 'ERROR'")
+25:    parser.add_argument('--log-to', type=str, default=None,
+26:                        help='log destination: stdout, stderr, '
+27:                            'syslog, or a file path')
+28:    parser.add_argument('--grpcMaxMessageLength', type=int,
+29:                        dest='grpc_max_msg_len')
+30:    return parser.parse_args()
+31:
+32:
+33:def main():
+34:    from .utils.dependency import DependencyManager
+35:    DependencyManager.initialize()
+36:    DependencyManager.use_worker_dependencies()
+37:
+38:    from . import logging
+39:    from ._thirdparty import aio_compat
+40:    from .logging import error_logger, logger
+41:
+42:    args = parse_args()
+43:    logging.setup(log_level=args.log_level, log_destination=args.log_to)
+44:
+45:    logger.info('Starting Azure Functions Python Worker.')
+46:    logger.info('Worker ID: %s, Request ID: %s, Host Address: %s:%s',
+47:                args.worker_id, args.request_id, args.host, args.port)
+48:
+49:    try:
+50:        return aio_compat.run(start_async(
+51:            args.host, args.port, args.worker_id, args.request_id))
+52:    except Exception:
+53:        error_logger.exception('unhandled error in functions worker')
+54:        raise
+55:
+56:
+57:async def start_async(host, port, worker_id, request_id):
+58:    from . import dispatcher
+59:
+60:    disp = await dispatcher.Dispatcher.connect(host=host, port=port,
+61:                                               worker_id=worker_id,
+62:                                               request_id=request_id,
+63:                                               connect_timeout=5.0)
+64:
+65:    await disp.dispatch_forever()
+
+(Open file: /azure-functions-python-worker/azure_functions_worker/main.py)
+(Current directory: /azure-functions-python-worker)
+bash-$
+
+[ai]
+Upon reviewing the `main.py` file again, it does not seem like there is any direct handling of the `PYTHON_THREADPOOL_THREAD_COUNT` environment variable or any other app settings related to the thread pool size. The `parse_args` function only parses command-line arguments, and the `main` function primarily coordinates logging setup and the instantiation of the `Dispatcher`.
+
+Given that the `Dispatcher` seems to be the central component for managing the worker's execution environment and thread pool, it is possible that the handling of `PYTHON_THREADPOOL_THREAD_COUNT` is done entirely within the `Dispatcher` class, perhaps in a method that initializes or manages the thread pool.
+
+Let's go back to the `dispatcher.py` file and look for any additional methods that might initialize or manage the thread pool, particularly around the `_create_sync_call_tp` and `_get_sync_tp_max_workers` methods, as these seem to be involved in creating and configuring the thread pool.
+```
+open azure_functions_worker/dispatcher.py
+```

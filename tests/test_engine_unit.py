@@ -16,6 +16,7 @@ from bench import (
     SCENARIOS,
     _aggregate_reps,
     _classify_http_error,
+    _decode_burst,
     _fill,
     _load_code_pool,
     _make_module_stream,
@@ -179,6 +180,19 @@ class TestBuildMessages(unittest.TestCase):
         self.assertIn("nonce-42", msgs[1]["content"])
         self.assertGreater(est, 4000 * 0.9)
 
+    def test_agent_scenario(self):
+        """Agent 场景（ADR-0014）：vendored SWE-agent 轨迹语料加载（块 ≥2000
+        字符），构造路径与既有场景一致（零输入档无填充、非零档注入轨迹）。"""
+        pool = SCENARIOS["agent"]["filler_pool"]
+        self.assertGreater(len(pool), 1)   # vendored 轨迹块（corpus/agent/）
+        self.assertTrue(all(len(b) >= 2000 for b in pool))
+        self.assertGreater(len(SCENARIOS["agent"]["filler_stream"]), 100000)
+        msgs, est, filler_n = build_messages("agent", 4096, 3.5, "nonce-7")
+        self.assertGreater(filler_n, 0)
+        self.assertIn("nonce-7", msgs[1]["content"])
+        _, _, filler0 = build_messages("agent", 0, 3.5, "n")
+        self.assertEqual(filler0, 0)
+
 
 class TestAggregateReps(unittest.TestCase):
     """ADR-0006 复测取中位：标量中位、decode 中位的一次、all_ok 多数决。"""
@@ -219,6 +233,38 @@ class TestAggregateReps(unittest.TestCase):
         agg = _aggregate_reps(reps)
         self.assertEqual(agg["max_gap_s"], 7.0)              # 各次最差，非中位 2.0
         self.assertNotIn("max_gap_s", _aggregate_reps([self._rep(1), self._rep(2)]))
+
+    def test_stall_takes_worst_across_reps(self):
+        """停滞复合记账（stall_s/stall_count）与 max_gap_s 同取各次复测最差。"""
+        reps = [self._rep(50), self._rep(40), self._rep(30)]
+        reps[0].update(stall_s=1.2, stall_count=2)
+        reps[1].update(stall_s=6.5, stall_count=1)
+        agg = _aggregate_reps(reps)
+        self.assertEqual(agg["stall_s"], 6.5)
+        self.assertEqual(agg["stall_count"], 2)   # 次数取各次最大，不随时长那条
+        clean = _aggregate_reps([self._rep(1), self._rep(2)])
+        self.assertFalse(clean.get("stall_s"))
+        self.assertFalse(clean.get("decode_burst"))
+
+    def test_burst_majority_across_reps(self):
+        """突发交付多数决：过半复测突发才标记；且不被中位次残留污染。"""
+        reps = [self._rep(50), self._rep(40), self._rep(30)]
+        reps[0]["decode_burst"] = reps[1]["decode_burst"] = True
+        self.assertTrue(_aggregate_reps(reps)["decode_burst"])      # 2/3 多数
+        reps[1]["decode_burst"] = None
+        self.assertFalse(_aggregate_reps(reps)["decode_burst"])     # 1/3 少数
+        # 中位次本身带 True 但多数不成立时，显式覆写为否
+        only_mid = [self._rep(10), self._rep(20), self._rep(30)]
+        only_mid[1]["decode_burst"] = True
+        self.assertFalse(_aggregate_reps(only_mid)["decode_burst"])
+
+    def test_decode_burst_detection(self):
+        """突发甄别：亚毫秒平均间隔 + 足够 chunk 数 → 缓冲冲刷；真流式不误判。"""
+        self.assertTrue(_decode_burst(32, 0.01))        # 32 chunk / 10ms → 0.3ms
+        self.assertFalse(_decode_burst(32, 0.5))        # 16ms 间隔，真流式
+        self.assertFalse(_decode_burst(3, 0.001))       # chunk 太少不足为凭
+        self.assertFalse(_decode_burst(32, None))       # 无 decode 窗口
+        self.assertFalse(_decode_burst(1, 0.001))       # 除零保护
 
     def test_all_failed_pool_falls_back_to_reps(self):
         """all_ok 全 False：聚合池回退为 reps 本身，标量中位照常算，all_ok=False。"""

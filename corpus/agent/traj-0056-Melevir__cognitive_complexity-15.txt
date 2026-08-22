@@ -1,0 +1,342 @@
+[user]
+============================= test session starts ==============================
+platform linux -- Python 3.9.19, pytest-8.3.2, pluggy-1.5.0
+benchmark: 4.0.0 (defaults: timer=time.perf_counter disable_gc=False min_rounds=5 min_time=0.000005 max_time=1.0 calibration_precision=10 warmup=False warmup_iterations=100000)
+Using --randomly-seed=1273502962
+rootdir: /cognitive_complexity
+plugins: mock-3.14.0, bdd-7.2.0, asyncio-0.23.8, hypothesis-6.111.1, benchmark-4.0.0, randomly-3.15.0, requests-mock-1.12.1, cov-5.0.0, xdist-3.6.1
+asyncio: mode=strict
+collected 20 items
+
+tests/test_cognitive_complexity.py F..F...........FF.F.                  [100%]
+
+=================================== FAILURES ===================================
+_________________ test_simple_if_complex_condition_complexity __________________
+
+    def test_simple_if_complex_condition_complexity():
+>       assert get_code_snippet_compexity("""
+        def f(a, b):
+            if (  # +1
+                a and b and  # +1
+                (c or d)  # +1
+            ):
+                return 1
+        """) == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = get_code_snippet_compexity('\n    def f(a, b):\n        if (  # +1\n            a and b and  # +1\n            (c or d)  # +1\n        ):\n            return 1\n    ')
+
+tests/test_cognitive_complexity.py:29: AssertionError
+----------------------------- Captured stdout call -----------------------------
+Complexity for <ast.BoolOp object at 0x7fea5a383e50> is 3 (3 + 0) (increment 1)
+Complexity for <ast.Constant object at 0x7fea5a383cd0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Return object at 0x7fea5a383d90> is 0 (0 + 0) (increment 1)
+Complexity for <ast.If object at 0x7fea5a383ee0> is 4 (1 + 3) (increment 1)
+___________ test_simple_if_serial_heterogenious_condition_complexity ___________
+
+    def test_simple_if_serial_heterogenious_condition_complexity():
+>       assert get_code_snippet_compexity("""
+        def f(a, b):
+            if a and b or True:  # +3
+                return 1
+        """) == 3
+E       AssertionError: assert 4 == 3
+E        +  where 4 = get_code_snippet_compexity('\n    def f(a, b):\n        if a and b or True:  # +3\n            return 1\n    ')
+
+tests/test_cognitive_complexity.py:21: AssertionError
+----------------------------- Captured stdout call -----------------------------
+Complexity for <ast.BoolOp object at 0x7fea5a3747f0> is 3 (3 + 0) (increment 1)
+Complexity for <ast.Constant object at 0x7fea5a374700> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Return object at 0x7fea5a374730> is 0 (0 + 0) (increment 1)
+Complexity for <ast.If object at 0x7fea5a374820> is 4 (1 + 3) (increment 1)
+______________________________ test_real_function ______________________________
+
+    def test_real_function():
+>       assert get_code_snippet_compexity("""
+        def process_raw_constant(constant, min_word_length):
+            processed_words = []
+            raw_camelcase_words = []
+            for raw_word in re.findall(r'[a-z]+', constant):  # +1
+                word = raw_word.strip()
+                if (  # +2
+                    len(word) >= min_word_length  # +4 (2 bool operator sequences * 2 for nesting)
+                    and not (word.startswith('-') or word.endswith('-'))
+                ):
+                    if is_camel_case_word(word):  # +2
+                        raw_camelcase_words.append(word)
+                    else:  # +1
+                        processed_words.append(word.lower())
+            return processed_words, raw_camelcase_words
+        """) == 11
+E       AssertionError: assert 13 == 11
+E        +  where 13 = get_code_snippet_compexity('\n    def process_raw_constant(constant, min_word_length):\n        processed_words = []\n        raw_camelcase_words...1\n                    processed_words.append(word.lower())\n        return processed_words, raw_camelcase_words\n    ')
+
+tests/test_cognitive_complexity.py:110: AssertionError
+----------------------------- Captured stdout call -----------------------------
+Complexity for <ast.Store object at 0x7fea5c113b20> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Name object at 0x7fea5a36f190> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.List object at 0x7fea5a36f100> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Assign object at 0x7fea5a36f040> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Store object at 0x7fea5c113b20> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Name object at 0x7fea5a36ff40> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.List object at 0x7fea5a36ffd0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Assign object at 0x7fea5a36f130> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Store object at 0x7fea5c113b20> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Name object at 0x7fea5a36fe80> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Name object at 0x7fea5a36feb0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Attribute object at 0x7fea5a36fee0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Constant object at 0x7fea5a36ffa0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Name object at 0x7fea5a36ff10> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Call object at 0x7fea5a36fdc0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Store object at 0x7fea5c113b20> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Name object at 0x7fea5a36fdf0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Name object at 0x7fea5a36fd60> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Attribute object at 0x7fea5a36fc40> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Call object at 0x7fea5a36fd00> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Assign object at 0x7fea5a36fe50> is 0 (0 + 0) (increment 1)
+Complexity for <ast.BoolOp object at 0x7fea5a36fe20> is 6 (6 + 0) (increment 2)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Name object at 0x7fea5a36f490> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Name object at 0x7fea5a36f430> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Call object at 0x7fea5a36f550> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Name object at 0x7fea5a36f9a0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Attribute object at 0x7fea5a36fbb0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Name object at 0x7fea5a36fb80> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Call object at 0x7fea5a36fb50> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Expr object at 0x7fea5a36f340> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Name object at 0x7fea5a36fb20> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Attribute object at 0x7fea5a36fc10> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Name object at 0x7fea5a36f790> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Attribute object at 0x7fea5a36faf0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Call object at 0x7fea5a36fbe0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Call object at 0x7fea5a36fac0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Expr object at 0x7fea5a36fa30> is 0 (0 + 0) (increment 3)
+Complexity for <ast.If object at 0x7fea5a36f670> is 4 (4 + 0) (increment 3)
+Complexity for <ast.If object at 0x7fea5a36fd30> is 12 (2 + 10) (increment 2)
+Complexity for <ast.For object at 0x7fea5a36ff70> is 13 (1 + 12) (increment 1)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Name object at 0x7fea5a36f9d0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Name object at 0x7fea5a30a9d0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Tuple object at 0x7fea5a36f970> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Return object at 0x7fea5a36f940> is 0 (0 + 0) (increment 0)
+____________________________ test_nested_functions _____________________________
+
+    def test_nested_functions():
+>       assert get_code_snippet_compexity("""
+        def f(a):
+            def foo(a):
+                if a:  # +2
+                    return 1
+            bar = lambda a: lambda b: b or 2  # +2 (+2 for or because lambda increases nesting)
+            return bar(foo(a))(a)
+        """) == 4
+E       AssertionError: assert 6 == 4
+E        +  where 6 = get_code_snippet_compexity('\n    def f(a):\n        def foo(a):\n            if a:  # +2\n                return 1\n        bar = lambda a: lambda b: b or 2  # +2 (+2 for or because lambda increases nesting)\n        return bar(foo(a))(a)\n    ')
+
+tests/test_cognitive_complexity.py:140: AssertionError
+----------------------------- Captured stdout call -----------------------------
+Complexity for <ast.arg object at 0x7fea5a374250> is 0 (0 + 0) (increment 1)
+Complexity for <ast.arguments object at 0x7fea5a374a90> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 2)
+Complexity for <ast.Name object at 0x7fea5a3749d0> is 0 (0 + 0) (increment 2)
+Complexity for <ast.Constant object at 0x7fea5a3749a0> is 0 (0 + 0) (increment 2)
+Complexity for <ast.Return object at 0x7fea5a374910> is 0 (0 + 0) (increment 2)
+Complexity for <ast.If object at 0x7fea5a374970> is 2 (2 + 0) (increment 2)
+Complexity for <ast.FunctionDef object at 0x7fea5a374ca0> is 2 (0 + 2) (increment 1)
+Complexity for <ast.Store object at 0x7fea5c113b20> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Name object at 0x7fea5a3744c0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.arg object at 0x7fea5a3741f0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.arguments object at 0x7fea5a374670> is 0 (0 + 0) (increment 1)
+Complexity for <ast.arg object at 0x7fea5a374160> is 0 (0 + 0) (increment 2)
+Complexity for <ast.arguments object at 0x7fea5a3748e0> is 0 (0 + 0) (increment 2)
+Complexity for <ast.BoolOp object at 0x7fea5a374850> is 4 (4 + 0) (increment 2)
+Complexity for <ast.Lambda object at 0x7fea5a374550> is 4 (0 + 4) (increment 2)
+Complexity for <ast.Lambda object at 0x7fea5a374d60> is 4 (0 + 4) (increment 1)
+Complexity for <ast.Assign object at 0x7fea5a374040> is 4 (0 + 4) (increment 0)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Name object at 0x7fea5a374430> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Name object at 0x7fea5a374610> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Name object at 0x7fea5a374520> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Call object at 0x7fea5a374c40> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Call object at 0x7fea5a374640> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Load object at 0x7fea5c113ac0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Name object at 0x7fea5a3745e0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Call object at 0x7fea5a3747c0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Return object at 0x7fea5a374760> is 0 (0 + 0) (increment 0)
+__________________ test_simple_if_serial_condition_complexity __________________
+
+    def test_simple_if_serial_condition_complexity():
+>       assert get_code_snippet_compexity("""
+        def f(a, b):
+            if a and b and True:  # +2
+                return 1
+        """) == 2
+E       AssertionError: assert 3 == 2
+E        +  where 3 = get_code_snippet_compexity('\n    def f(a, b):\n        if a and b and True:  # +2\n            return 1\n    ')
+
+tests/test_cognitive_complexity.py:13: AssertionError
+----------------------------- Captured stdout call -----------------------------
+Complexity for <ast.BoolOp object at 0x7fea5a36f5b0> is 2 (2 + 0) (increment 1)
+Complexity for <ast.Constant object at 0x7fea5a36f160> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Return object at 0x7fea5a36f8e0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.If object at 0x7fea5a36f6d0> is 3 (1 + 2) (increment 1)
+=========================== short test summary info ============================
+FAILED tests/test_cognitive_complexity.py::test_simple_if_complex_condition_complexity
+FAILED tests/test_cognitive_complexity.py::test_simple_if_serial_heterogenious_condition_complexity
+FAILED tests/test_cognitive_complexity.py::test_real_function - AssertionErro...
+FAILED tests/test_cognitive_complexity.py::test_nested_functions - AssertionE...
+FAILED tests/test_cognitive_complexity.py::test_simple_if_serial_condition_complexity
+========================= 5 failed, 15 passed in 0.19s =========================
+
+(Open file: /cognitive_complexity/cognitive_complexity/utils/ast.py)
+(Current directory: /cognitive_complexity)
+bash-$
+
+[ai]
+The test results indicate that the complexity calculation is still not correct for sequences of binary logical operators. The issue seems to be that the modification to the `process_node_itself` function did not correctly handle the counting of `ast.BoolOp` nodes in a sequence.
+
+We need to ensure that the function correctly identifies and counts sequences of `ast.BoolOp` nodes as one unit. It's possible that the current implementation is double-counting or missing nodes in the sequence.
+
+Let's try to fix this by ensuring that the `process_node_itself` function correctly handles sequences of `ast.BoolOp` nodes. We will modify the function to count each `ast.BoolOp` node only once, even if it is part of a sequence.
+
+```
+edit 86:93
+    elif isinstance(node, ast.BoolOp):
+        # Handle sequences of BoolOp nodes as one unit
+        sequence_count = 1
+        for n in ast.walk(node):
+            if isinstance(n, ast.BoolOp):
+                sequence_count += 1
+        base_complexity = sequence_count * max(increment_by, 1)
+        return increment_by, base_complexity, False
+end_of_edit
+```
+
+[user]
+[File: /cognitive_complexity/cognitive_complexity/utils/ast.py (96 lines total)]
+1:import ast
+2:
+3:from typing import Callable, Tuple, Union
+4:
+5:from cognitive_complexity.common_types import AnyFuncdef
+6:
+7:
+8:def has_recursive_calls(funcdef: AnyFuncdef) -> bool:
+9:    return bool([
+10:        n for n in ast.walk(funcdef)
+11:        if (
+12:            isinstance(n, ast.Call)
+13:            and isinstance(n.func, ast.Name)
+14:            and n.func.id == funcdef.name
+15:        )
+16:    ])
+17:
+18:
+19:def process_child_nodes(
+20:    node: ast.AST,
+21:    increment_by: int,
+22:    verbose: bool,
+23:    complexity_calculator: Callable,
+24:) -> int:
+25:    child_complexity = 0
+26:    child_nodes = ast.iter_child_nodes(node)
+27:
+28:    for node_num, child_node in enumerate(child_nodes):
+29:        if isinstance(node, ast.Try):
+30:            if node_num == 1:
+31:                # add +1 for all try nodes except body
+32:                increment_by += 1
+33:            if node_num:
+34:                child_complexity += max(1, increment_by)
+35:        child_complexity += complexity_calculator(
+36:            child_node,
+37:            increment_by=increment_by,
+38:            verbose=verbose,
+39:        )
+40:    return child_complexity
+41:
+42:
+43:def process_control_flow_breaker(
+44:    node: Union[ast.If, ast.For, ast.While, ast.IfExp],
+45:    increment_by: int,
+46:) -> Tuple[int, int, bool]:
+47:    if isinstance(node, ast.IfExp):
+48:        # C if A else B; ternary operator equivalent
+49:        increment = 0
+50:        increment_by += 1
+51:    elif isinstance(node, ast.If) and len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If):
+52:        # node is an elif; the increment will be counted on the ast.If
+53:        increment = 0
+54:    elif node.orelse:
+55:        # +1 for the else and add a nesting level
+56:        increment = 1
+57:        increment_by += 1
+58:    else:
+59:        # no 'else' to count, just add a nesting level
+60:        increment = 0
+61:        increment_by += 1
+62:    return increment_by, max(1, increment_by) + increment, True
+63:
+64:
+65:def process_node_itself(
+66:    node: ast.AST,
+67:    increment_by: int,
+68:) -> Tuple[int, int, bool]:
+69:    control_flow_breakers = (
+70:        ast.If,
+71:        ast.For,
+72:        ast.While,
+73:        ast.IfExp,
+74:    )
+75:    incrementers_nodes = (
+76:        ast.FunctionDef,
+77:        ast.AsyncFunctionDef,
+78:        ast.Lambda,
+79:    )
+80:
+81:    if isinstance(node, control_flow_breakers):
+82:        return process_control_flow_breaker(node, increment_by)
+83:    elif isinstance(node, incrementers_nodes):
+84:        increment_by += 1
+85:        return increment_by, 0, True
+86:    elif isinstance(node, ast.BoolOp):
+87:        # Handle sequences of BoolOp nodes as one unit
+88:        sequence_count = 1
+89:        for n in ast.walk(node):
+90:            if isinstance(n, ast.BoolOp):
+91:                sequence_count += 1
+92:        base_complexity = sequence_count * max(increment_by, 1)
+93:        return increment_by, base_complexity, False
+94:    elif isinstance(node, (ast.Break, ast.Continue)):
+95:        return increment_by, max(1, increment_by), True
+96:    return increment_by, 0, True
+File updated. Please review the changes and make sure they are correct (correct indentation, no duplicate lines, etc). Edit the file again if necessary.
+
+(Open file: /cognitive_complexity/cognitive_complexity/utils/ast.py)
+(Current directory: /cognitive_complexity)
+bash-$
+
+[ai]
+The code has been updated to handle sequences of `ast.BoolOp` nodes as one unit. Let's run the tests again to verify that the changes have fixed the issue.
+
+```
+pytest tests/test_cognitive_complexity.py
+```

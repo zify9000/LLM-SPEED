@@ -154,6 +154,17 @@ textarea{resize:vertical; min-height:auto}
   display:flex; flex-direction:column; visibility:hidden}
 #drawerRoot.open #drawerScrim{opacity:1}
 #drawerRoot.open #cfgDrawer{transform:none; visibility:visible}
+/* 历史删除弹窗：居中对话框，复用抽屉的遮罩/头/底样式 */
+#delModalRoot{position:fixed; inset:0; z-index:110}
+#delModalScrim{position:absolute; inset:0; background:rgba(17,24,39,.45)}
+#delModal{position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+  width:min(640px, calc(100vw - 32px)); max-height:80dvh; display:flex; flex-direction:column;
+  background:var(--bg); border:1px solid var(--border); border-radius:14px;
+  box-shadow:0 16px 48px rgba(17,24,39,.18)}
+.del-toolbar{display:flex; align-items:center; gap:8px; padding:10px 20px;
+  background:var(--card); border-bottom:1px solid var(--border); flex:none}
+#delList .ck{display:flex; padding:8px 10px; border-radius:8px}
+#delList .ck span{min-width:0; word-break:break-all}
 .dr-head{display:flex; align-items:flex-start; gap:12px; padding:16px 20px;
   background:var(--card); border-bottom:1px solid var(--border); flex:none}
 .dr-head h3{font-size:15px; font-weight:600}
@@ -311,7 +322,7 @@ tr.fade td{opacity:.45}
   <div class="page-head">
     <div>
       <h2>测速控制台</h2>
-      <p class="sub">prefill / decode × 上下文长度（0K~1M）× 并发 · 创意写作 / 代码生成</p>
+      <p class="sub">prefill / decode × 上下文长度（0K~1M）× 并发 · 创意写作 / 代码生成 / Agent 调用</p>
     </div>
     <div class="head-actions">
       <button class="btn-ghost" id="btnToggleCfg" onclick="toggleConfig()">
@@ -395,6 +406,9 @@ tr.fade td{opacity:.45}
             <option value="enabled">启用思考（思考流计入测速）</option>
           </select>
           <div class="hint">按模型的实际使用形态选择：有的模型默认思考效果更好，有的相反</div>
+          <label class="f" for="fNote">任务备注（可选）</label>
+          <input type="text" id="fNote" maxlength="80" placeholder="如：有线环境复测 · 对比 v0.6 基线">
+          <div class="hint">展示在历史记录标题最前，便于区分多次测速；历史记录也可事后改备注</div>
         </div>
       </div>
 
@@ -414,8 +428,8 @@ tr.fade td{opacity:.45}
         <div style="display:flex; gap:8px; flex-wrap:wrap">
           <select id="historySel" style="flex:1; min-width:240px" aria-label="历史测速记录"></select>
           <button class="btn-ghost" onclick="loadHistory()">载入</button>
-          <button class="btn-ghost danger" onclick="deleteHistory()">删除所选</button>
-          <button class="btn-ghost danger" onclick="clearHistory()">清空全部</button>
+          <button class="btn-ghost" onclick="editHistoryNote()">备注</button>
+          <button class="btn-ghost danger" onclick="openDelModal()">删除…</button>
         </div>
       </div>
     </div>
@@ -471,7 +485,7 @@ tr.fade td{opacity:.45}
         <div class="card-head"><h3>测试结果明细</h3></div>
         <div class="tablewrap">
         <table id="resultTable">
-          <thead><tr><th>模型</th><th>场景</th><th>输入上下文</th><th>并发</th><th>实际 prompt tokens</th><th>缓存命中</th><th>TTFT(s)</th><th>Prefill(tok/s)</th><th>Decode(tok/s)</th><th id="thTotal">双并发总吞吐(tok/s)</th><th>输出tokens</th><th>结束</th><th>状态</th></tr></thead>
+          <thead><tr><th>模型</th><th>场景</th><th>输入上下文</th><th>并发</th><th>实际 prompt tokens</th><th>缓存命中</th><th>TTFT(s)</th><th>Prefill(tok/s)</th><th>Decode(tok/s)</th><th>Decode耗时(s)</th><th id="thTotal">双并发总吞吐(tok/s)</th><th>输出tokens</th><th>结束</th><th>状态</th></tr></thead>
           <tbody></tbody>
         </table>
         </div>
@@ -549,12 +563,38 @@ tr.fade td{opacity:.45}
   </aside>
 </div>
 
+<!-- ========== 历史记录删除弹窗：勾选要删的记录，全选/全不选快捷 ========== -->
+<div id="delModalRoot" hidden>
+  <div id="delModalScrim" onclick="closeDelModal()"></div>
+  <div id="delModal" role="dialog" aria-modal="true" aria-labelledby="delModalTitle">
+    <header class="dr-head">
+      <div style="flex:1; min-width:0">
+        <h3 id="delModalTitle">删除历史记录</h3>
+        <p class="dr-sub">勾选要删除的记录，删除后不可恢复</p>
+      </div>
+      <button class="icon-btn" onclick="closeDelModal()" aria-label="关闭删除弹窗">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </header>
+    <div class="del-toolbar">
+      <button class="btn-ghost nav-btn" onclick="delSetAll(true)">全选</button>
+      <button class="btn-ghost nav-btn" onclick="delSetAll(false)">全不选</button>
+      <span class="hint" style="margin:0 0 0 auto" id="delCount"></span>
+    </div>
+    <div class="dr-body" id="delList"></div>
+    <footer class="dr-foot">
+      <button class="btn-ghost" onclick="closeDelModal()">取消</button>
+      <button class="btn-ghost danger" id="btnDelConfirm" onclick="delConfirm()">删除所选</button>
+    </footer>
+  </div>
+</div>
+
 <div id="offChartBox" aria-hidden="true"><div id="offChart"></div></div>
 
 <script>
 "use strict";
 const $ = s => document.querySelector(s);
-const SCEN_LABEL = {creative:"创意写作", code:"代码生成"};
+const SCEN_LABEL = {creative:"创意写作", code:"代码生成", agent:"Agent 调用"};
 const fmtK = v => !v ? "0K"
   : v>=1048576 ? (v/1048576).toFixed(v%1048576?1:0)+"M"
   : v>=1024 ? (v/1024).toFixed(v%1024?1:0)+"K" : String(v);
@@ -1084,6 +1124,7 @@ function collectCfg(){
     repeats: Math.min(5, Math.max(1, +$("#fRepeats").value || 1)),
     timeout_s: +$("#fTimeout").value || 1200,
     thinking: $("#fThinking").value,
+    note: $("#fNote").value.trim(),
   };
 }
 async function startRun(){
@@ -1335,6 +1376,9 @@ const preOf = p => p.prefill_net_tok_s ?? p.prefill_tok_s;
 // 校正口径时取校正值——停滞拖尾只污染毛窗口，校正值更接近服务端真实节奏；
 // 无停滞时与毛值一致，旧存档无 adj 字段回退毛值
 const decOf = p => (p.max_gap_s > 3 && p.decode_tok_s_adj) ? p.decode_tok_s_adj : p.decode_tok_s;
+// decode 总耗时按同窗口反推：decode_tok_s ≡ out_tokens ÷ decode 窗口时长
+// （引擎口径一致，无需引擎加字段）；带空窗的点随 decOf 取校正口径
+const decTimeOf = p => (p.out_tokens && decOf(p)) ? Math.round(p.out_tokens / decOf(p) * 10) / 10 : null;
 function addPoint(p){
   if(!state.points.has(pointKey(p))) state.donePoints++;
   state.points.set(pointKey(p), p);
@@ -1351,7 +1395,7 @@ function addPoint(p){
 }
 /* 结果全量平铺（ADR：模型/场景筛选下拉已移除）——固定排序：
    模型 → 场景（创意写作在前）→ 上下文升序 → 并发升序 */
-const SCEN_ORDER = {creative:0, code:1};
+const SCEN_ORDER = {creative:0, code:1, agent:2};
 function allPoints(){
   return [...state.points.values()].sort((a,b) =>
     a.model.localeCompare(b.model) ||
@@ -1386,11 +1430,18 @@ function renderResultTable(){
     const reqErr = p.reqs.filter(r=>r.err);
     let st = p.all_ok ? "✓ 成功" : (reqErr.length===p.reqs.length ? "✗ 失败" : `部分 ${p.reqs.length-reqErr.length}/${p.reqs.length}`);
     if(p.n_reps > 1) st += ` · 中位×${p.n_reps}`;
-    // decode 中途空窗警示：相邻内容块间隔 >3s 说明传输/服务端调度有停滞，
-    // 毛窗口被拖尾——decode 列已按扣除空窗校正显示（标*），仍标记提示该点
-    // 受过停滞影响（实测隧道拥塞曾把窗口放大 14 倍）
-    const gapWarn = p.max_gap_s > 3
+    // decode 中途停滞警示：优先展示复合记账（累计停滞×次数，引擎 0.5s 门限
+    // 满额计入，区分一次大停滞与频繁小抖动）；旧存档无该字段回退单段最长
+    // 空窗。毛窗口被拖尾——decode 列已按扣除空窗校正显示（标*），仍标记提示
+    // 该点受过停滞影响（实测隧道拥塞曾把窗口放大 14 倍）
+    const gapWarn = p.stall_s
+      ? ` <span style="color:var(--yellow);cursor:help" title="decode 中途累计停滞 ${p.stall_s}s（${p.stall_count || 1} 次，单次 ≥0.5s 满额计入，最长 ${p.max_gap_s ?? "-"}s；网络传输或服务端调度停滞）；decode 列已按扣除空窗校正（标*），毛值受拖尾不可用于跨次比较">⚠停滞${p.stall_s}s×${p.stall_count || 1}</span>`
+      : p.max_gap_s > 3
       ? ` <span style="color:var(--yellow);cursor:help" title="decode 中途最长空窗 ${p.max_gap_s}s（网络传输或服务端调度停滞）；decode 列已按扣除空窗校正（标*），毛值受拖尾不可用于跨次比较">⚠空窗${p.max_gap_s}s</span>` : "";
+    // 突发交付：chunk 平均间隔 <1ms，疑似网关缓冲冲刷而非真实流式——decode
+    // 速率虚高不可信，值仍展示但标记不可用于比较
+    const burstMark = p.decode_burst
+      ? ` <span style="color:var(--yellow);cursor:help" title="突发交付：输出以亚毫秒间隔一次性到达，疑似网关缓冲冲刷而非真实流式，decode 读数虚高不可信，不可用于跨次比较">⚠突发</span>` : "";
     const preTitle = p.prefill_net_tok_s != null && p.rtt_ms != null
       ? ` title="净口径：已扣除网络往返 ${esc(p.rtt_ms)}ms（毛值 ${esc(p.prefill_tok_s ?? "-")}）"` : "";
     const decCorrected = p.max_gap_s > 3 && p.decode_tok_s_adj && p.decode_tok_s_adj !== p.decode_tok_s;
@@ -1398,9 +1449,9 @@ function renderResultTable(){
     return `<tr class="${p.all_ok?"":"err"}">
       <td>${esc(p.model)}</td><td>${SCEN_LABEL[p.scenario]||esc(p.scenario)}</td><td>${fmtK(p.ctx_target)}</td><td>${p.concurrency}</td>
       <td>${p.prompt_tokens ?? "-"}</td><td>${p.cache_hit_tokens ? fmtK(p.cache_hit_tokens) : "-"}</td><td>${p.ttft_s ?? "-"}</td><td${preTitle}>${preOf(p) ?? "-"}</td>
-      <td${decTitle}>${decOf(p) ?? "-"}${decCorrected ? "*" : ""}</td><td ${showTotal?"":"hidden"}>${p.decode_total_tok_s ?? "-"}</td><td>${p.out_tokens ?? "-"}</td>
+      <td${decTitle}>${decOf(p) ?? "-"}${decCorrected ? "*" : ""}${burstMark}</td><td>${decTimeOf(p) ?? "-"}${decCorrected ? "*" : ""}</td><td ${showTotal?"":"hidden"}>${p.decode_total_tok_s ?? "-"}</td><td>${p.out_tokens ?? "-"}</td>
       <td>${p.finish==="length" ? "截断" : (p.finish!=null ? esc(String(p.finish)) : "-")}</td><td>${st}${gapWarn}</td></tr>`;
-  }).join("") : `<tr class="empty-row"><td colspan="${showTotal?13:12}">暂无测速点</td></tr>`;
+  }).join("") : `<tr class="empty-row"><td colspan="${showTotal?14:13}">暂无测速点</td></tr>`;
 }
 
 /* ---------------- 折线图（类别轴 4K/8K/16K，数值取整） ---------------- */
@@ -1511,11 +1562,15 @@ function scenarioStats(pts){
   const preAvg = pre.length ? pre.reduce((a,x)=>a+x.v,0)/pre.length : null;   // 全档上下文均值
   const baseDec = ok.filter(p=>p.concurrency===baseConc).map(p=>decOf(p)).filter(v=>v!=null);
   const baseDecAvg = baseDec.length ? baseDec.reduce((a,b)=>a+b,0)/baseDec.length : null;
+  // decode 总耗时均值：同批基准并发点逐点反推（out_tokens ÷ decOf）后取均值——
+  // 逐点算再平均，而非均值速率反推，避免倒数变换的偏差
+  const baseDecTime = ok.filter(p=>p.concurrency===baseConc).map(p=>decTimeOf(p)).filter(v=>v!=null);
+  const baseDecTimeAvg = baseDecTime.length ? baseDecTime.reduce((a,b)=>a+b,0)/baseDecTime.length : null;
   const hiConc = concs.length > 1 ? concs[concs.length-1] : null;
   const hiVals = hiConc ? ok.filter(p=>p.concurrency===hiConc)
       .map(p=>p.decode_total_tok_s).filter(v=>v!=null) : [];
   const hiTotal = hiVals.length ? hiVals.reduce((a,b)=>a+b,0)/hiVals.length : null;   // 均值而非峰值
-  return {preRange, decRange, prePeak, decPeak, preAvg, baseConc, baseDecAvg, hiConc, hiTotal};
+  return {preRange, decRange, prePeak, decPeak, preAvg, baseConc, baseDecAvg, baseDecTimeAvg, hiConc, hiTotal};
 }
 /* 生成单个模型的卡片 HTML（全场景合并）；多模型时由 genCards 平铺多张 */
 function cardHTML(model){
@@ -1564,7 +1619,7 @@ function cardHTML(model){
       <div class="t">全档上下文均值</div></div>`);
     if(s.baseDecAvg) cells.push(`<div class="sc-stat s4"><div class="k">Decode 均值</div>
       <div class="n">${fmtNum(s.baseDecAvg)}<small> tok/s</small></div>
-      <div class="t">并发 ${s.baseConc}</div></div>`);
+      <div class="t">并发 ${s.baseConc}${s.baseDecTimeAvg ? ` · 总耗时均值 ≈ ${round1(s.baseDecTimeAvg)}s` : ""}</div></div>`);
     if(s.hiTotal) cells.push(`<div class="sc-stat s5"><div class="k">并发 ${s.hiConc} 总吞吐均值</div>
       <div class="n">${fmtNum(s.hiTotal)}<small> tok/s</small></div>
       <div class="t">${s.baseDecAvg ? "≈ " + round1(s.hiTotal/s.baseDecAvg) + " × 单请求" : ""}</div></div>`);
@@ -1651,14 +1706,40 @@ async function downloadCard(){
 }
 
 /* ---------------- 历史记录 ---------------- */
+/* 历史条目的自描述标题：时间 · 模型 · 场景 · 上下文区间 · 并发数 */
+function historyLabel(h){
+  const scen = (h.scenarios||[]).map(s => SCEN_LABEL[s] || s).join("/");
+  const ctxs = (h.ctx_list||[]).slice().sort((a,b) => a-b);
+  const ctx = ctxs.length > 1 ? `${fmtK(ctxs[0])}~${fmtK(ctxs[ctxs.length-1])}`
+    : ctxs.length === 1 ? fmtK(ctxs[0]) : "";
+  const conc = (h.concurrencies||[]).slice().sort((a,b) => a-b).join("/");
+  return [h.note ? `【${h.note}】` : "", h.started_at||"", (h.models||[]).join(","), scen,
+          ctx && `上下文 ${ctx}`, conc && `并发 ${conc}`].filter(Boolean).join(" · ");
+}
 async function loadHistoryList(){
   let d;
   try{ d = await (await fetch("/api/bench/history")).json(); }
   catch(e){ $("#historySel").innerHTML = '<option value="">历史列表加载失败</option>'; return; }
-  $("#historySel").innerHTML = d.history.map(h =>
-    `<option value="${esc(h.run_id)}">${esc(h.started_at||"")} · ${(h.models||[]).map(esc).join(",")} · ${h.n_points}点</option>`).join("")
+  histCache = d.history || [];
+  $("#historySel").innerHTML = histCache.map(h =>
+    `<option value="${esc(h.run_id)}">${esc(historyLabel(h))}</option>`).join("")
     || '<option value="">暂无记录</option>';
   renderActiveRuns();
+}
+/* 事后改备注：写回存档 cfg.note（与启动时填的同一字段），空串即清除 */
+let histCache = [];
+async function editHistoryNote(){
+  const id = $("#historySel").value;
+  if(!id) return;
+  const cur = histCache.find(h => h.run_id === id);
+  const note = prompt("任务备注（留空清除，≤80 字符）：", cur?.note || "");
+  if(note === null) return;
+  const r = await fetch(`/api/bench/history/${encodeURIComponent(id)}/note`,
+    {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({note})});
+  if(!r.ok){ setPill("备注保存失败", "err"); return; }
+  setPill(note.trim() ? "备注已更新" : "备注已清除", "");
+  await loadHistoryList();
+  $("#historySel").value = id;   // 刷新后保持选中原记录
 }
 /* 进行中的任务（多标签页入口，ADR-0009）：任意标签页可进入正在跑的测速 */
 async function renderActiveRuns(){
@@ -1691,15 +1772,46 @@ function enterRun(rid, totalPoints){
   state.es = new EventSource(`/api/bench/events/${rid}`);
   wireEvents();
 }
-async function deleteHistory(){
-  const id = $("#historySel").value;
-  if(!id || !confirm("删除该条历史记录？")) return;
-  await fetch(`/api/bench/history/${encodeURIComponent(id)}`, {method:"DELETE"});
-  await loadHistoryList();
+/* 删除弹窗：勾选要删的记录，全选/全不选快捷，确认后逐条删除 */
+let delCache = [];
+async function openDelModal(){
+  let d;
+  try{ d = await (await fetch("/api/bench/history")).json(); }
+  catch(e){ setPill("历史列表加载失败", "err"); return; }
+  delCache = d.history || [];
+  if(!delCache.length){ setPill("暂无历史记录可删除", ""); return; }
+  renderDelList(true);
+  $("#delModalRoot").hidden = false;
+  document.addEventListener("keydown", onDelModalKey);
 }
-async function clearHistory(){
-  if(!confirm("清空全部历史记录？不可恢复。")) return;
-  await fetch("/api/bench/history", {method:"DELETE"});
+function closeDelModal(){
+  $("#delModalRoot").hidden = true;
+  document.removeEventListener("keydown", onDelModalKey);
+}
+function onDelModalKey(e){ if(e.key === "Escape") closeDelModal(); }
+function renderDelList(checked){
+  $("#delList").innerHTML = delCache.map(h =>
+    `<label class="ck"><input type="checkbox" value="${esc(h.run_id)}" ${checked ? "checked" : ""}
+      onchange="updateDelCount()"><span>${esc(historyLabel(h))}</span></label>`).join("");
+  updateDelCount();
+}
+function delSetAll(on){
+  document.querySelectorAll("#delList input[type=checkbox]").forEach(c => c.checked = on);
+  updateDelCount();
+}
+function updateDelCount(){
+  const n = document.querySelectorAll("#delList input[type=checkbox]:checked").length;
+  $("#delCount").textContent = `已选 ${n} / ${delCache.length} 条`;
+  $("#btnDelConfirm").disabled = !n;
+}
+async function delConfirm(){
+  const ids = [...document.querySelectorAll("#delList input[type=checkbox]:checked")]
+    .map(c => c.value);
+  if(!ids.length) return;
+  for(const id of ids)
+    await fetch(`/api/bench/history/${encodeURIComponent(id)}`, {method:"DELETE"});
+  closeDelModal();
+  setPill(`已删除 ${ids.length} 条历史记录`, "");
   await loadHistoryList();
 }
 /* 历史存档/断线兜底的公共水合路径：runId、points、进度、cfg（含 provider 回切） */

@@ -176,6 +176,85 @@ def retry(times: int = 3, delay: float = 0.1):
 '''.strip(),
 ]
 
+# Agent 语料兜底块（corpus/agent/ 缺失时启用）：SWE-agent 风格轨迹——
+# [user] 任务 / [assistant] 思考+命令 / [observation] 工具输出 交替
+_AGENT_POOL = [
+    '''
+[user]
+We are solving the following GitHub issue:
+repo: acme__config-parser-241
+Title: Empty input crashes the TOML config parser
+When the input file is empty (0 bytes), parse_config() raises IndexError
+instead of returning an empty Config object. Steps to reproduce:
+  echo -n "" > empty.toml && python -m acme.config empty.toml
+Expected: an empty Config with defaults. Actual: IndexError: list index out of range.
+[assistant]
+I need to locate the parser entry point and reproduce the crash first.
+Action: bash
+Command: grep -rn "def parse_config" --include="*.py" .
+[observation]
+./acme/config/__init__.py:12:def parse_config(path):
+./acme/config/parser.py:45:def parse_config(text):
+[assistant]
+Found two entry points. The traceback points at parser.py. Let me read it.
+Action: str_replace_editor
+Command: view
+Path: /repo/acme/config/parser.py
+[observation]
+Here's the result of running `cat -n` on /repo/acme/config/parser.py:
+    40	        return self._defaults.copy()
+    41
+    42
+    43	def parse_config(text):
+    44	    """Parse TOML text into a Config."""
+    45	    lines = text.splitlines()
+    46	    first = lines[0].strip()
+    47	    if first.startswith("#"):
+    48	        lines = lines[1:]
+    49	    table = {}
+    50	    for ln in lines:
+    51	        key, _, value = ln.partition("=")
+    52	        table[key.strip()] = value.strip()
+    53	    return Config(table)
+[assistant]
+The bug is clear: line 46 indexes lines[0] without checking for an empty
+file, so a 0-byte input raises IndexError. I'll guard the empty case.
+Action: edit
+Path: /repo/acme/config/parser.py
+<<<
+old:    lines = text.splitlines()
+        first = lines[0].strip()
+new:    lines = text.splitlines()
+        if not lines:
+        ...    return Config({})
+        first = lines[0].strip()
+>>>
+[observation]
+The file /repo/acme/config/parser.py has been edited. Here's what changed:
+    45	    lines = text.splitlines()
+    46	    if not lines:
+    47	        return Config({})
+    48	    first = lines[0].strip()
+Review the changes and make sure they are as expected.
+[assistant]
+The guard is in place. Now verify with the reproduction steps.
+Action: bash
+Command: echo -n "" > /tmp/empty.toml && python -m acme.config /tmp/empty.toml
+[observation]
+Config({})
+[assistant]
+Empty input now returns an empty Config. Running the existing test suite to
+make sure nothing regressed.
+Action: bash
+Command: python -m pytest tests/config/ -q
+[observation]
+43 passed in 1.12s
+[assistant]
+All tests pass. Submitting the fix.
+Action: submit
+'''.strip(),
+]
+
 SCENARIOS: dict[str, dict[str, Any]] = {
     "creative": {
         "label": "创意写作",
@@ -210,6 +289,29 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "out_cpt": 3.4,            # 输出估算：C/C++ ~3.4 字符/token（仅 usage 缺失时的兜底）
         "max_tokens_default": 1024,
     },
+    "agent": {
+        "label": "Agent 调用",
+        "system": ("You are an autonomous software engineering agent solving GitHub "
+                   "issues. You explore the repository, reason about the problem, and "
+                   "edit code, one action at a time."),
+        "instruction": (
+            "The reference material above is a real execution trajectory of a SWE-agent "
+            "solving GitHub issues (task description, tool calls, observations and code "
+            "edits so far). Based on this trajectory, decide the next action: briefly "
+            "analyze the current state, then output exactly one concrete action "
+            "(a bash command or a file edit) with its expected outcome."
+        ),
+        "zero_instruction": (
+            "You are assigned the GitHub issue: 'Empty input crashes the TOML config "
+            "parser with IndexError instead of returning an empty Config'. Output your "
+            "first action: a single bash command to locate the relevant code, with a "
+            "one-sentence rationale."
+        ),
+        "filler_pool": _AGENT_POOL,  # 导入后由 _load_agent_pool() 覆盖（corpus 优先，内置块兜底）
+        "in_cpt": 3.5,             # 输入系数先验：英文代码/日志/JSON 混合轨迹 ~3.5 字符/token（探测校准前的兜底）
+        "out_cpt": 3.4,            # 输出估算：命令/补丁类英文 ~3.4 字符/token（仅 usage 缺失时的兜底）
+        "max_tokens_default": 512,  # agent 单步动作短，512 足够覆盖思考+一个动作
+    },
 }
 
 # 0 = 零输入档：一句话指令直接命题，测纯指令生成基线（ADR-0005）
@@ -227,6 +329,21 @@ CTX_HEADROOM = 1024
 # 云端调度停顿 ≤1~2s）不受影响，只削病理拖尾
 DECODE_GAP_CAP = 3.0
 
+# 停滞复合记账门限（秒）：≥该值的相邻块间隔记为一次停滞、满额计入累计
+# （门限是检测闸，不是时长折扣）。比 DECODE_GAP_CAP 低一档——10s decode
+# 里 1s 的停顿（10% 污染）够不上空窗校正，但诊断上应留痕（借鉴 pi-tps）
+STALL_THRESHOLD_S = 0.5
+# 突发交付甄别：全部 chunk 以亚毫秒平均间隔到达 → 窗口测的是网关缓冲冲刷
+# （buffer-flush dispatch）而非真实流式，decode 速率虚高不可信。真流式即使
+# 3000 tok/s、5 token/chunk 也有 ~1.7ms 间隔（借鉴 pi-tps）
+BURST_MIN_CHUNKS = 5      # chunk 太少不足为凭
+BURST_AVG_GAP_MS = 1.0    # 平均间隔低于该值视为冲刷
+
+
+def _decode_burst(n_chunks: int, decode_time: float | None) -> bool:
+    return bool(decode_time and n_chunks >= BURST_MIN_CHUNKS
+                and decode_time * 1000 / (n_chunks - 1) < BURST_AVG_GAP_MS)
+
 
 def _fmt_ctx(ctx: int) -> str:
     return "0K" if ctx <= 0 else f"≈{ctx // 1024}K"
@@ -235,6 +352,8 @@ CORPUS_CODE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "corpus", "code")
 CORPUS_CREATIVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                    "corpus", "creative")
+CORPUS_AGENT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "corpus", "agent")
 
 
 def _load_code_pool() -> list[list[str]]:
@@ -290,8 +409,37 @@ def _load_creative_pool() -> list[str]:
     return pool or list(_CREATIVE_POOL)
 
 
+def _load_agent_pool() -> list[str]:
+    """Agent 场景语料：优先用 vendored 的 SWE-agent 真实执行轨迹（corpus/agent/，
+    nebius/swe-agent-trajectories，CC-BY-4.0；任务取自 SWE-bench dev 与
+    SWE-bench-extra，构建脚本 scripts/build_agent_corpus.py）。轨迹块保留
+    [user]/[assistant]/[observation] 交替结构——bash 命令、文件查看输出、
+    diff 的 token 纹理是 agent 工作负载的真实口径，与创意/代码场景的
+    连续散文/源码分布显著不同。
+    每个文件一个轨迹块（≥2000 字符，按轮次边界聚合，由构建脚本保证）；
+    缺失/为空时回退内置块。"""
+    pool = []
+    try:
+        for root, _dirs, files in os.walk(CORPUS_AGENT_DIR):
+            for fn in sorted(files):
+                if fn.upper().startswith(("LICENSE", "README")):
+                    continue
+                try:
+                    with open(os.path.join(root, fn), encoding="utf-8",
+                              errors="replace") as f:
+                        text = f.read().strip()
+                except OSError:
+                    continue
+                if len(text) >= 2000:
+                    pool.append(text)
+    except OSError:
+        pass
+    return pool or list(_AGENT_POOL)
+
+
 SCENARIOS["code"]["filler_blocks"] = _load_code_pool()
 SCENARIOS["creative"]["filler_pool"] = _load_creative_pool()
+SCENARIOS["agent"]["filler_pool"] = _load_agent_pool()
 
 
 def _make_stream(pool: list[str]) -> str:
@@ -433,6 +581,14 @@ def _aggregate_reps(reps: list[dict]) -> dict:
     gaps = [p["max_gap_s"] for p in reps if p.get("max_gap_s")]
     if gaps:
         point["max_gap_s"] = max(gaps)   # 停滞诊断取各次复测最差
+    stall_reps = [p for p in reps if p.get("stall_s")]
+    if stall_reps:   # 停滞复合记账同取最差（与 max_gap_s 同口径）
+        point["stall_s"] = max(p["stall_s"] for p in stall_reps)
+        point["stall_count"] = max(p.get("stall_count") or 0 for p in stall_reps)
+    # 突发交付多数决（与 all_ok 同口径）；dict(rep_point) 可能带入中位次的
+    # True，需显式覆写
+    point["decode_burst"] = (sum(bool(p.get("decode_burst")) for p in reps) * 2
+                             > len(reps)) or None
     point["n_reps"] = len(reps)
     point["reps"] = [{k: p.get(k) for k in
                       ("ttft_s", "prefill_tok_s", "decode_tok_s",
@@ -859,12 +1015,23 @@ class BenchRun:
             "decode_tok_s": None, "decode_total_tok_s": None, "out_tokens": None,
             "ttft_net_s": None, "prefill_net_tok_s": None,
             "rtt_ms": round(self.rtt_s * 1000) if self.rtt_s is not None else None,
-            "max_gap_s": None,
+            "max_gap_s": None, "stall_s": None, "stall_count": None,
+            "decode_burst": None,
         }
         if ok:
             gaps = [r["max_gap_s"] for r in ok if r.get("max_gap_s")]
             if gaps:
                 point["max_gap_s"] = max(gaps)   # 传输/调度停滞诊断：取请求中最差
+            stalls = [r for r in ok if r.get("stall_s")]
+            if stalls:
+                # 停滞复合记账取请求中最差（与 max_gap_s 同口径）：累计时长
+                # 与次数同取自停滞最重的那个请求
+                worst = max(stalls, key=lambda r: r["stall_s"])
+                point["stall_s"] = worst["stall_s"]
+                point["stall_count"] = worst.get("stall_count")
+            bursts = [bool(r.get("decode_burst")) for r in ok if r.get("decode_tok_s")]
+            if bursts and sum(bursts) * 2 > len(bursts):
+                point["decode_burst"] = True   # 多数决（与 all_ok 同口径）
             point["prompt_tokens"] = round(sum(r["prompt_tokens"] for r in ok) / len(ok))
             ttfts = [r["ttft_s"] for r in ok if r.get("ttft_s")]
             if ttfts:
@@ -1005,6 +1172,8 @@ class BenchRun:
         first = last = None
         max_gap = 0.0           # 相邻内容块最大空窗（秒，停滞诊断）
         adj_time = 0.0          # 空窗校正后的 decode 窗口（每段间隔封顶 DECODE_GAP_CAP）
+        stall_s = 0.0           # 停滞累计时长（≥STALL_THRESHOLD_S 的间隔满额计入）
+        stall_count = 0         # 停滞次数：区分「一次大停滞」与「频繁小抖动」
         text_len = 0
         reason_len = 0          # reasoning_content（思考流）字符数，也计入测速
         n_chunks = 0            # 携带正文/思考内容的 SSE 事件数（≈token 事件）
@@ -1162,7 +1331,11 @@ class BenchRun:
                             # （如隧道拥塞），该点读数不可信——记录供前端警示
                             max_gap = now - last
                         if first is not None and last is not None and now > last:
-                            adj_time += min(now - last, DECODE_GAP_CAP)
+                            gap = now - last
+                            adj_time += min(gap, DECODE_GAP_CAP)
+                            if gap >= STALL_THRESHOLD_S:   # 满额计入，非时长折扣
+                                stall_s += gap
+                                stall_count += 1
                         last = now
                         if not quiet and now - last_emit >= 0.4:
                             # token 估算优先按 SSE 内容事件数（每 token 一事件的服务上
@@ -1280,6 +1453,10 @@ class BenchRun:
             "out_tokens": round(out_tokens),
             "total_s": round(t_end - t0, 2),
             "max_gap_s": round(max_gap, 2) if max_gap else None,
+            "stall_s": round(stall_s, 2) if stall_s else None,
+            "stall_count": stall_count or None,
+            # 突发交付：疑似网关缓冲冲刷，decode 速率虚高不可信
+            "decode_burst": True if _decode_burst(n_chunks, decode_time) else None,
             "usage_real": bool(usage),
             "finish": finished,
             "text_chars": text_len, "reason_chars": reason_len,   # 存档诊断用

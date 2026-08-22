@@ -1,0 +1,837 @@
+[system]
+SETTING: You are an autonomous programmer, and you're working directly in the command line with a special interface.
+
+The special interface consists of a file editor that shows you 100 lines of a file at a time.
+In addition to typical bash commands, you can also use the following commands to help you navigate and edit files.
+
+COMMANDS:
+open:
+  docstring: opens the file at the given path in the editor. If line_number is provided, the window will be move to include that line
+  signature: open <path> [<line_number>]
+  arguments:
+    - path (string) [required]: the path to the file to open
+    - line_number (integer) [optional]: the line number to move the window to (if not provided, the window will start at the top of the file)
+
+goto:
+  docstring: moves the window to show <line_number>
+  signature: goto <line_number>
+  arguments:
+    - line_number (integer) [required]: the line number to move the window to
+
+scroll_down:
+  docstring: moves the window down {WINDOW} lines
+  signature: scroll_down
+
+scroll_up:
+  docstring: moves the window down {WINDOW} lines
+  signature: scroll_up
+
+create:
+  docstring: creates and opens a new file with the given name
+  signature: create <filename>
+  arguments:
+    - filename (string) [required]: the name of the file to create
+
+submit:
+  docstring: submits your current code and terminates the session
+  signature: submit
+
+search_dir:
+  docstring: searches for search_term in all files in dir. If dir is not provided, searches in the current directory
+  signature: search_dir <search_term> [<dir>]
+  arguments:
+    - search_term (string) [required]: the term to search for
+    - dir (string) [optional]: the directory to search in (if not provided, searches in the current directory)
+
+search_file:
+  docstring: searches for search_term in file. If file is not provided, searches in the current open file
+  signature: search_file <search_term> [<file>]
+  arguments:
+    - search_term (string) [required]: the term to search for
+    - file (string) [optional]: the file to search in (if not provided, searches in the current open file)
+
+find_file:
+  docstring: finds all files with the given name in dir. If dir is not provided, searches in the current directory
+  signature: find_file <file_name> [<dir>]
+  arguments:
+    - file_name (string) [required]: the name of the file to search for
+    - dir (string) [optional]: the directory to search in (if not provided, searches in the current directory)
+
+edit:
+  docstring: replaces lines <start_line> through <end_line> (inclusive) with the given text in the open file. The replacement text is terminated by a line with only end_of_edit on it. All of the <replacement text> will be entered, so make sure your indentation is formatted properly. Python files will be checked for syntax errors after the edit. If the system detects a syntax error, the edit will not be executed. Simply try to edit the file again, but make sure to read the error message and modify the edit command you issue accordingly. Issuing the same command a second time will just lead to the same error message again.
+  signature: edit <start_line>:<end_line>
+<replacement_text>
+end_of_edit
+  arguments:
+    - start_line (integer) [required]: the line number to start the edit at
+    - end_line (integer) [required]: the line number to end the edit at (inclusive)
+    - replacement_text (string) [required]: the text to replace the current selection with
+
+
+
+Please note that THE EDIT COMMAND REQUIRES PROPER INDENTATION.
+If you'd like to add the line '        print(x)' you must fully write that out, with all those spaces before the code! Indentation is important and code that is not indented correctly will fail and require fixing before it can be run.
+
+RESPONSE FORMAT:
+Your shell prompt is formatted as follows:
+(Open file: <path>) <cwd> $
+
+You need to format your output using two fields; discussion and command.
+Your output should always include _one_ discussion and _one_ command field EXACTLY as in the following example:
+DISCUSSION
+First I'll start by using ls to see what files are in the current directory. Then maybe we can look at some relevant files to see what they look like.
+```
+ls -a
+```
+
+You should only include a *SINGLE* command in the command section and then wait for a response from the shell before continuing with more discussion and commands. Everything you include in the DISCUSSION section will be saved for future reference.
+If you'd like to issue two commands at once, PLEASE DO NOT DO THAT! Please instead first submit just the first command, and then after receiving a response you'll be able to issue the second command.
+You're free to use any other bash commands you want (e.g. find, grep, cat, ls, cd) in addition to the special commands listed above.
+However, the environment does NOT support interactive session commands (e.g. python, vim), so please do not invoke them.
+
+[user]
+We're currently solving the following issue within our repository. Here's the issue text:
+ISSUE:
+Allow specifying PYTHON_THREADPOOL_THREAD_COUNT larger than 32
+Currently, the worker limits the maximum value of `PYTHON_THREADPOOL_THREAD_COUNT` to 32. Any value larger than that is ignored. There is no good reason for this in general case: if someone/something decided a larger number works better for a specific use case, this should be respected.
+
+INSTRUCTIONS:
+Now, you're going to solve this issue on your own. Your terminal session has started and you're in the repository's root directory. You can use any bash commands or the special interface to help you. Edit all the files you need to and run any checks or tests that you want.
+Remember, YOU CAN ONLY ENTER ONE COMMAND AT A TIME. You should always wait for feedback after every command.
+When you're satisfied with all of the changes you've made, you can submit your changes to the code base by simply running the submit command.
+Note however that you cannot use any interactive session commands (e.g. python, vim) in this environment, but you can write scripts and run them. E.g. you can write a python script and then run it with `python <script_name>.py`.
+
+NOTE ABOUT THE EDIT COMMAND: Indentation really matters! When editing a file, make sure to insert appropriate indentation before each line!
+
+IMPORTANT TIPS:
+1. Always start by trying to replicate the bug that the issues discusses.
+   If the issue includes code for reproducing the bug, we recommend that you re-implement that in your environment, and run it to make sure you can reproduce the bug.
+   Then start trying to fix it.
+   When you think you've fixed the bug, re-run the bug reproduction script to make sure that the bug has indeed been fixed.
+
+   If the bug reproduction script does not print anything when it successfully runs, we recommend adding a print("Script completed successfully, no errors.") command at the end of the file,
+   so that you can be sure that the script indeed ran fine all the way through.
+
+2. If you run a command and it doesn't work, try running a different command. A command that did not work once will not work the second time unless you modify it!
+
+3. If you open a file and need to get to an area around a specific line that is not in the first 100 lines, say line 583, don't just use the scroll_down command multiple times. Instead, use the goto 583 command. It's much quicker.
+
+4. If the bug reproduction script requires inputting/reading a specific file, such as buggy-input.png, and you'd like to understand how to input that file, conduct a search in the existing repo code, to see whether someone else has already done that. Do this by running the command: find_file "buggy-input.png" If that doesn't work, use the linux 'find' command.
+
+5. Always make sure to look at the currently open file and the current working directory (which appears right after the currently open file). The currently open file might be in a different directory than the working directory! Note that some commands, such as 'create', open files, so they might change the current  open file.
+
+6. When editing files, it is easy to accidentally specify a wrong line number or to write code with incorrect indentation. Always check the code after you issue an edit to make sure that it reflects what you wanted to accomplish. If it didn't, issue another command to fix it.
+
+
+(Open file: n/a)
+(Current directory: /azure-functions-python-worker)
+bash-$
+
+[ai]
+To address the issue, we need to locate the code where the maximum value of `PYTHON_THREADPOOL_THREAD_COUNT` is limited to 32. This may involve searching for a specific file or configuration that handles this setting. Let's start by exploring the repository to find where this limit might be defined.
+
+First, let's list the files and directories in the current repository root directory to get an overview of the structure.
+```
+ls -F
+```
+
+[user]
+CODEOWNERS
+LICENSE
+MANIFEST.in
+README.md
+azure-pipelines.yml
+azure_functions_worker/
+azure_functions_worker.egg-info/
+build/
+docs/
+pack/
+python/
+requirements.txt
+setup.cfg
+setup.py
+tests/
+
+(Open file: n/a)
+(Current directory: /azure-functions-python-worker)
+bash-$
+
+[ai]
+The `azure_functions_worker` directory likely contains the main source code for the Python worker. The limit on `PYTHON_THREADPOOL_THREAD_COUNT` would probably be found within the code that handles threading or worker configuration.
+
+Let's search for any files that might contain the term `PYTHON_THREADPOOL_THREAD_COUNT` within the `azure_functions_worker` directory to locate where this environment variable is being used or set.
+```
+grep -r "PYTHON_THREADPOOL_THREAD_COUNT" azure_functions_worker
+```
+
+[user]
+azure_functions_worker/dispatcher.py:from .constants import (PYTHON_THREADPOOL_THREAD_COUNT,
+azure_functions_worker/dispatcher.py:                        PYTHON_THREADPOOL_THREAD_COUNT_DEFAULT,
+azure_functions_worker/dispatcher.py:                        PYTHON_THREADPOOL_THREAD_COUNT_MAX,
+azure_functions_worker/dispatcher.py:                        PYTHON_THREADPOOL_THREAD_COUNT_MIN)
+azure_functions_worker/dispatcher.py:        # count by setting the PYTHON_THREADPOOL_THREAD_COUNT app setting.
+azure_functions_worker/dispatcher.py:            # Apply PYTHON_THREADPOOL_THREAD_COUNT
+azure_functions_worker/dispatcher.py:                logger.warning(f'{PYTHON_THREADPOOL_THREAD_COUNT} must be an '
+azure_functions_worker/dispatcher.py:            if int_value < PYTHON_THREADPOOL_THREAD_COUNT_MIN or (
+azure_functions_worker/dispatcher.py:                    int_value > PYTHON_THREADPOOL_THREAD_COUNT_MAX):
+azure_functions_worker/dispatcher.py:                logger.warning(f'{PYTHON_THREADPOOL_THREAD_COUNT} must be set '
+azure_functions_worker/dispatcher.py:                               f'{PYTHON_THREADPOOL_THREAD_COUNT_MIN} and '
+azure_functions_worker/dispatcher.py:                               f'{PYTHON_THREADPOOL_THREAD_COUNT_MAX}. '
+azure_functions_worker/dispatcher.py:            else f'{PYTHON_THREADPOOL_THREAD_COUNT_DEFAULT}'
+azure_functions_worker/dispatcher.py:        max_workers = get_app_setting(setting=PYTHON_THREADPOOL_THREAD_COUNT,
+azure_functions_worker/constants.py:PYTHON_THREADPOOL_THREAD_COUNT = "PYTHON_THREADPOOL_THREAD_COUNT"
+azure_functions_worker/constants.py:PYTHON_THREADPOOL_THREAD_COUNT_DEFAULT = 1
+azure_functions_worker/constants.py:PYTHON_THREADPOOL_THREAD_COUNT_MIN = 1
+azure_functions_worker/constants.py:PYTHON_THREADPOOL_THREAD_COUNT_MAX = sys.maxsize
+
+(Open file: n/a)
+(Current directory: /azure-functions-python-worker)
+bash-$
+
+[ai]
+The search results indicate that the `dispatcher.py` file in the `azure_functions_worker` directory contains references to `PYTHON_THREADPOOL_THREAD_COUNT` and its minimum and maximum values. The constants file also defines these values.
+
+To address the issue, we'll need to modify the code in `dispatcher.py` that enforces the maximum value of `PYTHON_THREADPOOL_THREAD_COUNT`. Let's open the `dispatcher.py` file to examine the relevant code and make the necessary changes.
+
+First, we should find the `dispatcher.py` file within the `azure_functions_worker` directory.
+```
+find_file "dispatcher.py" azure_functions_worker
+```
+
+[user]
+Found 1 matches for "dispatcher.py" in /azure-functions-python-worker/azure_functions_worker:
+/azure-functions-python-worker/azure_functions_worker/dispatcher.py
+
+(Open file: n/a)
+(Current directory: /azure-functions-python-worker)
+bash-$
+
+[ai]
+Now that we have located the `dispatcher.py` file, let's open it to view the code that handles the `PYTHON_THREADPOOL_THREAD_COUNT` setting. We'll be able to see how the maximum value is currently being enforced and make the necessary modifications.
+
+Let's open the file and navigate to the relevant section where `PYTHON_THREADPOOL_THREAD_COUNT` is handled.
+```
+open azure_functions_worker/dispatcher.py
+```
+
+[user]
+[File: /azure-functions-python-worker/azure_functions_worker/dispatcher.py (717 lines total)]
+1:# Copyright (c) Microsoft Corporation. All rights reserved.
+2:# Licensed under the MIT License.
+3:"""GRPC client.
+4:
+5:Implements loading and execution of Python workers.
+6:"""
+7:
+8:import asyncio
+9:import concurrent.futures
+10:import logging
+11:import os
+12:import queue
+13:import sys
+14:import threading
+15:from asyncio import BaseEventLoop
+16:from logging import LogRecord
+17:from typing import List, Optional
+18:
+19:import grpc
+20:
+21:from . import __version__
+22:from . import bindings
+23:from . import constants
+24:from . import functions
+25:from . import loader
+26:from . import protos
+27:from .constants import (PYTHON_THREADPOOL_THREAD_COUNT,
+28:                        PYTHON_THREADPOOL_THREAD_COUNT_DEFAULT,
+29:                        PYTHON_THREADPOOL_THREAD_COUNT_MAX,
+30:                        PYTHON_THREADPOOL_THREAD_COUNT_MIN)
+31:from .logging import disable_console_logging, enable_console_logging
+32:from .logging import (logger, error_logger, is_system_log_category,
+33:                      CONSOLE_LOG_PREFIX)
+34:from .extension import ExtensionManager
+35:from .utils.common import get_app_setting
+36:from .utils.tracing import marshall_exception_trace
+37:from .utils.dependency import DependencyManager
+38:from .utils.wrappers import disable_feature_by
+39:from .bindings.shared_memory_data_transfer import SharedMemoryManager
+40:
+41:_TRUE = "true"
+42:
+43:"""In Python 3.6, the current_task method was in the Task class, but got moved
+44:out in 3.7+ and fully removed in 3.9. Thus, to support 3.6 and 3.9 together, we
+45:need to switch the implementation of current_task for 3.6.
+46:"""
+47:_CURRENT_TASK = asyncio.Task.current_task \
+48:    if (sys.version_info[0] == 3 and sys.version_info[1] == 6) \
+49:    else asyncio.current_task
+50:
+51:
+52:class DispatcherMeta(type):
+53:
+54:    __current_dispatcher__ = None
+55:
+56:    @property
+57:    def current(mcls):
+58:        disp = mcls.__current_dispatcher__
+59:        if disp is None:
+60:            raise RuntimeError('no currently running Dispatcher is found')
+61:        return disp
+62:
+63:
+64:class Dispatcher(metaclass=DispatcherMeta):
+65:
+66:    _GRPC_STOP_RESPONSE = object()
+67:
+68:    def __init__(self, loop: BaseEventLoop, host: str, port: int,
+69:                 worker_id: str, request_id: str,
+70:                 grpc_connect_timeout: float,
+71:                 grpc_max_msg_len: int = -1) -> None:
+72:        self._loop = loop
+73:        self._host = host
+74:        self._port = port
+75:        self._request_id = request_id
+76:        self._worker_id = worker_id
+77:        self._functions = functions.Registry()
+78:        self._shmem_mgr = SharedMemoryManager()
+79:
+80:        self._old_task_factory = None
+81:
+82:        # We allow the customer to change synchronous thread pool max worker
+83:        # count by setting the PYTHON_THREADPOOL_THREAD_COUNT app setting.
+84:        #   For 3.[6|7|8] The default value is 1.
+85:        #   For 3.9, we don't set this value by default but we honor incoming
+86:        #     the app setting.
+87:        self._sync_call_tp: concurrent.futures.Executor = (
+88:            self._create_sync_call_tp(self._get_sync_tp_max_workers())
+89:        )
+90:
+91:        self._grpc_connect_timeout: float = grpc_connect_timeout
+92:        # This is set to -1 by default to remove the limitation on msg size
+93:        self._grpc_max_msg_len: int = grpc_max_msg_len
+94:        self._grpc_resp_queue: queue.Queue = queue.Queue()
+95:        self._grpc_connected_fut = loop.create_future()
+96:        self._grpc_thread: threading.Thread = threading.Thread(
+97:            name='grpc-thread', target=self.__poll_grpc)
+98:
+99:    def get_sync_tp_workers_set(self):
+100:        """We don't know the exact value of the threadcount set for the Python
+(617 more lines below)
+
+(Open file: /azure-functions-python-worker/azure_functions_worker/dispatcher.py)
+(Current directory: /azure-functions-python-worker)
+bash-$
+
+[ai]
+The file is now open, but we need to navigate to the section where `PYTHON_THREADPOOL_THREAD_COUNT` is handled. From the grep results, we know that this environment variable is used in the dispatcher file, specifically around lines 27-30. 
+
+Let's use the `goto` command to navigate to that area of the file to examine the relevant code.
+```
+goto 27
+```
+
+[user]
+[File: /azure-functions-python-worker/azure_functions_worker/dispatcher.py (717 lines total)]
+(11 more lines above)
+12:import queue
+13:import sys
+14:import threading
+15:from asyncio import BaseEventLoop
+16:from logging import LogRecord
+17:from typing import List, Optional
+18:
+19:import grpc
+20:
+21:from . import __version__
+22:from . import bindings
+23:from . import constants
+24:from . import functions
+25:from . import loader
+26:from . import protos
+27:from .constants import (PYTHON_THREADPOOL_THREAD_COUNT,
+28:                        PYTHON_THREADPOOL_THREAD_COUNT_DEFAULT,
+29:                        PYTHON_THREADPOOL_THREAD_COUNT_MAX,
+30:                        PYTHON_THREADPOOL_THREAD_COUNT_MIN)
+31:from .logging import disable_console_logging, enable_console_logging
+32:from .logging import (logger, error_logger, is_system_log_category,
+33:                      CONSOLE_LOG_PREFIX)
+34:from .extension import ExtensionManager
+35:from .utils.common import get_app_setting
+36:from .utils.tracing import marshall_exception_trace
+37:from .utils.dependency import DependencyManager
+38:from .utils.wrappers import disable_feature_by
+39:from .bindings.shared_memory_data_transfer import SharedMemoryManager
+40:
+41:_TRUE = "true"
+42:
+43:"""In Python 3.6, the current_task method was in the Task class, but got moved
+44:out in 3.7+ and fully removed in 3.9. Thus, to support 3.6 and 3.9 together, we
+45:need to switch the implementation of current_task for 3.6.
+46:"""
+47:_CURRENT_TASK = asyncio.Task.current_task \
+48:    if (sys.version_info[0] == 3 and sys.version_info[1] == 6) \
+49:    else asyncio.current_task
+50:
+51:
+52:class DispatcherMeta(type):
+53:
+54:    __current_dispatcher__ = None
+55:
+56:    @property
+57:    def current(mcls):
+58:        disp = mcls.__current_dispatcher__
+59:        if disp is None:
+60:            raise RuntimeError('no currently running Dispatcher is found')
+61:        return disp
+62:
+63:
+64:class Dispatcher(metaclass=DispatcherMeta):
+65:
+66:    _GRPC_STOP_RESPONSE = object()
+67:
+68:    def __init__(self, loop: BaseEventLoop, host: str, port: int,
+69:                 worker_id: str, request_id: str,
+70:                 grpc_connect_timeout: float,
+71:                 grpc_max_msg_len: int = -1) -> None:
+72:        self._loop = loop
+73:        self._host = host
+74:        self._port = port
+75:        self._request_id = request_id
+76:        self._worker_id = worker_id
+77:        self._functions = functions.Registry()
+78:        self._shmem_mgr = SharedMemoryManager()
+79:
+80:        self._old_task_factory = None
+81:
+82:        # We allow the customer to change synchronous thread pool max worker
+83:        # count by setting the PYTHON_THREADPOOL_THREAD_COUNT app setting.
+84:        #   For 3.[6|7|8] The default value is 1.
+85:        #   For 3.9, we don't set this value by default but we honor incoming
+86:        #     the app setting.
+87:        self._sync_call_tp: concurrent.futures.Executor = (
+88:            self._create_sync_call_tp(self._get_sync_tp_max_workers())
+89:        )
+90:
+91:        self._grpc_connect_timeout: float = grpc_connect_timeout
+92:        # This is set to -1 by default to remove the limitation on msg size
+93:        self._grpc_max_msg_len: int = grpc_max_msg_len
+94:        self._grpc_resp_queue: queue.Queue = queue.Queue()
+95:        self._grpc_connected_fut = loop.create_future()
+96:        self._grpc_thread: threading.Thread = threading.Thread(
+97:            name='grpc-thread', target=self.__poll_grpc)
+98:
+99:    def get_sync_tp_workers_set(self):
+100:        """We don't know the exact value of the threadcount set for the Python
+101:         3.9 scenarios (as we'll start passing only None by default), and we
+102:         need to get that information.
+103:
+104:         Ref: concurrent.futures.thread.ThreadPoolExecutor.__init__._max_workers
+105:        """
+106:        return self._sync_call_tp._max_workers
+107:
+108:    @classmethod
+109:    async def connect(cls, host: str, port: int, worker_id: str,
+110:                      request_id: str, connect_timeout: float):
+111:        loop = asyncio.events.get_event_loop()
+(606 more lines below)
+
+(Open file: /azure-functions-python-worker/azure_functions_worker/dispatcher.py)
+(Current directory: /azure-functions-python-worker)
+bash-$
+
+[ai]
+We have navigated to the beginning of the file where the constants for `PYTHON_THREADPOOL_THREAD_COUNT` are imported. However, the actual handling of this environment variable and its maximum value enforcement is likely further down in the file.
+
+From the grep results, we saw that the maximum value enforcement is mentioned around line 83. Let's scroll down to see more of the file and find the specific code that enforces the maximum value.
+
+```
+scroll_down
+```
+
+[user]
+[File: /azure-functions-python-worker/azure_functions_worker/dispatcher.py (717 lines total)]
+(109 more lines above)
+110:                      request_id: str, connect_timeout: float):
+111:        loop = asyncio.events.get_event_loop()
+112:        disp = cls(loop, host, port, worker_id, request_id, connect_timeout)
+113:        disp._grpc_thread.start()
+114:        await disp._grpc_connected_fut
+115:        logger.info('Successfully opened gRPC channel to %s:%s ', host, port)
+116:        return disp
+117:
+118:    async def dispatch_forever(self):
+119:        if DispatcherMeta.__current_dispatcher__ is not None:
+120:            raise RuntimeError('there can be only one running dispatcher per '
+121:                               'process')
+122:
+123:        self._old_task_factory = self._loop.get_task_factory()
+124:
+125:        loader.install()
+126:
+127:        DispatcherMeta.__current_dispatcher__ = self
+128:        try:
+129:            forever = self._loop.create_future()
+130:
+131:            self._grpc_resp_queue.put_nowait(
+132:                protos.StreamingMessage(
+133:                    request_id=self.request_id,
+134:                    start_stream=protos.StartStream(
+135:                        worker_id=self.worker_id)))
+136:
+137:            self._loop.set_task_factory(
+138:                lambda loop, coro: ContextEnabledTask(coro, loop=loop))
+139:
+140:            # Detach console logging before enabling GRPC channel logging
+141:            logger.info('Detaching console logging.')
+142:            disable_console_logging()
+143:
+144:            # Attach gRPC logging to the root logger. Since gRPC channel is
+145:            # established, should use it for system and user logs
+146:            logging_handler = AsyncLoggingHandler()
+147:            root_logger = logging.getLogger()
+148:
+149:            # Don't change this unless you read #780 and #745
+150:            root_logger.setLevel(logging.INFO)
+151:            root_logger.addHandler(logging_handler)
+152:            logger.info('Switched to gRPC logging.')
+153:            logging_handler.flush()
+154:
+155:            try:
+156:                await forever
+157:            finally:
+158:                logger.warning('Detaching gRPC logging due to exception.')
+159:                logging_handler.flush()
+160:                root_logger.removeHandler(logging_handler)
+161:
+162:                # Reenable console logging when there's an exception
+163:                enable_console_logging()
+164:                logger.warning('Switched to console logging due to exception.')
+165:        finally:
+166:            DispatcherMeta.__current_dispatcher__ = None
+167:
+168:            loader.uninstall()
+169:
+170:            self._loop.set_task_factory(self._old_task_factory)
+171:            self.stop()
+172:
+173:    def stop(self) -> None:
+174:        if self._grpc_thread is not None:
+175:            self._grpc_resp_queue.put_nowait(self._GRPC_STOP_RESPONSE)
+176:            self._grpc_thread.join()
+177:            self._grpc_thread = None
+178:
+179:        self._stop_sync_call_tp()
+180:
+181:    def on_logging(self, record: logging.LogRecord, formatted_msg: str) -> None:
+182:        if record.levelno >= logging.CRITICAL:
+183:            log_level = protos.RpcLog.Critical
+184:        elif record.levelno >= logging.ERROR:
+185:            log_level = protos.RpcLog.Error
+186:        elif record.levelno >= logging.WARNING:
+187:            log_level = protos.RpcLog.Warning
+188:        elif record.levelno >= logging.INFO:
+189:            log_level = protos.RpcLog.Information
+190:        elif record.levelno >= logging.DEBUG:
+191:            log_level = protos.RpcLog.Debug
+192:        else:
+193:            log_level = getattr(protos.RpcLog, 'None')
+194:
+195:        if is_system_log_category(record.name):
+196:            log_category = protos.RpcLog.RpcLogCategory.Value('System')
+197:        else:  # customers using logging will yield 'root' in record.name
+198:            log_category = protos.RpcLog.RpcLogCategory.Value('User')
+199:
+200:        log = dict(
+201:            level=log_level,
+202:            message=formatted_msg,
+203:            category=record.name,
+204:            log_category=log_category
+205:        )
+206:
+207:        invocation_id = get_current_invocation_id()
+208:        if invocation_id is not None:
+209:            log['invocation_id'] = invocation_id
+(508 more lines below)
+
+(Open file: /azure-functions-python-worker/azure_functions_worker/dispatcher.py)
+(Current directory: /azure-functions-python-worker)
+bash-$
+
+[ai]
+We have scrolled through the file and found the section where the `PYTHON_THREADPOOL_THREAD_COUNT` environment variable is used. Specifically, we can see that the maximum value of `PYTHON_THREADPOOL_THREAD_COUNT` is enforced in the `_get_sync_tp_max_workers` method, which is called when initializing the `Dispatcher`.
+
+The method name `_get_sync_tp_max_workers` suggests it is private and likely defined within the `Dispatcher` class. We should scroll down to find the definition of this method and see how it enforces the maximum value.
+
+Let's scroll down further to find the `_get_sync_tp_max_workers` method.
+```
+scroll_down
+```
+
+[user]
+[File: /azure-functions-python-worker/azure_functions_worker/dispatcher.py (717 lines total)]
+(207 more lines above)
+208:        if invocation_id is not None:
+209:            log['invocation_id'] = invocation_id
+210:
+211:        # XXX: When an exception field is set in RpcLog, WebHost doesn't
+212:        # wait for the call result and simply aborts the execution.
+213:        #
+214:        # if record.exc_info and record.exc_info[1] is not None:
+215:        #     log['exception'] = self._serialize_exception(record.exc_info[1])
+216:
+217:        self._grpc_resp_queue.put_nowait(
+218:            protos.StreamingMessage(
+219:                request_id=self.request_id,
+220:                rpc_log=protos.RpcLog(**log)))
+221:
+222:    @property
+223:    def request_id(self) -> str:
+224:        return self._request_id
+225:
+226:    @property
+227:    def worker_id(self) -> str:
+228:        return self._worker_id
+229:
+230:    # noinspection PyBroadException
+231:    @staticmethod
+232:    def _serialize_exception(exc: Exception):
+233:        try:
+234:            message = f'{type(exc).__name__}: {exc}'
+235:        except Exception:
+236:            message = ('Unhandled exception in function. '
+237:                       'Could not serialize original exception message.')
+238:
+239:        try:
+240:            stack_trace = marshall_exception_trace(exc)
+241:        except Exception:
+242:            stack_trace = ''
+243:
+244:        return protos.RpcException(message=message, stack_trace=stack_trace)
+245:
+246:    async def _dispatch_grpc_request(self, request):
+247:        content_type = request.WhichOneof('content')
+248:        request_handler = getattr(self, f'_handle__{content_type}', None)
+249:        if request_handler is None:
+250:            # Don't crash on unknown messages.  Some of them can be ignored;
+251:            # and if something goes really wrong the host can always just
+252:            # kill the worker's process.
+253:            logger.error(f'unknown StreamingMessage content type '
+254:                         f'{content_type}')
+255:            return
+256:
+257:        resp = await request_handler(request)
+258:        self._grpc_resp_queue.put_nowait(resp)
+259:
+260:    async def _handle__worker_init_request(self, req):
+261:        logger.info('Received WorkerInitRequest, '
+262:                    'python version %s, worker version %s, request ID %s',
+263:                    sys.version, __version__, self.request_id)
+264:
+265:        capabilities = {
+266:            constants.RAW_HTTP_BODY_BYTES: _TRUE,
+267:            constants.TYPED_DATA_COLLECTION: _TRUE,
+268:            constants.RPC_HTTP_BODY_ONLY: _TRUE,
+269:            constants.WORKER_STATUS: _TRUE,
+270:            constants.RPC_HTTP_TRIGGER_METADATA_REMOVED: _TRUE,
+271:            constants.SHARED_MEMORY_DATA_TRANSFER: _TRUE,
+272:        }
+273:
+274:        # Can detech worker packages only when customer's code is present
+275:        # This only works in dedicated and premium sku.
+276:        # The consumption sku will switch on environment_reload request.
+277:        if not DependencyManager.is_in_linux_consumption():
+278:            DependencyManager.prioritize_customer_dependencies()
+279:
+280:        return protos.StreamingMessage(
+281:            request_id=self.request_id,
+282:            worker_init_response=protos.WorkerInitResponse(
+283:                capabilities=capabilities,
+284:                result=protos.StatusResult(
+285:                    status=protos.StatusResult.Success)))
+286:
+287:    async def _handle__worker_status_request(self, req):
+288:        # Logging is not necessary in this request since the response is used
+289:        # for host to judge scale decisions of out-of-proc languages.
+290:        # Having log here will reduce the responsiveness of the worker.
+291:        return protos.StreamingMessage(
+292:            request_id=req.request_id,
+293:            worker_status_response=protos.WorkerStatusResponse())
+294:
+295:    async def _handle__function_load_request(self, req):
+296:        func_request = req.function_load_request
+297:        function_id = func_request.function_id
+298:        function_name = func_request.metadata.name
+299:
+300:        logger.info(f'Received FunctionLoadRequest, '
+301:                    f'request ID: {self.request_id}, '
+302:                    f'function ID: {function_id}'
+303:                    f'function Name: {function_name}')
+304:        try:
+305:            func = loader.load_function(
+306:                func_request.metadata.name,
+307:                func_request.metadata.directory,
+(410 more lines below)
+
+(Open file: /azure-functions-python-worker/azure_functions_worker/dispatcher.py)
+(Current directory: /azure-functions-python-worker)
+bash-$
+
+[ai]
+We have scrolled further down the file but still have not found the `_get_sync_tp_max_workers` method. Since the file is quite long, it would be more efficient to use the `search_file` command to locate the method directly.
+
+Let's search for the `_get_sync_tp_max_workers` method within the `dispatcher.py` file.
+```
+search_file "_get_sync_tp_max_workers"
+```
+
+[user]
+Found 3 matches for "_get_sync_tp_max_workers" in /azure-functions-python-worker/azure_functions_worker/dispatcher.py:
+Line 88:            self._create_sync_call_tp(self._get_sync_tp_max_workers())
+Line 482:                self._create_sync_call_tp(self._get_sync_tp_max_workers())
+Line 561:    def _get_sync_tp_max_workers() -> Optional[int]:
+End of matches for "_get_sync_tp_max_workers" in /azure-functions-python-worker/azure_functions_worker/dispatcher.py
+
+(Open file: /azure-functions-python-worker/azure_functions_worker/dispatcher.py)
+(Current directory: /azure-functions-python-worker)
+bash-$
+
+[ai]
+The search results indicate that the `_get_sync_tp_max_workers` method is found at line 561. Let's navigate directly to that line to examine the method and see how it enforces the maximum value for `PYTHON_THREADPOOL_THREAD_COUNT`.
+
+```
+goto 561
+```
+
+[user]
+[File: /azure-functions-python-worker/azure_functions_worker/dispatcher.py (717 lines total)]
+(545 more lines above)
+546:            os.chdir(new_cwd)
+547:            logger.info('Changing current working directory to %s', new_cwd)
+548:        else:
+549:            logger.warning('Directory %s is not found when reloading', new_cwd)
+550:
+551:    def _stop_sync_call_tp(self):
+552:        """Deallocate the current synchronous thread pool and assign
+553:        self._sync_call_tp to None. If the thread pool does not exist,
+554:        this will be a no op.
+555:        """
+556:        if getattr(self, '_sync_call_tp', None):
+557:            self._sync_call_tp.shutdown()
+558:            self._sync_call_tp = None
+559:
+560:    @staticmethod
+561:    def _get_sync_tp_max_workers() -> Optional[int]:
+562:        def tp_max_workers_validator(value: str) -> bool:
+563:            try:
+564:                int_value = int(value)
+565:            except ValueError:
+566:                logger.warning(f'{PYTHON_THREADPOOL_THREAD_COUNT} must be an '
+567:                               'integer')
+568:                return False
+569:
+570:            if int_value < PYTHON_THREADPOOL_THREAD_COUNT_MIN or (
+571:                    int_value > PYTHON_THREADPOOL_THREAD_COUNT_MAX):
+572:                logger.warning(f'{PYTHON_THREADPOOL_THREAD_COUNT} must be set '
+573:                               f'to a value between '
+574:                               f'{PYTHON_THREADPOOL_THREAD_COUNT_MIN} and '
+575:                               f'{PYTHON_THREADPOOL_THREAD_COUNT_MAX}. '
+576:                               'Reverting to default value for max_workers')
+577:                return False
+578:
+579:            return True
+580:
+581:        # Starting Python 3.9, worker won't be putting a limit on the
+582:        # max_workers count in the created threadpool.
+583:        default_value = None if sys.version_info.minor == 9 \
+584:            else f'{PYTHON_THREADPOOL_THREAD_COUNT_DEFAULT}'
+585:        max_workers = get_app_setting(setting=PYTHON_THREADPOOL_THREAD_COUNT,
+586:                                      default_value=default_value,
+587:                                      validator=tp_max_workers_validator)
+588:
+589:        # We can box the app setting as int for earlier python versions.
+590:        return int(max_workers) if max_workers else None
+591:
+592:    def _create_sync_call_tp(
+593:            self, max_worker: Optional[int]) -> concurrent.futures.Executor:
+594:        """Create a thread pool executor with max_worker. This is a wrapper
+595:        over ThreadPoolExecutor constructor. Consider calling this method after
+596:        _stop_sync_call_tp() to ensure only 1 synchronous thread pool is
+597:        running.
+598:        """
+599:        return concurrent.futures.ThreadPoolExecutor(
+600:            max_workers=max_worker
+601:        )
+602:
+603:    def _run_sync_func(self, invocation_id, context, func, params):
+604:        # This helper exists because we need to access the current
+605:        # invocation_id from ThreadPoolExecutor's threads.
+606:        _invocation_id_local.v = invocation_id
+607:        try:
+608:            return ExtensionManager.get_sync_invocation_wrapper(context,
+609:                                                                func)(params)
+610:        finally:
+611:            _invocation_id_local.v = None
+612:
+613:    async def _run_async_func(self, context, func, params):
+614:        return await ExtensionManager.get_async_invocation_wrapper(
+615:            context, func, params
+616:        )
+617:
+618:    def __poll_grpc(self):
+619:        options = []
+620:        if self._grpc_max_msg_len:
+621:            options.append(('grpc.max_receive_message_length',
+622:                            self._grpc_max_msg_len))
+623:            options.append(('grpc.max_send_message_length',
+624:                            self._grpc_max_msg_len))
+625:
+626:        channel = grpc.insecure_channel(
+627:            f'{self._host}:{self._port}', options)
+628:
+629:        try:
+630:            grpc.channel_ready_future(channel).result(
+631:                timeout=self._grpc_connect_timeout)
+632:        except Exception as ex:
+633:            self._loop.call_soon_threadsafe(
+634:                self._grpc_connected_fut.set_exception, ex)
+635:            return
+636:        else:
+637:            self._loop.call_soon_threadsafe(
+638:                self._grpc_connected_fut.set_result, True)
+639:
+640:        stub = protos.FunctionRpcStub(channel)
+641:
+642:        def gen(resp_queue):
+643:            while True:
+644:                msg = resp_queue.get()
+645:                if msg is self._GRPC_STOP_RESPONSE:
+(72 more lines below)
+
+(Open file: /azure-functions-python-worker/azure_functions_worker/dispatcher.py)
+(Current directory: /azure-functions-python-worker)
+bash-$
+
+[ai]
+We have now found the `_get_sync_tp_max_workers` method, which is responsible for enforcing the maximum value of `PYTHON_THREADPOOL_THREAD_COUNT`. The method currently uses the `PYTHON_THREADPOOL_THREAD_COUNT_MAX` constant to enforce this maximum.
+
+To allow for larger values of `PYTHON_THREADPOOL_THREAD_COUNT`, we need to increase the value of `PYTHON_THREADPOOL_THREAD_COUNT_MAX`. This constant is likely defined in the `constants.py` file, which we should edit to reflect the new maximum value.
+
+First, let's locate the `constants.py` file within the `azure_functions_worker` directory.
+```
+find_file "constants.py" azure_functions_worker
+```
+
+[user]
+Found 1 matches for "constants.py" in /azure-functions-python-worker/azure_functions_worker:
+/azure-functions-python-worker/azure_functions_worker/constants.py
+
+(Open file: /azure-functions-python-worker/azure_functions_worker/dispatcher.py)
+(Current directory: /azure-functions-python-worker)
+bash-$
+
+[ai]
+The `constants.py` file has been located. Let's open it to find the definition of `PYTHON_THREADPOOL_THREAD_COUNT_MAX` and update it to a larger value.
+
+```
+open azure_functions_worker/constants.py
+```

@@ -396,6 +396,12 @@ async def bench_start(cfg: dict):
         if not cfg.get(field):
             raise HTTPException(400, f"缺少配置项: {field}")
     _validate_bench_cfg(cfg)
+    # 任务备注：可选短文本，随 cfg 存档、展示在历史标题最前；非字符串/空白丢弃
+    note = cfg.get("note")
+    if isinstance(note, str) and note.strip():
+        cfg["note"] = note.strip()[:80]
+    else:
+        cfg.pop("note", None)
     # provider 解析：服务端注入网关地址与 key，客户端不接触凭据
     if cfg.get("provider"):
         p = resolve_provider(cfg["provider"])
@@ -527,8 +533,13 @@ async def bench_history():
         try:
             with open(os.path.join(RESULTS_DIR, f), encoding="utf-8") as fp:
                 d = json.load(fp)
+            cfg = d.get("cfg", {})
             out.append({"run_id": d.get("run_id", f), "started_at": d.get("started_at"),
-                        "models": d.get("cfg", {}).get("models", []),
+                        "models": cfg.get("models", []),
+                        "scenarios": cfg.get("scenarios", []),
+                        "ctx_list": cfg.get("ctx_list", []),
+                        "concurrencies": cfg.get("concurrencies", []),
+                        "note": cfg.get("note") or "",
                         "n_points": len(d.get("results", []))})
         except Exception:  # noqa: BLE001
             continue
@@ -544,6 +555,29 @@ async def bench_history_detail(run_id: str):
         raise HTTPException(404, "not found")
     with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+@app.post("/api/bench/history/{run_id}/note")
+async def bench_history_note(run_id: str, body: dict):
+    """事后修改历史存档的任务备注（写回 cfg.note，与启动时填的同一字段）。"""
+    if any(c in run_id for c in "/\\") or ".." in run_id:
+        raise HTTPException(400, "非法 run_id")
+    path = os.path.join(RESULTS_DIR, f"{run_id}.json")
+    if not os.path.exists(path):
+        raise HTTPException(404, "not found")
+    note = body.get("note")
+    if not isinstance(note, str):
+        raise HTTPException(400, "note 须为字符串")
+    with open(path, encoding="utf-8") as f:
+        d = json.load(f)
+    note = note.strip()[:80]
+    if note:
+        d.setdefault("cfg", {})["note"] = note
+    else:
+        d.get("cfg", {}).pop("note", None)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=1)
+    return {"ok": True, "note": note}
 
 
 @app.delete("/api/bench/history/{run_id}")

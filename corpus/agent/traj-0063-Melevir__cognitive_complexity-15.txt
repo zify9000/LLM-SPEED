@@ -1,0 +1,91 @@
+[user]
+Complexity for <ast.Store object at 0x7ff7d53ad940> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Name object at 0x7ff7d5296dc0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Load object at 0x7ff7d53ad8e0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.List object at 0x7ff7d5296d60> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Assign object at 0x7ff7d5296e50> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Store object at 0x7ff7d53ad940> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Name object at 0x7ff7d5296d30> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Load object at 0x7ff7d53ad8e0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.List object at 0x7ff7d5296d00> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Assign object at 0x7ff7d5296d90> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Store object at 0x7ff7d53ad940> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Name object at 0x7ff7d5296ca0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Load object at 0x7ff7d53ad8e0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Name object at 0x7ff7d5296be0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Load object at 0x7ff7d53ad8e0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Attribute object at 0x7ff7d5296c10> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Constant object at 0x7ff7d5296b80> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Load object at 0x7ff7d53ad8e0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Name object at 0x7ff7d5296b50> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Call object at 0x7ff7d5296c40> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Store object at 0x7ff7d53ad940> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Name object at 0x7ff7d5296b20> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Load object at 0x7ff7d53ad8e0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Name object at 0x7ff7d5296a90> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Load object at 0x7ff7d53ad8e0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Attribute object at 0x7ff7d5296ac0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Call object at 0x7ff7d5296af0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Assign object at 0x7ff7d5296bb0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.BoolOp object at 0x7ff7d52969a0> is 2 (2 + 0) (increment 2)
+Complexity for <ast.Load object at 0x7ff7d53ad8e0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Name object at 0x7ff7d5296430> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Load object at 0x7ff7d53ad8e0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Name object at 0x7ff7d5296400> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Call object at 0x7ff7d52965e0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Load object at 0x7ff7d53ad8e0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Name object at 0x7ff7d5296310> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Load object at 0x7ff7d53ad8e0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Attribute object at 0x7ff7d5296340> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Load object at 0x7ff7d53ad8e0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Name object at 0x7ff7d52962e0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Call object at 0x7ff7d5296370> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Expr object at 0x7ff7d52963a0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Load object at 0x7ff7d53ad8e0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Name object at 0x7ff7d5296850> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Load object at 0x7ff7d53ad8e0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Attribute object at 0x7ff7d5296880> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Load object at 0x7ff7d53ad8e0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Name object at 0x7ff7d5296190> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Load object at 0x7ff7d53ad8e0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Attribute object at 0x7ff7d5296250> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Call object at 0x7ff7d5296a60> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Call object at 0x7ff7d52962b0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.Expr object at 0x7ff7d52961f0> is 0 (0 + 0) (increment 3)
+Complexity for <ast.If object at 0x7ff7d5296610> is 4 (4 + 0) (increment 3)
+Complexity for <ast.If object at 0x7ff7d5296970> is 8 (2 + 6) (increment 2)
+Complexity for <ast.For object at 0x7ff7d5296cd0> is 9 (1 + 8) (increment 1)
+Complexity for <ast.Load object at 0x7ff7d53ad8e0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Name object at 0x7ff7d52963d0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Load object at 0x7ff7d53ad8e0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Name object at 0x7ff7d52960d0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Load object at 0x7ff7d53ad8e0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Tuple object at 0x7ff7d52967c0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Return object at 0x7ff7d5296c70> is 0 (0 + 0) (increment 0)
+9
+
+(Open file: /cognitive_complexity/test_logical_operators.py)
+(Current directory: /cognitive_complexity)
+bash-$
+
+[ai]
+The output indicates that the cognitive complexity of the `process_raw_constant` function is calculated as 9, which matches the expected complexity mentioned in the issue. This suggests that the fix is working correctly. 
+
+Now that the issue is resolved and the test output confirms the fix, we can clean up by removing the `test_logical_operators.py` file. 
+
+```
+rm test_logical_operators.py
+```
+
+[user]
+Your command ran successfully and did not produce any output.
+(Open file: /cognitive_complexity/test_logical_operators.py)
+(Current directory: /cognitive_complexity)
+bash-$
+
+[ai]
+The `test_logical_operators.py` file has been successfully removed. Now that we have fixed the issue and verified the solution, we should submit our changes to the code base. Let's submit the changes using the `submit` command. 
+
+```
+submit
+```

@@ -239,10 +239,79 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(gap, "停滞点必须带 max_gap_s")
         self.assertGreaterEqual(gap, 3.5, f"4s 停滞应被捕获（实测 {gap}）")
         self.assertLessEqual(gap, 6.0, f"空窗估值不应远超注入值（实测 {gap}）")
+        # 停滞复合记账：单次 4s 停滞满额计入累计、次数为 1
+        self.assertGreaterEqual(points[0].get("stall_s") or 0, 3.5,
+                                "4s 停滞应满额计入 stall_s")
+        self.assertEqual(points[0].get("stall_count"), 1, "单次停滞计数应为 1")
+        self.assertFalse(points[0].get("decode_burst"),
+                         "正常速率流式不应被误判为突发交付")
         # 空窗校正口径：校正窗口把 4s 停滞封顶到 3s，校正值应显著高于毛值
         raw, adj = points[0].get("decode_tok_s"), points[0].get("decode_tok_s_adj")
         self.assertIsNotNone(adj, "停滞点必须带 decode_tok_s_adj")
         self.assertGreater(adj, raw * 1.2, f"校正值 {adj} 应显著高于毛值 {raw}")
+
+    async def test_decode_burst_flagged(self):
+        """缓冲冲刷式交付（全部 chunk 亚毫秒间隔到达）：decode 窗口测的是网关
+        dispatch 而非真实流式，速率虚高——点级必须带 decode_burst 标记。"""
+        old_tg = mock_server.TG
+        mock_server.TG = 200000.0   # 5µs/token：事件循环开销下平均间隔仍 ≪1ms
+        try:
+            run = BenchRun({
+                "gateway_url": f"http://127.0.0.1:{self.port}",
+                "models": ["mock-llm-7b"], "scenarios": ["creative"],
+                "ctx_list": [0], "concurrencies": [1],
+                "max_tokens": 32, "repeats": 1, "timeout_s": 30,
+                "thinking": "disabled",
+            })
+            run.cpt_calib[("mock-llm-7b", "creative")] = 1.8   # 跳过探测
+            q: asyncio.Queue = asyncio.Queue()
+            run.subs.add(q)
+            task = asyncio.create_task(run.run())
+            points = []
+            try:
+                while True:
+                    ev = await asyncio.wait_for(q.get(), timeout=30)
+                    if ev is None:
+                        break
+                    if ev.get("type") == "point":
+                        points.append(ev["point"])
+            finally:
+                await task
+        finally:
+            mock_server.TG = old_tg
+
+        self.assertEqual(len(points), 1)
+        self.assertTrue(points[0].get("decode_burst"),
+                        "亚毫秒间隔交付必须标记 decode_burst")
+
+    async def test_agent_scenario_smoke(self):
+        """Agent 场景端到端（ADR-0014）：SWE-agent 轨迹语料构造 prompt，
+        全链路出点成功且非零档注入语料。"""
+        run = BenchRun({
+            "gateway_url": f"http://127.0.0.1:{self.port}",
+            "models": ["mock-llm-7b"], "scenarios": ["agent"],
+            "ctx_list": [0, 4096], "concurrencies": [1],
+            "max_tokens": 32, "repeats": 1, "timeout_s": 30,
+            "thinking": "disabled",
+        })
+        run.cpt_calib[("mock-llm-7b", "agent")] = 3.5   # 跳过探测
+        q: asyncio.Queue = asyncio.Queue()
+        run.subs.add(q)
+        task = asyncio.create_task(run.run())
+        points = []
+        try:
+            while True:
+                ev = await asyncio.wait_for(q.get(), timeout=30)
+                if ev is None:
+                    break
+                if ev.get("type") == "point":
+                    points.append(ev["point"])
+        finally:
+            await task
+        self.assertEqual(len(points), 2)
+        self.assertTrue(all(p["all_ok"] for p in points))
+        p4k = next(p for p in points if p["ctx_target"] == 4096)
+        self.assertGreater(p4k["prompt_tokens"], 2000, "4K 档应注入轨迹语料")
 
     async def test_pick_gateway_url_prefers_reachable(self):
         """多地址择优：按配置顺序取第一个可达地址（内网等优选地址排前即被

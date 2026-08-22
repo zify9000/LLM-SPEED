@@ -4,21 +4,21 @@
 
 一个 LLM 模型测速台，主打 **数据真实 · 过程可见 · 结论可分享**
 
-**⚡ prefill / decode 分离计量** · **📏 0K~1M 上下文 × 并发** · **🎭 创意写作 · 代码生成**
+**⚡ prefill / decode 分离计量** · **📏 0K~1M 上下文 × 并发** · **🎭 创意写作 · 代码生成 · Agent 调用**
 
 </div>
 
 ## 💡 初心
 
 从 vLLM 到 llama.cpp，从 Q4 到 Q8，换卡、调参、比量化，却始终缺一个工具横向回答：
-不同上下文长度、不同并发、不同使用场景（创意写作 / 代码生成）下，
+不同上下文长度、不同并发、不同使用场景（创意写作 / 代码生成 / Agent 调用）下，
 每个模型的 prefill / decode 到底是多少，与云端 API 的差距是多少。
 
 ## ✨ 特点
 
 | 🔌 只认协议，不认框架 | 🧮 口径透明 | 📡 实时可见 |
 | --- | --- | --- |
-| 挂在 OpenAI 兼容网关后的模型（llama.cpp / vLLM / LiteLLM / 云端 API）一视同仁 | prefill 扣除实测网络往返、decode 滑窗差分并以 usage 权威回写、真实源码与公版文学文本撑上下文、随机 nonce 破 prefix cache：不注水，也不被水 | prefill 等待期估值逐秒收敛、decode 逐帧刷新；跑完自动生成折线图 + 测速卡片 PNG，一键分享 |
+| 挂在 OpenAI 兼容网关后的模型（llama.cpp / vLLM / LiteLLM / 云端 API）一视同仁 | prefill 扣除实测网络往返、decode 滑窗差分并以 usage 权威回写、真实源码/公版文学/SWE-agent 轨迹撑上下文、随机 nonce 破 prefix cache、停滞与突发交付读数显式标记：不注水，也不被水 | prefill 等待期估值逐秒收敛、decode 逐帧刷新；跑完自动生成折线图 + 测速卡片 PNG，一键分享 |
 
 ## 🖼️ 测速卡片示例
 
@@ -58,7 +58,8 @@ server.py          FastAPI 服务端（provider 解析 + 测速任务 + SSE + �
 bench.py           测速引擎（prompt 构造、流式计时、矩阵调度）
 static/index.html  单页前端（ECharts 图表 + html2canvas 卡片 + 配置编辑）
 mock_server.py     假 OpenAI 网关（自测）
-corpus/            真实语料（code: llama.cpp 源码 / creative: 公版《红楼梦》）
+corpus/            真实语料（code: llama.cpp 源码 / creative: 公版《红楼梦》/ agent: SWE-agent 真实执行轨迹）
+scripts/           语料构建脚本（agent 轨迹提取，仅构建期用）
 docs/images/       测速卡片示例图（README 引用）
 tests/             回归测试
 config.json / .env  provider 配置与凭据（不入库）
@@ -67,5 +68,5 @@ results/           历次测速结果 JSON
 
 ## 📄 许可证
 
-本项目以 [Apache License 2.0](LICENSE) 发布。`corpus/code/` 内为第三方语料（llama.cpp 源码），遵循其自带许可证。
+本项目以 [Apache License 2.0](LICENSE) 发布。`corpus/` 内为第三方语料：llama.cpp 源码（MIT）、公版《红楼梦》（Project Gutenberg）、SWE-agent 轨迹（CC-BY-4.0），各循其自带许可证。
 

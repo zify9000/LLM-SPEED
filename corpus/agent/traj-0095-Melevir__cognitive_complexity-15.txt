@@ -1,0 +1,392 @@
+[user]
+[File: /cognitive_complexity/cognitive_complexity/utils/ast.py (93 lines total)]
+1:import ast
+2:
+3:from typing import Callable, Tuple, Union
+4:
+5:from cognitive_complexity.common_types import AnyFuncdef
+6:
+7:
+8:def has_recursive_calls(funcdef: AnyFuncdef) -> bool:
+9:    return bool([
+10:        n for n in ast.walk(funcdef)
+11:        if (
+12:            isinstance(n, ast.Call)
+13:            and isinstance(n.func, ast.Name)
+14:            and n.func.id == funcdef.name
+15:        )
+16:    ])
+17:
+18:
+19:def process_child_nodes(
+20:    node: ast.AST,
+21:    increment_by: int,
+22:    verbose: bool,
+23:    complexity_calculator: Callable,
+24:) -> int:
+25:    child_complexity = 0
+26:    child_nodes = ast.iter_child_nodes(node)
+27:
+28:    for node_num, child_node in enumerate(child_nodes):
+29:        if isinstance(node, ast.Try):
+30:            if node_num == 1:
+31:                # add +1 for all try nodes except body
+32:                increment_by += 1
+33:            if node_num:
+34:                child_complexity += max(1, increment_by)
+35:        child_complexity += complexity_calculator(
+36:            child_node,
+37:            increment_by=increment_by,
+38:            verbose=verbose,
+39:        )
+40:    return child_complexity
+41:
+42:
+43:def process_control_flow_breaker(
+44:    node: Union[ast.If, ast.For, ast.While, ast.IfExp],
+45:    increment_by: int,
+46:) -> Tuple[int, int, bool]:
+47:    if isinstance(node, ast.IfExp):
+48:        # C if A else B; ternary operator equivalent
+49:        increment = 0
+50:        increment_by += 1
+51:    elif isinstance(node, ast.If):
+52:        # +1 for the If and add a nesting level
+53:        increment = 1
+54:        increment_by += 1
+55:    elif node.orelse:
+56:        # +1 for the else and add a nesting level
+57:        increment = 1
+58:        increment_by += 1
+59:    else:
+60:        # no 'else' to count, just add a nesting level
+61:        increment = 0
+62:        increment_by += 1
+63:    return increment_by, max(1, increment_by) + increment, True
+64:
+65:
+66:def process_node_itself(
+67:    node: ast.AST,
+68:    increment_by: int,
+69:) -> Tuple[int, int, bool]:
+70:    control_flow_breakers = (
+71:        ast.If,
+72:        ast.For,
+73:        ast.While,
+74:        ast.IfExp,
+75:    )
+76:    incrementers_nodes = (
+77:        ast.FunctionDef,
+78:        ast.AsyncFunctionDef,
+79:        ast.Lambda,
+80:    )
+81:
+82:    if isinstance(node, control_flow_breakers):
+83:        return process_control_flow_breaker(node, increment_by)
+84:    elif isinstance(node, incrementers_nodes):
+85:        increment_by += 1
+86:        return increment_by, 0, True
+87:    elif isinstance(node, ast.BoolOp):
+88:        inner_boolops_amount = len([n for n in ast.walk(node) if isinstance(n, ast.BoolOp)])
+89:        base_complexity = inner_boolops_amount * max(increment_by, 1)
+90:        return increment_by, base_complexity, False
+91:    elif isinstance(node, (ast.Break, ast.Continue)):
+92:        return increment_by, max(1, increment_by), True
+93:    return increment_by, 0, True
+
+(Open file: /cognitive_complexity/cognitive_complexity/utils/ast.py)
+(Current directory: /cognitive_complexity)
+bash-$
+
+[ai]
+The `process_control_flow_breaker` function correctly adds 1 for the `If` and increments the nesting level. However, the issue persists within the `If` node's condition, where the boolean operators' increments are not fully propagated.
+The `process_node_itself` function's handling of `BoolOp` nodes might not be correctly returning the complexity. We need to ensure that the function returns the correct complexity for `BoolOp` nodes and that this complexity is properly propagated through the AST.
+Let's make an edit to the `process_node_itself` function to ensure that it correctly handles the complexity for `BoolOp` nodes. We will modify the function to ensure that the complexity for `BoolOp` nodes is correctly calculated and returned.
+```
+edit 90:90
+        return increment_by, inner_boolops_amount, False
+end_of_edit
+```
+
+[user]
+[File: /cognitive_complexity/cognitive_complexity/utils/ast.py (93 lines total)]
+1:import ast
+2:
+3:from typing import Callable, Tuple, Union
+4:
+5:from cognitive_complexity.common_types import AnyFuncdef
+6:
+7:
+8:def has_recursive_calls(funcdef: AnyFuncdef) -> bool:
+9:    return bool([
+10:        n for n in ast.walk(funcdef)
+11:        if (
+12:            isinstance(n, ast.Call)
+13:            and isinstance(n.func, ast.Name)
+14:            and n.func.id == funcdef.name
+15:        )
+16:    ])
+17:
+18:
+19:def process_child_nodes(
+20:    node: ast.AST,
+21:    increment_by: int,
+22:    verbose: bool,
+23:    complexity_calculator: Callable,
+24:) -> int:
+25:    child_complexity = 0
+26:    child_nodes = ast.iter_child_nodes(node)
+27:
+28:    for node_num, child_node in enumerate(child_nodes):
+29:        if isinstance(node, ast.Try):
+30:            if node_num == 1:
+31:                # add +1 for all try nodes except body
+32:                increment_by += 1
+33:            if node_num:
+34:                child_complexity += max(1, increment_by)
+35:        child_complexity += complexity_calculator(
+36:            child_node,
+37:            increment_by=increment_by,
+38:            verbose=verbose,
+39:        )
+40:    return child_complexity
+41:
+42:
+43:def process_control_flow_breaker(
+44:    node: Union[ast.If, ast.For, ast.While, ast.IfExp],
+45:    increment_by: int,
+46:) -> Tuple[int, int, bool]:
+47:    if isinstance(node, ast.IfExp):
+48:        # C if A else B; ternary operator equivalent
+49:        increment = 0
+50:        increment_by += 1
+51:    elif isinstance(node, ast.If):
+52:        # +1 for the If and add a nesting level
+53:        increment = 1
+54:        increment_by += 1
+55:    elif node.orelse:
+56:        # +1 for the else and add a nesting level
+57:        increment = 1
+58:        increment_by += 1
+59:    else:
+60:        # no 'else' to count, just add a nesting level
+61:        increment = 0
+62:        increment_by += 1
+63:    return increment_by, max(1, increment_by) + increment, True
+64:
+65:
+66:def process_node_itself(
+67:    node: ast.AST,
+68:    increment_by: int,
+69:) -> Tuple[int, int, bool]:
+70:    control_flow_breakers = (
+71:        ast.If,
+72:        ast.For,
+73:        ast.While,
+74:        ast.IfExp,
+75:    )
+76:    incrementers_nodes = (
+77:        ast.FunctionDef,
+78:        ast.AsyncFunctionDef,
+79:        ast.Lambda,
+80:    )
+81:
+82:    if isinstance(node, control_flow_breakers):
+83:        return process_control_flow_breaker(node, increment_by)
+84:    elif isinstance(node, incrementers_nodes):
+85:        increment_by += 1
+86:        return increment_by, 0, True
+87:    elif isinstance(node, ast.BoolOp):
+88:        inner_boolops_amount = len([n for n in ast.walk(node) if isinstance(n, ast.BoolOp)])
+89:        base_complexity = inner_boolops_amount * max(increment_by, 1)
+90:        return increment_by, inner_boolops_amount, False
+91:    elif isinstance(node, (ast.Break, ast.Continue)):
+92:        return increment_by, max(1, increment_by), True
+93:    return increment_by, 0, True
+File updated. Please review the changes and make sure they are correct (correct indentation, no duplicate lines, etc). Edit the file again if necessary.
+
+(Open file: /cognitive_complexity/cognitive_complexity/utils/ast.py)
+(Current directory: /cognitive_complexity)
+bash-$
+
+[ai]
+The code has been updated to correctly calculate the complexity for binary logical operators. We should now rerun the `reproduce.py` script to verify that the changes have fixed the issue and that the complexity is calculated as expected.
+```
+python reproduce.py
+```
+
+[user]
+Complexity for <ast.Store object at 0x7fad255b24c0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Name object at 0x7fad254b7e20> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Load object at 0x7fad255b2460> is 0 (0 + 0) (increment 0)
+Complexity for <ast.List object at 0x7fad254b7e80> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Assign object at 0x7fad254b7d60> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Store object at 0x7fad255b24c0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Name object at 0x7fad254b7eb0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Load object at 0x7fad255b2460> is 0 (0 + 0) (increment 0)
+Complexity for <ast.List object at 0x7fad254b7ee0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Assign object at 0x7fad254b7e50> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Store object at 0x7fad255b24c0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Name object at 0x7fad254b7f70> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Load object at 0x7fad255b2460> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Name object at 0x7fad254b7910> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Load object at 0x7fad255b2460> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Attribute object at 0x7fad254b7940> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Constant object at 0x7fad254b78b0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Load object at 0x7fad255b2460> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Name object at 0x7fad254b7880> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Call object at 0x7fad254b7fd0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Store object at 0x7fad255b24c0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Name object at 0x7fad254b7850> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Load object at 0x7fad255b2460> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Name object at 0x7fad254b77c0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Load object at 0x7fad255b2460> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Attribute object at 0x7fad254b77f0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Call object at 0x7fad254b7820> is 0 (0 + 0) (increment 1)
+Complexity for <ast.Assign object at 0x7fad254b78e0> is 0 (0 + 0) (increment 1)
+Complexity for <ast.BoolOp object at 0x7fad254b7760> is 2 (2 + 0) (increment 2)
+Complexity for <ast.Load object at 0x7fad255b2460> is 0 (0 + 0) (increment 2)
+Complexity for <ast.Name object at 0x7fad254b7220> is 0 (0 + 0) (increment 2)
+Complexity for <ast.Load object at 0x7fad255b2460> is 0 (0 + 0) (increment 2)
+Complexity for <ast.Attribute object at 0x7fad254b7250> is 0 (0 + 0) (increment 2)
+Complexity for <ast.Load object at 0x7fad255b2460> is 0 (0 + 0) (increment 2)
+Complexity for <ast.Name object at 0x7fad254b7190> is 0 (0 + 0) (increment 2)
+Complexity for <ast.Load object at 0x7fad255b2460> is 0 (0 + 0) (increment 2)
+Complexity for <ast.Attribute object at 0x7fad254b71c0> is 0 (0 + 0) (increment 2)
+Complexity for <ast.Call object at 0x7fad254b71f0> is 0 (0 + 0) (increment 2)
+Complexity for <ast.Call object at 0x7fad254b7400> is 0 (0 + 0) (increment 2)
+Complexity for <ast.Expr object at 0x7fad254b75b0> is 0 (0 + 0) (increment 2)
+Complexity for <ast.If object at 0x7fad254b7790> is 5 (3 + 2) (increment 2)
+Complexity for <ast.For object at 0x7fad254b7f10> is 6 (1 + 5) (increment 1)
+Complexity for <ast.Load object at 0x7fad255b2460> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Name object at 0x7fad254b7130> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Load object at 0x7fad255b2460> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Name object at 0x7fad254b70d0> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Load object at 0x7fad255b2460> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Tuple object at 0x7fad254b7730> is 0 (0 + 0) (increment 0)
+Complexity for <ast.Return object at 0x7fad254b7fa0> is 0 (0 + 0) (increment 0)
+6
+
+(Open file: /cognitive_complexity/cognitive_complexity/utils/ast.py)
+(Current directory: /cognitive_complexity)
+bash-$
+
+[ai]
+The script returned a complexity value of 6, which is still lower than the expected value of 9. The changes have partially resolved the issue, but the complexity calculation is still not aligning with the expected values.
+Upon reviewing the script's output, it appears that the complexity for the `ast.For` node should be 7 (1 + 6), and the complexity for the `ast.If` node should be 6 (2 + 4). However, the current output shows 6 (1 + 5) for the `ast.For` node and 5 (3 + 2) for the `ast.If` node. This suggests that the changes still haven't correctly propagated the increments, especially within the `If` node's condition.
+Let's revisit the `process_control_flow_breaker` and `process_node_itself` functions to ensure that the increments are applied and propagated correctly, especially for nested boolean operators within `If` nodes.
+We will re-open the `utils/ast.py` file and navigate to the `process_control_flow_breaker` function. Let's use the `goto` command to move to the relevant section around line 43.
+```
+goto 43
+```
+
+[user]
+[File: /cognitive_complexity/cognitive_complexity/utils/ast.py (93 lines total)]
+1:import ast
+2:
+3:from typing import Callable, Tuple, Union
+4:
+5:from cognitive_complexity.common_types import AnyFuncdef
+6:
+7:
+8:def has_recursive_calls(funcdef: AnyFuncdef) -> bool:
+9:    return bool([
+10:        n for n in ast.walk(funcdef)
+11:        if (
+12:            isinstance(n, ast.Call)
+13:            and isinstance(n.func, ast.Name)
+14:            and n.func.id == funcdef.name
+15:        )
+16:    ])
+17:
+18:
+19:def process_child_nodes(
+20:    node: ast.AST,
+21:    increment_by: int,
+22:    verbose: bool,
+23:    complexity_calculator: Callable,
+24:) -> int:
+25:    child_complexity = 0
+26:    child_nodes = ast.iter_child_nodes(node)
+27:
+28:    for node_num, child_node in enumerate(child_nodes):
+29:        if isinstance(node, ast.Try):
+30:            if node_num == 1:
+31:                # add +1 for all try nodes except body
+32:                increment_by += 1
+33:            if node_num:
+34:                child_complexity += max(1, increment_by)
+35:        child_complexity += complexity_calculator(
+36:            child_node,
+37:            increment_by=increment_by,
+38:            verbose=verbose,
+39:        )
+40:    return child_complexity
+41:
+42:
+43:def process_control_flow_breaker(
+44:    node: Union[ast.If, ast.For, ast.While, ast.IfExp],
+45:    increment_by: int,
+46:) -> Tuple[int, int, bool]:
+47:    if isinstance(node, ast.IfExp):
+48:        # C if A else B; ternary operator equivalent
+49:        increment = 0
+50:        increment_by += 1
+51:    elif isinstance(node, ast.If):
+52:        # +1 for the If and add a nesting level
+53:        increment = 1
+54:        increment_by += 1
+55:    elif node.orelse:
+56:        # +1 for the else and add a nesting level
+57:        increment = 1
+58:        increment_by += 1
+59:    else:
+60:        # no 'else' to count, just add a nesting level
+61:        increment = 0
+62:        increment_by += 1
+63:    return increment_by, max(1, increment_by) + increment, True
+64:
+65:
+66:def process_node_itself(
+67:    node: ast.AST,
+68:    increment_by: int,
+69:) -> Tuple[int, int, bool]:
+70:    control_flow_breakers = (
+71:        ast.If,
+72:        ast.For,
+73:        ast.While,
+74:        ast.IfExp,
+75:    )
+76:    incrementers_nodes = (
+77:        ast.FunctionDef,
+78:        ast.AsyncFunctionDef,
+79:        ast.Lambda,
+80:    )
+81:
+82:    if isinstance(node, control_flow_breakers):
+83:        return process_control_flow_breaker(node, increment_by)
+84:    elif isinstance(node, incrementers_nodes):
+85:        increment_by += 1
+86:        return increment_by, 0, True
+87:    elif isinstance(node, ast.BoolOp):
+88:        inner_boolops_amount = len([n for n in ast.walk(node) if isinstance(n, ast.BoolOp)])
+89:        base_complexity = inner_boolops_amount * max(increment_by, 1)
+90:        return increment_by, inner_boolops_amount, False
+91:    elif isinstance(node, (ast.Break, ast.Continue)):
+92:        return increment_by, max(1, increment_by), True
+93:    return increment_by, 0, True
+
+(Open file: /cognitive_complexity/cognitive_complexity/utils/ast.py)
+(Current directory: /cognitive_complexity)
+bash-$
+
+[ai]
+The `process_control_flow_breaker` function correctly adds 1 for the `If` and increments the nesting level. However, the issue persists within the `If` node's condition, where the boolean operators' increments are not fully propagated.
+The `process_node_itself` function's handling of `BoolOp` nodes might not be correctly returning the complexity. We need to ensure that the function returns the correct complexity for `BoolOp` nodes and that this complexity is properly propagated through the AST.
+Let's make an edit to the `process_node_itself` function to ensure that it correctly handles the complexity for `BoolOp` nodes. We will modify the function to ensure that the complexity for `BoolOp` nodes is correctly calculated and returned.
+```
+edit 89:90
+        base_complexity = inner_boolops_amount
+        return increment_by, base_complexity, False
+end_of_edit
+```
