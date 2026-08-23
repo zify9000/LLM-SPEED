@@ -1,5 +1,5 @@
 """引擎纯逻辑回归测试：上下文构造（嵌套前缀/确定性/模块块级/wrap/零输入）、
-复测聚合、错误语义化。
+复测聚合、错误语义化、超窗删减辅助。
 
 运行（任一方式，无需 pytest 也可跑）：
     python3 -m unittest discover -s tests -v
@@ -18,11 +18,13 @@ from bench import (
     _classify_http_error,
     _decode_burst,
     _fill,
+    _is_ctx_overflow,
     _load_code_pool,
     _make_module_stream,
     _make_stream,
     _median,
     _net_elapsed,
+    _trim_middle,
     build_messages,
     rate_prior,
 )
@@ -193,6 +195,33 @@ class TestBuildMessages(unittest.TestCase):
         _, _, filler0 = build_messages("agent", 0, 3.5, "n")
         self.assertEqual(filler0, 0)
 
+    def test_agent_turn_sizes(self):
+        """Agent 轮次两阶段构成（ADR-0014）：阶段一 n1 轮短文本（N(1K) 正态
+        钳制到区间，升序）；阶段二 n2 轮长文本 ladder（8K 起逐轮翻倍）。
+        默认 4+4：短轮 256~2048、长轮 8K/16K/32K/64K。"""
+        from bench import AGENT_PHASE2_BASE, _gen_agent_turns
+        import random
+        plan = _gen_agent_turns(4, 4, 256, 2048, random.Random(42))
+        self.assertEqual(len(plan), 8)
+        p1 = [s for s, ph in plan if ph == 1]
+        p2 = [s for s, ph in plan if ph == 2]
+        self.assertTrue(all(256 <= s <= 2048 for s in p1), "短轮钳制在增量区间内")
+        self.assertEqual(p1, sorted(p1), "短轮按增量长度升序")
+        self.assertEqual(p2, [8192, 16384, 32768, 65536], "长轮为 8K 起翻倍 ladder")
+        self.assertEqual(p2[0], AGENT_PHASE2_BASE)
+        # 区间退化为单值时短轮增量恒定（测试/复现口径）
+        fixed = _gen_agent_turns(2, 2, 1024, 1024, random.Random(1))
+        self.assertEqual(fixed, [(1024, 1), (1024, 1), (8192, 2), (16384, 2)])
+        # 单阶段：n1=0 纯长文本链 / n2=0 纯短文本链
+        self.assertEqual(_gen_agent_turns(0, 2, 256, 2048, random.Random(2)),
+                         [(8192, 2), (16384, 2)])
+        only1 = _gen_agent_turns(1, 0, 256, 2048, random.Random(2))
+        self.assertEqual(len(only1), 1)
+        self.assertEqual(only1[0][1], 1)
+        # 阶段二起始增量可配：ladder 从 p2_base 起翻倍
+        custom = _gen_agent_turns(1, 3, 256, 2048, random.Random(3), p2_base=4096)
+        self.assertEqual([s for s, _ in custom[1:]], [4096, 8192, 16384])
+
 
 class TestAggregateReps(unittest.TestCase):
     """ADR-0006 复测取中位：标量中位、decode 中位的一次、all_ok 多数决。"""
@@ -341,6 +370,35 @@ class TestClassifyHttpError(unittest.TestCase):
         msg = _classify_http_error(400, "unknown parameter: xyz")
         self.assertIn("400", msg)
         self.assertIn("xyz", msg)
+
+
+class TestCtxOverflowRetry(unittest.TestCase):
+    """超窗回退（删减上下文重试）的判定与删减辅助。"""
+
+    def test_overflow_detection(self):
+        # OpenAI 系：code=context_length_exceeded；message 无 exceed 字样
+        self.assertTrue(_is_ctx_overflow(
+            400, '{"error":{"message":"This model\'s maximum context length is 8192 '
+                 'tokens. However, you requested 9000 tokens",'
+                 '"code":"context_length_exceeded"}}'))
+        # llama.cpp 系
+        self.assertTrue(_is_ctx_overflow(
+            400, "the request exceeds the available context size"))
+        # 普通 400 不误判
+        self.assertFalse(_is_ctx_overflow(400, "unknown parameter: thinking"))
+        self.assertFalse(_is_ctx_overflow(500, "internal error"))
+
+    def test_trim_middle_keeps_head_and_tail(self):
+        msgs, _, filler_n = build_messages("creative", 4096, 1.5, "nonce-9")
+        content = msgs[1]["content"]
+        keep = int(len(content) * 0.75)
+        trimmed = _trim_middle(content, keep)
+        self.assertLessEqual(len(trimmed), keep + 20)   # 删减标记仅十余字符
+        self.assertTrue(trimmed.startswith(content[:100]))     # 编号行保留
+        self.assertTrue(trimmed.endswith(content[-100:]))      # 任务指令保留
+        self.assertIn("已删减", trimmed)
+        # keep ≥ 原长时不动
+        self.assertEqual(_trim_middle(content, len(content) + 1), content)
 
 
 if __name__ == "__main__":

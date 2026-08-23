@@ -5,7 +5,8 @@ mock 运行不落盘、SSE 注释心跳下 prefill 估值帧不饿死（含 0.95
 响应头延迟型网关估值帧覆盖等响应头阶段、探测期停止即时生效、无前缀 chat 端点
 回退锁定、repeats=3 中位聚合、输入系数校准命中目标、temperature 拒参锁定、
 超窗 point_skipped、/models 慢响应下基线期停止、起步突发滑窗上下界、
-无正文/裸断连请求级错误、串行 prefill 总吞吐置空、无 usage 估算兜底。
+无正文/裸断连请求级错误、串行 prefill 总吞吐置空、无 usage 估算兜底、
+超窗删减上下文重试、agent 连续任务链逐轮出点（前缀缓存命中/无缓存退化）。
 运行：python3 -m unittest tests.test_e2e_mock -v
 """
 import asyncio
@@ -286,11 +287,12 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
 
     async def test_agent_scenario_smoke(self):
         """Agent 场景端到端（ADR-0014）：SWE-agent 轨迹语料构造 prompt，
-        全链路出点成功且非零档注入语料。"""
+        连续任务链两阶段逐轮出点（3 轮 = 2 短 + 1 长，长轮增量 8K）。"""
         run = BenchRun({
             "gateway_url": f"http://127.0.0.1:{self.port}",
             "models": ["mock-llm-7b"], "scenarios": ["agent"],
-            "ctx_list": [0, 4096], "concurrencies": [1],
+            "ctx_list": [0, 4096], "concurrencies": [1],   # ctx_list 对 agent 不适用
+            "agent_turns": 3, "agent_turn_delta": 2048,
             "max_tokens": 32, "repeats": 1, "timeout_s": 30,
             "thinking": "disabled",
         })
@@ -308,10 +310,14 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
                     points.append(ev["point"])
         finally:
             await task
-        self.assertEqual(len(points), 2)
+        self.assertEqual(len(points), 3, "3 轮链出 3 个点（与 ctx_list 无关）")
         self.assertTrue(all(p["all_ok"] for p in points))
-        p4k = next(p for p in points if p["ctx_target"] == 4096)
-        self.assertGreater(p4k["prompt_tokens"], 2000, "4K 档应注入轨迹语料")
+        self.assertEqual([p["turn"] for p in points], [1, 2, 3])
+        # 两阶段构成：短轮增量 2048 × 2 + 长轮 ladder 首档 8192
+        self.assertEqual([p["ctx_target"] for p in points], [2048, 4096, 12288])
+        self.assertEqual([p["turn_phase"] for p in points], [1, 1, 2])
+        last = points[-1]
+        self.assertGreater(last["prompt_tokens"], 6000, "末轮应注入足量轨迹语料")
 
     async def test_pick_gateway_url_prefers_reachable(self):
         """多地址择优：按配置顺序取第一个可达地址（内网等优选地址排前即被
@@ -541,6 +547,124 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
         ctxs = [e["point"]["ctx_target"] for e in events if e.get("type") == "point"]
         self.assertNotIn(65536, ctxs, "超窗档不得产生 point")
         self.assertIn(0, ctxs, "0K 档应照常出点")
+
+    async def test_ctx_overflow_trim_retry(self):
+        """超窗回退：prompt 临近模型窗口上限、首请求被判 context exceeded 时，
+        引擎删减中段填充语料重试而非直接判失败——点最终成功且实际
+        prompt_tokens 小于构造目标（MOCK_MAX_CTX=3800：4K 档首请求
+        ~4096+16 tokens 超限，删减 75% 后 ~3126+16 落入窗口）。"""
+        old = mock_server.MAX_CTX
+        mock_server.MAX_CTX = 3800
+        try:
+            run, events = await self._run_and_collect(
+                ctx_list=[4096], max_tokens=16)
+        finally:
+            mock_server.MAX_CTX = old
+        pts = [e["point"] for e in events if e.get("type") == "point"]
+        self.assertEqual(len(pts), 1)
+        self.assertTrue(pts[0]["all_ok"],
+                        f"删减重试后点应成功: {pts[0].get('reqs')}")
+        # 实际 prompt_tokens ≈ 0.75×4096（删减后），显著小于构造目标 4096
+        self.assertLess(pts[0]["prompt_tokens"], 3300)
+        self.assertGreater(pts[0]["prompt_tokens"], 2800)
+        statuses = [e["msg"] for e in events if e.get("type") == "status"]
+        self.assertTrue(any("删减" in s and "重试" in s for s in statuses),
+                        f"应有删减重试状态播报: {statuses}")
+
+    async def test_agent_chain_turns_with_cache(self):
+        """agent 连续任务链（MOCK_CACHE=1 前缀缓存）：不以下文档位为变量，
+        3 轮两阶段（短轮固定增量 1024 × 2 + 长轮 ladder 8192）逐轮出点。
+        暖轮命中上一轮全文（hit>0）；短文本暖轮 TTFT 不随上下文增长
+        （≈ 冷轮），长文本轮 TTFT 随自身增量放大；增量 prefill 口径
+        全程 ≈ mock PP 设定。"""
+        old_cache = mock_server.CACHE
+        mock_server.CACHE = "1"
+        mock_server._SEEN.clear()
+        try:
+            run, events = await self._run_and_collect(
+                scenarios=["agent"], ctx_list=[65536],   # ctx_list 对 agent 不适用
+                concurrencies=[1], agent_turns=3, agent_turn_delta=[1024, 1024],
+                max_tokens=32)
+        finally:
+            mock_server.CACHE = old_cache
+            mock_server._SEEN.clear()
+        pts = [e["point"] for e in events if e.get("type") == "point"]
+        self.assertEqual(len(pts), 3, "3 轮链应出 3 个点（与 ctx_list 无关）")
+        self.assertEqual([p["turn"] for p in pts], [1, 2, 3])
+        self.assertEqual([p["ctx_target"] for p in pts], [1024, 2048, 10240])
+        self.assertEqual([p["turn_delta"] for p in pts], [1024, 1024, 8192])
+        self.assertEqual([p["turn_phase"] for p in pts], [1, 1, 2])
+        self.assertTrue(all(p["all_ok"] for p in pts))
+        cold, warm = pts[0], pts[1:]
+        # 冷轮仅命中与探测请求共享的系统提示级前缀（~百 tokens 内），
+        # 不得命中上一轮正文（首轮之前没有正文）
+        self.assertLess(cold["cache_hit_tokens"], 150, "冷轮只应命中系统提示级共享前缀")
+        for p in warm:
+            self.assertTrue(p["cache_reported"], "mock 回传命中字段，非估算口径")
+            self.assertGreater(p["cache_hit_tokens"], 700,
+                               f"轮{p['turn']} 应命中前轮大部分上下文")
+            # 增量 prefill 口径：未命中 tokens ÷ TTFT ≈ MOCK_PP=3000
+            self.assertAlmostEqual(p["prefill_tok_s"], 3000, delta=900,
+                                   msg=f"轮{p['turn']} 增量 prefill 偏离 mock 设定")
+        # 短文本暖轮 TTFT 不随上下文增长：轮2 prompt 2K 与轮1 prompt 1K 耗时同档
+        self.assertLess(pts[1]["ttft_s"], cold["ttft_s"] * 2 + 0.3)
+        # 长文本轮 TTFT 随自身增量放大：轮3 未命中 8K+ vs 轮2 未命中 1K+
+        self.assertGreater(pts[2]["ttft_s"], pts[1]["ttft_s"] * 2)
+        # 每轮实测速率登记进先验曲线：除探测播种点外应有链轮次的实测点
+        curve = run.prefill_curve.get(("mock-llm-7b", "agent"), [])
+        self.assertGreaterEqual(len(curve), 4, f"探测 + 3 轮链应登记 ≥4 个先验点: {curve}")
+        self.assertIn("done", [e["type"] for e in events])
+
+    async def test_agent_chain_without_cache_degrades_honestly(self):
+        """无前缀缓存能力（MOCK_CACHE 关）：暖轮 TTFT 随全量 prompt 增长——
+        缓存迹象判别为「无缓存」：命中列 None（前端显示未回传，不展示假设
+        命中数），prefill 退回全量口径实测真值（≈ mock PP），不按假设命中折算。"""
+        mock_server._SEEN.clear()
+        _, events = await self._run_and_collect(
+            scenarios=["agent"], concurrencies=[1],
+            agent_turns=3, agent_turn_delta=[1024, 1024],
+            max_tokens=32)
+        pts = [e["point"] for e in events if e.get("type") == "point"]
+        self.assertEqual(len(pts), 3)
+        cold, warm3 = pts[0], pts[2]
+        self.assertFalse(warm3["cache_reported"], "无缓存字段回传时必须标记非真值")
+        self.assertIsNone(warm3["cache_hit_tokens"],
+                          "无缓存迹象时命中为 None（前端显示未回传）")
+        # 轮3 全量 10240 tokens 重算：TTFT ≈ 10× 冷轮（轮1=1024）
+        self.assertGreater(warm3["ttft_s"], cold["ttft_s"] * 4.0)
+        # 全量口径：prompt_tokens ÷ TTFT ≈ MOCK_PP=3000（真实可测速率）
+        self.assertAlmostEqual(warm3["prefill_tok_s"], 3000, delta=450)
+
+    async def test_agent_chain_cache_assumed_when_ttft_flat(self):
+        """缓存生效但网关剥离命中字段（MOCK_CACHE_NOREPORT）：短文本暖轮 TTFT
+        相对冷轮走平 → 判别「有缓存迹象」，命中按链内差分估算（非 None）、
+        cache_reported=False（前端加 ≈），prefill 为增量口径 ≈ mock PP。
+        长文本轮增量占比过半、缓存收益在 TTFT 上不可分辨 → 宁缺毋假显示未回传。"""
+        old = mock_server.CACHE_NOREPORT
+        mock_server.CACHE_NOREPORT = "1"
+        mock_server._SEEN.clear()
+        try:
+            _, events = await self._run_and_collect(
+                scenarios=["agent"], concurrencies=[1],
+                agent_turns=3, agent_turn_delta=[1024, 1024],
+                max_tokens=32)
+        finally:
+            mock_server.CACHE_NOREPORT = old
+            mock_server._SEEN.clear()
+        pts = [e["point"] for e in events if e.get("type") == "point"]
+        self.assertEqual(len(pts), 3)
+        cold, w2, w3 = pts
+        # 轮2（短文本，增量 1K ≪ 总 2K）：TTFT 走平 → 差分估算
+        self.assertFalse(w2["cache_reported"])
+        self.assertIsNotNone(w2["cache_hit_tokens"], "有缓存迹象应按差分估算命中")
+        self.assertGreater(w2["cache_hit_tokens"], 700, "轮2 估算命中应≈前轮全文")
+        self.assertAlmostEqual(w2["prefill_tok_s"], 3000, delta=900,
+                               msg="轮2 增量 prefill 偏离 mock 设定")
+        self.assertLess(w2["ttft_s"], cold["ttft_s"] * 2 + 0.3)
+        # 轮3（长文本，增量 8K ≈ 总量 80%）：缓存收益不可分辨 → 未回传
+        self.assertIsNone(w3["cache_hit_tokens"],
+                          "长文本轮缓存收益不可分辨，不应展示假设命中")
+        self.assertFalse(w3["cache_reported"])
 
     async def test_stop_during_models_delay_baseline(self):
         """MOCK_MODELS_DELAY=6（/models 慢响应）下 RTT 基线期停止：

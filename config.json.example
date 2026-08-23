@@ -1,5 +1,5 @@
 {
-  "_comment": "gateway_url 为单地址旧写法（仍兼容）；gateway_urls 为多地址——本地部署可把内网/隧道地址都配上，测速时按配置顺序取第一个可达地址（顺序即优先级，优选排前）",
+  "_comment": "gateway_url 为单地址旧写法（仍兼容）；gateway_urls 为多地址——本地部署可把内网/隧道地址都配上，测速时按配置顺序取第一个可达地址（顺序即优先级，优选排前）。deployments 允许一个模型映射多套部署环境，但同一模型激活（active=true）的只能一套，激活者生效；都不标 active 时回退首个命中",
   "providers": [
     {
       "name": "deepseek",
@@ -34,11 +34,21 @@
         {
           "label": "示例部署",
           "models": ["your-model-name"],
+          "active": true,
           "quant": "Q8_0",
           "hardware": "示例：按实际填写",
           "framework": "llama.cpp",
           "params": "-c 196608 -b 16384 --cache-type-k/v q8_0",
           "max_ctx": 196608
+        },
+        {
+          "label": "示例部署·备用环境（映射同一模型，未激活不生效）",
+          "models": ["your-model-name"],
+          "quant": "Q4_K_M",
+          "hardware": "示例：备用机",
+          "framework": "llama.cpp",
+          "params": "-c 131072",
+          "max_ctx": 131072
         }
       ]
     }

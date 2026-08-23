@@ -98,6 +98,38 @@ class TestConfigApi(unittest.TestCase):
         for body in bad:
             self.assertEqual(self.client.put("/api/config", json=body).status_code, 400, body)
 
+    def test_active_deployment_roundtrip(self):
+        """1 对多映射 + 激活：active 置位落盘、未置位不留字段；同模型
+        多套部署、仅一套激活放行。"""
+        deps = [
+            {"label": "环境A", "models": ["m1"], "active": True, "max_ctx": 8192},
+            {"label": "环境B", "models": ["m1"], "max_ctx": 4096},   # 同模型备用，未激活
+            {"label": "环境C", "models": ["m2"], "active": False},   # 显式 false = 未激活
+        ]
+        r = self.client.put("/api/config",
+                            json={"providers": [_prov(local=True, deployments=deps)]})
+        self.assertEqual(r.status_code, 200, r.text)
+        on_disk = json.load(open(server.CONFIG_PATH, encoding="utf-8"))["providers"][0]["deployments"]
+        self.assertEqual(on_disk[0].get("active"), True)
+        self.assertNotIn("active", on_disk[1])
+        self.assertNotIn("active", on_disk[2])
+
+    def test_active_deployment_conflict_rejected(self):
+        """同一模型同时激活多套部署 → 400（生效口径二义）。"""
+        deps = [
+            {"label": "环境A", "models": ["m1"], "active": True},
+            {"label": "环境B", "models": ["m1", "m2"], "active": True},
+        ]
+        r = self.client.put("/api/config",
+                            json={"providers": [_prov(local=True, deployments=deps)]})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("m1", r.json()["detail"])
+        # 不同模型各激活一套：不冲突，放行
+        deps[1]["models"] = ["m2"]
+        r = self.client.put("/api/config",
+                            json={"providers": [_prov(local=True, deployments=deps)]})
+        self.assertEqual(r.status_code, 200, r.text)
+
     def test_key_write_and_clear(self):
         self.client.put("/api/config", json={"providers": [_prov()]})
         r = self.client.put("/api/config/key", json={"provider": "p1", "key": "sk-abc#1"})
@@ -148,6 +180,49 @@ class TestValidateBenchCfg(unittest.TestCase):
         server._validate_bench_cfg(self._cfg())                     # 常规放行
         server._validate_bench_cfg(self._cfg(ctx_list=[4 * 1048576],
                                              concurrencies=[64]))   # 边界值放行
+
+    def test_agent_chain_params_validated(self):
+        """Agent 连续任务链参数钳制：agent_turns 1~32；agent_turn_delta 为
+        阶段一短轮的钳制区间——256~32768 的整数或 [min, max]（须 min ≤ max）。
+        越界或类型错 400；缺省放行由引擎取默认。纯 Agent 场景 ctx_list 可空。"""
+        bad = [self._cfg(agent_turns=0), self._cfg(agent_turns=33),
+               self._cfg(agent_turns=1.5), self._cfg(agent_turns=True),
+               self._cfg(agent_turn_delta=100), self._cfg(agent_turn_delta=40000),
+               self._cfg(agent_turn_delta=[100, 2048]),
+               self._cfg(agent_turn_delta=[2048, 256]),     # min > max
+               self._cfg(agent_turn_delta=[256, 2048, 4096]),
+               self._cfg(agent_turn_delta="2048")]
+        for cfg in bad:
+            with self.assertRaises(HTTPException) as cm:
+                server._validate_bench_cfg(cfg)
+            self.assertEqual(cm.exception.status_code, 400, cfg)
+        server._validate_bench_cfg(self._cfg(agent_turns=8, agent_turn_delta=2048))
+        server._validate_bench_cfg(self._cfg(agent_turn_delta=[256, 2048]))
+        # 纯 Agent 场景不以上下文档位为变量：ctx_list 可为空
+        server._validate_bench_cfg(self._cfg(scenarios=["agent"], ctx_list=[]))
+
+    def test_agent_phase_turns_validated(self):
+        """两阶段轮数配置：agent_turns_p1/p2 各 0~32、合计 1~32；给了一个就
+        必须两个都给；旧配置 agent_turns 单值仍放行（引擎对半切兼容）。"""
+        bad = [self._cfg(agent_turns_p1=-1, agent_turns_p2=4),
+               self._cfg(agent_turns_p1=33, agent_turns_p2=4),
+               self._cfg(agent_turns_p1=1.5, agent_turns_p2=4),
+               self._cfg(agent_turns_p1=0, agent_turns_p2=0),     # 合计为 0
+               self._cfg(agent_turns_p1=16, agent_turns_p2=17),   # 合计 33
+               self._cfg(agent_turns_p1=4),                       # 只给一个
+               self._cfg(agent_turns_p2=4)]
+        for cfg in bad:
+            with self.assertRaises(HTTPException) as cm:
+                server._validate_bench_cfg(cfg)
+            self.assertEqual(cm.exception.status_code, 400, cfg)
+        server._validate_bench_cfg(self._cfg(agent_turns_p1=4, agent_turns_p2=4))
+        server._validate_bench_cfg(self._cfg(agent_turns_p1=0, agent_turns_p2=4))
+        # 阶段二 ladder 起始增量：1024~65536 的整数
+        for bad_base in (512, 131072, 1.5, "4096", True):
+            with self.assertRaises(HTTPException) as cm:
+                server._validate_bench_cfg(self._cfg(agent_phase2_base=bad_base))
+            self.assertEqual(cm.exception.status_code, 400, bad_base)
+        server._validate_bench_cfg(self._cfg(agent_phase2_base=8192))
 
 
 class _FakeBenchRun:
@@ -229,6 +304,32 @@ class TestBenchStartAssembly(unittest.TestCase):
         self.assertEqual(cfg["model_info"]["m1"]["quant"], "Q8_0")
         self.assertNotIn("m2", cfg["model_info"])
         self.assertEqual(cfg["concurrencies"], [1, 2])   # 本地保留前端并发档位
+
+    def test_active_deployment_wins_over_inactive(self):
+        """同一模型映射多套部署：激活的那套生效（model_info 与 max_ctx
+        同口径）；无 active 标记回退首个命中。"""
+        deps = [
+            {"label": "备用", "models": ["m1"], "hardware": "旧机", "max_ctx": 4096},
+            {"label": "主力", "models": ["m1"], "hardware": "新机",
+             "max_ctx": 16384, "active": True},
+        ]
+        self.client.put("/api/config",
+                        json={"providers": [_prov(local=True, deployments=deps)]})
+        r = self._start(models=["m1"])
+        self.assertEqual(r.status_code, 200, r.text)
+        cfg = _FakeBenchRun.captured[-1].cfg
+        self.assertEqual(cfg["model_info"]["m1"]["deploy_label"], "主力")
+        self.assertEqual(cfg["model_max_ctx"], {"m1": 16384})
+        # 回退口径：取消激活（环境B 不再 active）→ 首个命中（备用）生效
+        deps[1] = {"label": "主力", "models": ["m1"], "hardware": "新机",
+                   "max_ctx": 16384}
+        self.client.put("/api/config",
+                        json={"providers": [_prov(local=True, deployments=deps)]})
+        r = self._start(models=["m1"])
+        self.assertEqual(r.status_code, 200, r.text)
+        cfg = _FakeBenchRun.captured[-1].cfg
+        self.assertEqual(cfg["model_info"]["m1"]["deploy_label"], "备用")
+        self.assertEqual(cfg["model_max_ctx"], {"m1": 4096})
 
     def test_cap_memory_seeded_into_cfg(self):
         self.client.put("/api/config", json={"providers": [_prov()]})

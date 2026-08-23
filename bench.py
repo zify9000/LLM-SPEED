@@ -316,12 +316,68 @@ SCENARIOS: dict[str, dict[str, Any]] = {
 
 # 0 = 零输入档：一句话指令直接命题，测纯指令生成基线（ADR-0005）
 DEFAULT_CTX_LIST = [0, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]
-DEFAULT_CONCURRENCIES = [1, 2]
+DEFAULT_CONCURRENCIES = [1, 2, 5]
 
 # 超窗保护：prompt + 输出必须同时装进模型上下文窗。目标档超过
 # max_ctx − max_tokens − 本余量时直接跳过——余量兜住分词漂移
 # （构造按校准系数命中目标，实测偏差 ≤1%）与系统提示等隐式占用（ADR-0005）
 CTX_HEADROOM = 1024
+
+# 超窗回退（事中兜底，与 CTX_HEADROOM 的事前跳过互补）：未配 max_ctx 或余量
+# 仍不够时，临近上下文上限的点位会因输出随机性被服务端判 context exceeded
+# 直接失败。此时按原填充长度逐档保留比例掐掉中段语料重试，而非判失败
+CTX_RETRY_KEEP = (0.75, 0.5, 0.3)
+
+# Agent 连续任务链默认参数：agent 场景不以上下文档位为变量，改为按任务轮次
+# 推进的会话链——第 1 轮冷启动（全量 prefill），第 2..K 轮 append-only 增长、
+# 命中服务端前缀缓存只增量 prefill，口径对齐真实 agent 循环。
+# 轮次构成固定两阶段：前一半短文本任务（每轮增量 ~N(1K) 正态、钳制到配置区间），
+# 后一半长文本任务（4K 起逐轮翻倍的 ladder：默认 8 轮 = 4 短 + 4 长，
+# 8K/16K/32K/64K）——短轮测高频小步循环的暖延迟，长轮测偶发大上下文灌入的
+# 增量 prefill 能力
+AGENT_TURNS_DEFAULT = 8               # 链轮数
+AGENT_TURN_DELTA_DEFAULT = (256, 2048)  # 阶段一短轮增量 tokens 钳制区间
+AGENT_TURN_CENTER = 1000              # 阶段一每轮增量正态分布中心（tokens）
+AGENT_PHASE2_BASE = 8192              # 阶段二 ladder 起步增量（tokens），逐轮翻倍
+AGENT_TURNS_RANGE = (1, 32)
+AGENT_TURN_DELTA_RANGE = (256, 32768)
+
+
+def _gen_agent_turns(n1: int, n2: int, dmin: int, dmax: int,
+                     rng: random.Random, p2_base: int = AGENT_PHASE2_BASE
+                     ) -> list[tuple[int, int]]:
+    """生成各轮（新增 tokens, 阶段）：阶段一 n1 轮短文本——N(1K) 正态采样
+    钳制到 [dmin, dmax] 后升序；阶段二 n2 轮长文本——p2_base 起步逐轮翻倍的
+    ladder（模拟 agent 循环里偶发的大文件读取/长日志灌入）。
+    默认 4+4、8K 起步：短轮测高频小步循环的暖延迟，长轮（8K/16K/32K/64K）测
+    大上下文灌入的增量 prefill。阶段一内部升序 + ladder 天然升序，链平滑
+    增长、冷启动轮输入最小；若把区间上限抬过 ladder 首档，短轮可能超过它，
+    轮序不再全局升序，但 append-only 链语义不受影响。"""
+    sigma = max(150.0, (dmax - dmin) / 6.0)
+    phase1 = sorted(max(dmin, min(dmax, round(rng.gauss(AGENT_TURN_CENTER, sigma))))
+                    for _ in range(n1))
+    phase2 = [p2_base << i for i in range(n2)]
+    return [(s, 1) for s in phase1] + [(s, 2) for s in phase2]
+
+
+def _cache_hit_from_usage(usage: dict | None) -> tuple[int, bool]:
+    """从 usage 提取前缀缓存命中 tokens。各家字段名不一：DeepSeek 原生
+    prompt_cache_hit_tokens；OpenAI/LiteLLM 风格 prompt_tokens_details.
+    cached_tokens；Anthropic 风格 cache_read_input_tokens。LiteLLM 等网关
+    中转时会剥离上游扩展字段（实测 LiteLLM 只回传 prompt/completion/total
+    三个标准字段）——返回 (0, False)，调用方按链内差分估算。"""
+    if not usage:
+        return 0, False
+    v = usage.get("prompt_cache_hit_tokens")
+    if v is not None:
+        return int(v), True
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict) and details.get("cached_tokens") is not None:
+        return int(details["cached_tokens"]), True
+    v = usage.get("cache_read_input_tokens")
+    if v is not None:
+        return int(v), True
+    return 0, False
 
 # decode 空窗校正上限（秒）：相邻内容块间隔超过此值视为传输/调度停滞
 # （WireGuard 隧道抖动实测空窗 18~90s），校正口径从 decode 窗口中只保留
@@ -485,6 +541,16 @@ def _fill(stream: str, need_chars: int) -> str:
     return stream[:need_chars]
 
 
+def _trim_middle(content: str, keep: int) -> str:
+    """超窗删减重试：把 user 内容掐到约 keep 字符——保留开头（编号行）与
+    结尾（任务指令），掐掉中段填充语料，指令结构不被破坏。"""
+    if keep >= len(content):
+        return content
+    half = keep // 2
+    return (content[:half] + "\n……（中间内容已删减）……\n"
+            + content[-(keep - half):])
+
+
 def build_messages(scenario: str, target_tokens: int, cpt: float, nonce: str,
                    filler_chars: int | None = None):
     """构造一条目标长度约 target_tokens 的对话。
@@ -596,6 +662,16 @@ def _aggregate_reps(reps: list[dict]) -> dict:
     return point
 
 
+def _is_ctx_overflow(status: int, body: str) -> bool:
+    """服务端返回「超出上下文窗口」错误：各家状态码与报文不一（OpenAI 系
+    400 / code=context_length_exceeded，Kimi 用 401 invalid_authentication_error，
+    llama.cpp 报 available context size），按报文关键词判定。"""
+    low = body.lower()
+    return "context" in low and ("exceed" in low or "only" in low
+                                 or "context_length" in low or "context size" in low
+                                 or "maximum context" in low)
+
+
 def _classify_http_error(status: int, body: str) -> str:
     """把裸 HTTP 错误翻译成可行动的提示（ADR-0008）。"""
     low = body.lower()
@@ -604,11 +680,10 @@ def _classify_http_error(status: int, body: str) -> str:
                 f"（此时模型服务通常仍在继续计算。调大网关侧超时：LiteLLM 的 "
                 f"request_timeout、nginx 的 proxy_read_timeout；超长 prefill 如 "
                 f"192K 档在低配硬件上可能超过 10 分钟）")
-    if "context" in low and ("exceed" in low or "only" in low
-                             or "context_length" in low or "context size" in low):
-        # 各家超窗报文状态码不一：OpenAI 系 400，Kimi 用 401（invalid_authentication_error）
+    if _is_ctx_overflow(status, body):
         return (f"HTTP {status} 超出模型上下文窗口：{body[:160]} "
-                f"（在 config.json deployments 配 max_ctx 可自动跳过超限档位）")
+                f"（删减上下文重试后仍超限；在 config.json deployments 配 max_ctx "
+                f"可自动跳过超限档位）")
     return f"HTTP {status}: {body[:300]}"
 
 
@@ -647,6 +722,13 @@ class BenchRun:
         # 模型级温度限制（400 且报错提及 temperature，如 Kimi K3 仅允许 0.6）：
         # 省略 temperature 参数走服务端默认，按模型锁定（ADR-0004）
         self.temperature_locked: set[str] = set(cfg.get("temperature_locked") or [])
+        # 网关不回传缓存命中字段的一次性提示（LiteLLM 中转会剥离上游 usage
+        # 扩展字段，实测只回传 prompt/completion/total 三字段）
+        self._cache_note_done = False
+        # (model, scenario) → 服务端前缀缓存 KV 块大小推断（已回传命中值的 gcd，
+        # ≥64 才采信）：agent 链暖轮 tick 估值补前轮碎块尾用——命中按块对齐，
+        # 前轮不足一块的尾部随本轮增量一起计算，漏估会系统性偏低 ~20%
+        self.cache_block: dict[tuple[str, str], int] = {}
         # (model, scenario) → 实测 chars/token（服务端真实 prompt_tokens 反推），
         # 首点后生效，后续更大上下文按校准值构造（ADR-0005）；按字符量加权滑动
         # 平均（cpt_calib_w 为累计字符权重，封顶保持对下游语料的适应性），
@@ -814,6 +896,17 @@ class BenchRun:
                         # 超窗保护上限：prompt + 输出 + 分词漂移余量必须装进而上下文窗，
                         # 超过的档位构造出来必然 400，直接跳过（ADR-0005）
                         ctx_limit = (max_ctx - max_tokens - CTX_HEADROOM) if max_ctx else None
+                        if scenario == "agent":
+                            # agent 场景不以上下文档位为变量：连续任务链按任务轮次
+                            # 推进（前缀缓存口径），逐轮出点，详见 _run_agent_chain
+                            for conc in sorted(cfg["concurrencies"]):
+                                if self.stop_flag:
+                                    await self.emit({"type": "stopped"})
+                                    return   # 终态收口在 finally
+                                await self._run_agent_chain(client, model, scenario,
+                                                            conc, base_cpt, ctx_limit,
+                                                            repeats)
+                            continue
                         for ctx in sorted(cfg["ctx_list"]):
                             if ctx_limit is not None and ctx > ctx_limit:
                                 # 目标档位超出部署实际上限：构造出的 prompt 必然 400，
@@ -1074,13 +1167,27 @@ class BenchRun:
                 uniq = sorted(set(fins))
                 point["finish"] = uniq[0] if len(uniq) == 1 else ",".join(uniq)
             point["out_tokens"] = round(sum(r.get("out_tokens") or 0 for r in ok) / len(ok))
-        # 输入系数实测校准：用服务端真实 prompt_tokens 反推 chars/token。
-        # llama.cpp 等分词与场景先验（in_cpt：创意 1.5 / 代码 3.9）仍可能有差，
-        # 校准后后续上下文点按实测值构造（ADR-0005）。按字符量加权滑动平均
-        # （权重封顶，保留对语料流下游段落配比变化的适应性）；小样本
-        # （<2000 字符，如 0K 档纯指令）分词模板开销占比大、比例严重失真，
-        # 采纳会带偏校准——实测 0K 档曾把 4K 点位构造带偏 20%+（ADR-0005）
-        chars = sum(len(m["content"]) for m in msgs_list[0])
+        await self._calibrate_usage(
+            key, sum(len(m["content"]) for m in msgs_list[0]), filler_n, ok)
+        return point
+
+    async def _calibrate_usage(self, key: tuple[str, str], msgs_chars: int,
+                               filler_n: int, ok: list[dict]):
+        """输入系数实测校准 + 嵌套前缀记账：用服务端真实 prompt_tokens 反推
+        chars/token。llama.cpp 等分词与场景先验（in_cpt：创意 1.5 / 代码 3.9）
+        仍可能有差，校准后后续上下文点按实测值构造（ADR-0005）。按字符量加权
+        滑动平均（权重封顶，保留对语料流下游段落配比变化的适应性）；小样本
+        （<2000 字符，如 0K 档纯指令）分词模板开销占比大、比例严重失真，
+        采纳会带偏校准——实测 0K 档曾把 4K 点位构造带偏 20%+（ADR-0005）。
+        _run_point 每点调用一次；agent 连续任务链每轮调用一次。"""
+        chars = msgs_chars
+        # 超窗删减重试成功的点位：实际发送量小于构造量，输入系数校准与嵌套
+        # 前缀记账按实际发送字符数对齐（删减只掐中段填充，差值满额计入填充），
+        # 否则删减点会把系数/前缀记账带偏
+        sent = [r["sent_chars"] for r in ok if r.get("sent_chars")]
+        if sent and sum(sent) / len(sent) < chars:
+            chars = round(sum(sent) / len(sent))
+            filler_n = max(0, filler_n - (msgs_chars - chars))
         reals = [r["prompt_tokens"] for r in ok if r.get("usage_real")]
         if chars >= 2000 and reals:
             real = sum(reals) / len(reals)
@@ -1092,7 +1199,7 @@ class BenchRun:
             new = self.cpt_calib[key]
             if old is None or abs(new - old) / old > 0.02:
                 await self.emit({"type": "status", "msg":
-                    f"{model} / {SCENARIOS[scenario]['label']} 输入系数按实测校准为 "
+                    f"{key[0]} / {SCENARIOS[key[1]]['label']} 输入系数按实测校准为 "
                     f"{new:.2f} 字符/token"})
             # 嵌套前缀记账 + 增量段比例滑动平均：增量观测 = 增量字符 ÷ 增量
             # tokens，前缀部分的模板/指令开销在差分中自然抵消
@@ -1106,7 +1213,307 @@ class BenchRun:
                                               + m_obs * m_chars) / (mw + m_chars)
                     self.cpt_marginal_w[key] = mw + m_chars
             self.prefix_kb[key] = (filler_n, real)
-        return point
+
+    # -- Agent 连续任务链 --------------------------------------------------------
+
+    async def _run_agent_chain(self, client: httpx.AsyncClient, model: str,
+                               scenario: str, conc: int, base_cpt: float,
+                               ctx_limit: int | None, repeats: int):
+        """Agent 连续任务链：K 轮 append-only 增长会话，逐轮产出测速点。
+
+        口径设计（对齐真实 agent 循环，区别于其他场景的单发冷测）：
+        - 轮次任务在链开始前全部生成，固定两阶段：阶段一（前 ⌈K/2⌉ 轮）短文本
+          任务，每轮增量 ~N(1K) 正态采样钳制到配置的增量区间，升序排轮；
+          阶段二（后 ⌊K/2⌋ 轮）长文本任务，4K 起步逐轮翻倍的 ladder
+          （默认 8 轮 = 4 短 + 4 长：8K/16K/32K/64K），模拟偶发的大文件
+          读取/长日志灌入。第 k 轮目标 = 前 k 轮增量累积和。语料流确定性
+          嵌套 + 链内 nonce 固定 → 第 1 轮冷启动全量 prefill，第 2..K 轮
+          命中服务端前缀缓存、只增量 prefill；nonce 跨 rep/链/运行随机，
+          冷启动轮不受残留缓存污染。
+        - 每轮聚合为一个点：ctx_target = 轮目标 tokens（排序/图表类别轴用），
+          turn = 轮号（1 起），turn_delta = 本轮构造增量 tokens，
+          turn_phase = 1/2（前端按阶段出统计：阶段一看 TTFT 暖延迟，
+          阶段二看增量 prefill）。
+          prefill_tok_s 覆写为**增量口径** = 未命中 tokens ÷ TTFT（服务端
+          回传 cache_hit 时按回传值，否则按链内实测差分估算；LiteLLM 等网关
+          会剥离上游 usage 扩展字段导致无回传）；无缓存能力的服务端增量读数
+          随全量 TTFT 同步走低——如实反映其 agent 循环「每轮全量重算」的
+          低效，而非粉饰成全量速率。cache_hit_tokens 同理：回传缺失时填
+          差分估算值并以 cache_reported=False 标记，前端加 ≈ 展示。
+        - conc = 并行会话链数：同轮各链并发在途，跨链同轮聚合；链间 decode
+          重叠口径不保证，decode_total_tok_s 不产出（保持诚实）。
+        - 轮目标连同输出预算超出部署上限（ctx_limit）时链提前结束，
+          point_skipped 补齐进度。
+        - 超窗删减重试（_one 内）掐断某轮中段后，后续轮的前缀命中会缩短——
+          命中读数如实反映，不特殊处理。
+        """
+        # 两阶段轮数：新配置显式给 agent_turns_p1/p2；旧配置 agent_turns
+        # 单值对半切（⌈K/2⌉ 短 + ⌊K/2⌋ 长）兼容
+        p1_cfg, p2_cfg = self.cfg.get("agent_turns_p1"), self.cfg.get("agent_turns_p2")
+        if p1_cfg is not None and p2_cfg is not None:
+            n1 = max(0, min(AGENT_TURNS_RANGE[1], int(p1_cfg)))
+            n2 = max(0, min(AGENT_TURNS_RANGE[1], int(p2_cfg)))
+        else:
+            turns = max(AGENT_TURNS_RANGE[0], min(AGENT_TURNS_RANGE[1],
+                        int(self.cfg.get("agent_turns") or AGENT_TURNS_DEFAULT)))
+            n2 = turns // 2
+            n1 = turns - n2
+        turns = max(n1 + n2, 1)
+        # 增量区间：新配置为 [min, max]（正态采样钳制区间）；兼容旧配置单值
+        dv = self.cfg.get("agent_turn_delta")
+        if isinstance(dv, (list, tuple)) and len(dv) == 2:
+            dmin, dmax = int(dv[0]), int(dv[1])
+        elif dv:
+            dmin = dmax = int(dv)
+        else:
+            dmin, dmax = AGENT_TURN_DELTA_DEFAULT
+        lo, hi = AGENT_TURN_DELTA_RANGE
+        dmin, dmax = max(lo, min(hi, dmin)), max(lo, min(hi, dmax))
+        if dmin > dmax:
+            dmin, dmax = dmax, dmin
+        # 轮次构成在链开始前一次性生成并定序：全部 rep 复用同一构成，复测可比
+        p2_base = max(1024, min(65536,
+                      int(self.cfg.get("agent_phase2_base") or AGENT_PHASE2_BASE)))
+        turn_plan = _gen_agent_turns(n1, n2, dmin, dmax, random.Random(), p2_base)
+        targets: list[int] = []
+        acc = 0
+        for s, _ph in turn_plan:
+            acc += s
+            targets.append(acc)
+        ladder = [s for s, ph in turn_plan if ph == 2]
+        max_tokens = int(self.cfg.get("max_tokens")
+                         or SCENARIOS[scenario]["max_tokens_default"])
+        key = (model, scenario)
+        cpt = self.cpt_calib.get(key) or base_cpt
+        ladder_txt = "/".join(f"{s // 1024}K" for s in ladder) or "无"
+        await self.emit({"type": "status", "msg":
+            f"{model} / Agent 连续任务链 / 并行会话 {conc}：{turns} 轮两阶段——"
+            f"{n1} 轮短文本（每轮增量 ~N(1K) 截断 {dmin}~{dmax} tokens）+ "
+            f"{n2} 轮长文本（{ladder_txt} ladder），前缀缓存口径，"
+            f"第 1 轮冷启动"})
+
+        rep_points: list[list[dict]] = [[] for _ in range(turns)]
+        for rep in range(repeats):
+            if repeats > 1:
+                await self.emit({"type": "status", "msg":
+                    f"　复测 {rep + 1}/{repeats}（取中位）"})
+            base_seed = random.randint(100000, 999999)
+            nonces = [f"{base_seed}-c{i}" for i in range(conc)]
+            prev_prompt = [0] * conc   # 各链上一轮实测 prompt_tokens（增量差分兜底）
+            # 暖轮 tick 估值口径跟随上一轮缓存判别结果（True/False；None=尚无
+            # 依据，轮2 默认增量口径）——见下方 tick_est 注释
+            prev_cache_active: bool | None = None
+            # 冷轮（轮1）TTFT 基准：服务端不回传缓存命中字段时的缓存迹象判别——
+            # 暖轮 TTFT 相对冷轮走平（≤1.5×，含固定开销地板的 0.5s 余量）而
+            # prompt 在增长，才算「有缓存迹象」，按链内差分估算命中；TTFT 随
+            # prompt 增长则判定无缓存——命中显示未回传（None）、prefill 退回
+            # 全量口径实测真值，不把假设的命中折算进速度。长文本轮增量占比
+            # 过半，缓存收益在 TTFT 上不可分辨，天然落入「未回传」（宁缺毋假）
+            cold_ttft: float | None = None
+            for k in range(1, turns + 1):
+                if self.stop_flag:
+                    return
+                target = targets[k - 1]
+                # 本轮构造增量（tokens）：两阶段构成下逐轮不等长
+                turn_delta = target - (targets[k - 2] if k > 1 else 0)
+                if ctx_limit is not None and target > ctx_limit:
+                    await self.emit({"type": "status", "msg":
+                        f"{model} / Agent 链第 {k} 轮起连同输出预算超出部署上限，"
+                        f"链提前结束（已完成 {k - 1} 轮）"})
+                    await self.emit({"type": "point_skipped",
+                        "model": model, "scenario": scenario, "ctx": target,
+                        "count": turns - k + 1})
+                    return
+                # 嵌套前缀记账精确加长（与 _run_point 同公式）
+                kb = self.prefix_kb.get(key)
+                filler_chars = None
+                if kb:
+                    marg = self.cpt_marginal.get(key) or cpt
+                    filler_chars = max(0, round(kb[0] + (target - kb[1]) * marg))
+                msgs_list = []
+                filler_n = 0
+                for i in range(conc):
+                    msgs, _est, filler_n = build_messages(
+                        scenario, target, cpt, nonces[i], filler_chars=filler_chars)
+                    msgs_list.append(msgs)
+                # 暖轮 tick 估值口径跟随上一轮缓存判别：有缓存（回传/判别命中）
+                # → 本轮构造增量 + 前轮 prompt 的块对齐碎块尾（前缀缓存按 KV
+                # block 命中，前轮不足一块的尾部随本轮一起增量计算；漏掉它会
+                # 在 1K 增量上系统性低估 ~20%；块大小取 cache_block 的 gcd
+                # 推断，未回传/推不出时不修正）。无缓存迹象 → 全量 prompt
+                # 估值（tick_est=None 走 est_prompt），否则分子只按增量估、
+                # 读数系统性偏低一半以上。轮2 尚无判别依据，默认增量口径
+                tick_est = None
+                if k > 1 and prev_cache_active is not False:
+                    tail = 0
+                    blk = self.cache_block.get(key)
+                    prev = max(prev_prompt) if prev_prompt else 0
+                    if blk and prev:
+                        tail = prev - (prev // blk) * blk
+                    tick_est = turn_delta + tail
+                t_batch = time.perf_counter()
+                # 在途请求任务集管理与 0.2s 轮询判停（与 _run_point 同模式）
+                tasks = [asyncio.create_task(
+                            self._one(client, model, msgs, scenario,
+                                      i * turns + (k - 1), target, conc, cpt,
+                                      max_tokens, rep=rep, est_tokens=tick_est))
+                         for i, msgs in enumerate(msgs_list)]
+                reqs = []
+                pending = set(tasks)
+                while pending:
+                    if self.stop_flag:
+                        for t in pending:
+                            t.cancel()
+                        await asyncio.gather(*pending, return_exceptions=True)
+                        break
+                    done, pending = await asyncio.wait(
+                        pending, timeout=0.2, return_when=asyncio.FIRST_COMPLETED)
+                    for t in done:
+                        try:
+                            reqs.append(t.result())
+                        except asyncio.CancelledError:
+                            pass
+                reqs.sort(key=lambda r: r["req"])
+                batch_time = time.perf_counter() - t_batch
+                if self.stop_flag:
+                    return
+
+                ok = [r for r in reqs if not r.get("err")]
+                point = {
+                    "model": model, "scenario": scenario, "ctx_target": target,
+                    "turn": k, "turn_delta": turn_delta,
+                    "turn_phase": turn_plan[k - 1][1], "concurrency": conc,
+                    "reqs": reqs, "all_ok": len(ok) == conc,
+                    "batch_time_s": round(batch_time, 3),
+                    "prompt_tokens": None, "ttft_s": None, "prefill_tok_s": None,
+                    "decode_tok_s": None, "decode_total_tok_s": None,
+                    "out_tokens": None, "ttft_net_s": None,
+                    "prefill_net_tok_s": None,
+                    "rtt_ms": (round(self.rtt_s * 1000)
+                               if self.rtt_s is not None else None),
+                    "max_gap_s": None, "stall_s": None, "stall_count": None,
+                    "decode_burst": None,
+                }
+                if ok:
+                    gaps = [r["max_gap_s"] for r in ok if r.get("max_gap_s")]
+                    if gaps:
+                        point["max_gap_s"] = max(gaps)   # 停滞诊断取最差
+                    stalls = [r for r in ok if r.get("stall_s")]
+                    if stalls:
+                        worst = max(stalls, key=lambda r: r["stall_s"])
+                        point["stall_s"] = worst["stall_s"]
+                        point["stall_count"] = worst.get("stall_count")
+                    bursts = [bool(r.get("decode_burst"))
+                              for r in ok if r.get("decode_tok_s")]
+                    if bursts and sum(bursts) * 2 > len(bursts):
+                        point["decode_burst"] = True   # 多数决
+                    point["prompt_tokens"] = round(
+                        sum(r["prompt_tokens"] for r in ok) / len(ok))
+                    ttfts = [r["ttft_s"] for r in ok if r.get("ttft_s")]
+                    if ttfts:
+                        point["ttft_s"] = round(sum(ttfts) / len(ttfts), 3)
+                    tns = [r["ttft_net_s"] for r in ok if r.get("ttft_net_s")]
+                    if tns:
+                        point["ttft_net_s"] = round(sum(tns) / len(tns), 3)
+                    # 增量 prefill 口径：未命中 tokens ÷ TTFT。服务端回传缓存
+                    # 命中时按回传值；未回传时先做缓存迹象判别（见 cold_ttft
+                    # 注释）：TTFT 相对冷轮走平才按链内差分估算（hit≈前轮
+                    # prompt），否则 hit=None（前端显示未回传）、uncached=全量，
+                    # prefill 为全量口径真值。轮1冷启动 hit 恒 0
+                    pps, pns, hits = [], [], []
+                    for r in ok:
+                        ptok, tt = r.get("prompt_tokens"), r.get("ttft_s")
+                        if r.get("cache_reported"):
+                            hit = r.get("cache_hit") or 0
+                        elif ptok and k > 1:
+                            tnet = r.get("ttft_net_s") or tt
+                            if (cold_ttft and tnet
+                                    and tnet <= max(1.5 * cold_ttft, cold_ttft + 0.5)):
+                                hit = min(prev_prompt[r["req"] // turns], ptok)
+                            else:
+                                hit = None   # 无缓存迹象：不假设命中
+                        else:
+                            hit = 0
+                        hits.append(hit)
+                        if not ptok or not tt:
+                            continue
+                        uncached = max(ptok - hit, 1) if hit is not None else ptok
+                        pps.append(uncached / tt)
+                        if r.get("ttft_net_s"):
+                            pns.append(uncached / r["ttft_net_s"])
+                    if k == 1 and ok:
+                        # 冷轮 TTFT 基准（净口径优先，取跨链均值）：暖轮缓存迹象判别用
+                        ts = [r.get("ttft_net_s") or r.get("ttft_s") for r in ok]
+                        ts = [t for t in ts if t]
+                        if ts:
+                            cold_ttft = sum(ts) / len(ts)
+                    # 本轮判别结果供下一轮 tick 估值口径沿用（有命中 = 回传真值
+                    # 或判别估算的非零值）。轮1 冷启动 hit 恒 0，不代表服务端
+                    # 无缓存能力，不更新
+                    if k > 1 and hits:
+                        prev_cache_active = any(h for h in hits if h)
+                    if pps:
+                        point["prefill_tok_s"] = round(sum(pps) / len(pps), 1)
+                    if pns:
+                        point["prefill_net_tok_s"] = round(sum(pns) / len(pns), 1)
+                    dcs = [r["decode_tok_s"] for r in ok if r.get("decode_tok_s")]
+                    if dcs:
+                        point["decode_tok_s"] = round(sum(dcs) / len(dcs), 1)
+                    dca = [r["decode_tok_s_adj"] for r in ok
+                           if r.get("decode_tok_s_adj")]
+                    if dca:
+                        point["decode_tok_s_adj"] = round(sum(dca) / len(dca), 1)
+                    # 缓存命中：每轮跨链均值（单次会话口径），前端按轮展示。
+                    # 网关未回传字段时 hits 装的是差分估算值（cache_reported=
+                    # False，前端加 ≈）；连缓存迹象都没有时为 None——前端显示
+                    # 「未回传」，不展示假设的命中数
+                    known = [h for h in hits if h is not None]
+                    point["cache_hit_tokens"] = (round(sum(known) / len(known))
+                                                 if known else None)
+                    point["cache_reported"] = all(
+                        r.get("cache_reported") for r in ok)
+                    if point["cache_reported"]:
+                        # 块大小推断：回传命中值按 KV block 对齐（实测 256 倍
+                        # 数），逐轮 gcd 收敛；gcd 退化到 <64 说明该后端的命中
+                        # 口径不按块对齐（如 DeepSeek 云端），不用于碎块修正
+                        g = self.cache_block.get(key, 0)
+                        for r in ok:
+                            h = r.get("cache_hit") or 0
+                            if h > 0:
+                                g = math.gcd(g, h)
+                        if g >= 64:
+                            self.cache_block[key] = g
+                    fins = [r.get("finish") for r in ok if r.get("finish")]
+                    if fins:
+                        uniq = sorted(set(fins))
+                        point["finish"] = uniq[0] if len(uniq) == 1 else ",".join(uniq)
+                    point["out_tokens"] = round(
+                        sum(r.get("out_tokens") or 0 for r in ok) / len(ok))
+                    for r in ok:
+                        if r.get("prompt_tokens"):
+                            prev_prompt[r["req"] // turns] = r["prompt_tokens"]
+                # 实测速率登记进先验曲线（conc=1 单链口径，与 _run_point 的高并发
+                # 排除同理）：后续轮/rep 的开局估值锚点是相近上下文的真实速率，
+                # 而非探测请求的全量速率。轮1 冷启动登记全量口径、暖轮登记增量
+                # 口径，均为 TTFT 端到端口径，与估值帧语义一致（ADR-0007）
+                if conc == 1 and point.get("all_ok"):
+                    rate = point.get("prefill_net_tok_s") or point.get("prefill_tok_s")
+                    if rate:
+                        self._note_prefill_rate(key, target, rate)
+                await self._calibrate_usage(
+                    key, sum(len(m["content"]) for m in msgs_list[0]),
+                    filler_n, ok)
+                rep_points[k - 1].append(point)
+                if repeats == 1:
+                    self.results.append(point)
+                    await self.emit({"type": "point", "point": point})
+        if repeats > 1:
+            for pts in rep_points:
+                if not pts:
+                    continue
+                point = pts[0] if len(pts) == 1 else _aggregate_reps(pts)
+                self.results.append(point)
+                await self.emit({"type": "point", "point": point})
 
     # -- 单条流式请求 ----------------------------------------------------------
 
@@ -1129,7 +1536,7 @@ class BenchRun:
     async def _one(self, client: httpx.AsyncClient, model: str, messages: list,
                    scenario: str, req_i: int, ctx: int, conc: int,
                    cpt: float, max_tokens: int, rep: int = 0,
-                   quiet: bool = False) -> dict:
+                   quiet: bool = False, est_tokens: int | None = None) -> dict:
         # quiet=True（探测请求）：不发 tick/实时事件，只走完整请求链路并返回结果
         sc = SCENARIOS[scenario]
         # 输出估算系数取实测校准值（首个请求由探测结果播种），固定系数与实际
@@ -1137,14 +1544,22 @@ class BenchRun:
         out_cpt = self.out_cpt_calib.get((model, scenario)) or sc["out_cpt"]
         tag = f"{model}|{scenario}|{ctx}|{conc}|rep{rep}|r{req_i}"
         est_prompt = round((len(messages[0]["content"]) + len(messages[1]["content"])) / max(cpt, 0.1))
+        # tick 展示估值：agent 链暖轮只增量 prefill，按调用方给的增量估值显示
+        # （全量估值在短 TTFT 上会爆出天文数字）；est_prompt 本体仍用于 usage
+        # 缺失时的兜底记账，不受展示估值影响
+        tick_est = est_tokens or est_prompt
         if not quiet:
             await self.emit({"type": "tick", "tag": tag, "model": model, "scenario": scenario,
                              "ctx": ctx, "conc": conc, "req": req_i, "phase": "prefill",
                              "tokens": 0, "speed": 0, "elapsed": 0,
                              "est_prompt_tokens": est_prompt})
 
+        # messages 拷成 msgs_sent 再入 payload：超窗删减重试只改副本，
+        # 调用方（_run_point）持有的原始构造不被改写
+        msgs_sent = [dict(m) for m in messages]
+        sent_chars = sum(len(m["content"]) for m in messages)   # 实际发送字符数（删减重试后 < 构造量）
         payload = {
-            "model": model, "messages": messages, "stream": True,
+            "model": model, "messages": msgs_sent, "stream": True,
             "max_tokens": max_tokens,
             "stream_options": {"include_usage": True},
         }
@@ -1200,14 +1615,14 @@ class BenchRun:
             net = _net_elapsed(now0 - t0, self.rtt_s)
             rate = rate_prior(self.prefill_curve.get((model, scenario)) or [], ctx)
             if rate:
-                # 曲线先验封顶：等待期内估值 ≈ 该 ctx 的曲线速率（est_prompt ÷
+                # 曲线先验封顶：等待期内估值 ≈ 该 ctx 的曲线速率（tick_est ÷
                 # 预期耗时），超出预期耗时才随等待衰减收敛——速率随上下文
                 # 先增后减由曲线斜率外推反映，不再从天文数字双曲起步
-                net = max(net, est_prompt / rate)
+                net = max(net, tick_est / rate)
             await self.emit({"type": "tick", "tag": tag, "model": model,
                              "scenario": scenario, "ctx": ctx, "conc": conc,
                              "req": req_i, "phase": "prefill",
-                             "speed": round(est_prompt / net, 1),
+                             "speed": round(tick_est / net, 1),
                              "elapsed": round(now0 - t0, 2)})
             last_est = now0
 
@@ -1228,46 +1643,69 @@ class BenchRun:
         try:
             resp_ctx = None
             resp = None
-            for prefix in candidates:
-                path = f"{prefix}/chat/completions"
-                resp_ctx = client.stream("POST", path, json=payload)
-                resp = await enter_stream(resp_ctx)
-                await self._note_mock(resp)
-                if resp.status_code == 404 and not self.prefix_locked and prefix == "/v1":
-                    await resp_ctx.__aexit__(None, None, None)
-                    self.api_prefix = ""
-                    self.prefix_locked = True
-                    await self.emit({"type": "status",
-                                     "msg": "检测到网关不带 /v1 前缀（DeepSeek 风格），已切换端点"})
-                    continue
-                # 严格校验参数的网关：400 且报文点名某参数 → 省略该参数同端点
-                # 重试并锁定。thinking 为网关级锁定（ADR-0004）；temperature 为
-                # 模型级——如 Kimi K3 仅允许 0.6，省略后走服务端默认值（ADR-0004）
-                for _param in ("thinking", "temperature"):
-                    if resp.status_code != 400 or _param not in payload:
-                        continue
-                    body = (await resp.aread()).decode("utf-8", "replace")[:300]
-                    if _param not in body.lower():
-                        continue
-                    await resp_ctx.__aexit__(None, None, None)
-                    payload.pop(_param, None)
-                    if _param == "thinking":
-                        self.thinking_unsupported = True
-                    else:
-                        self.temperature_locked.add(model)
-                    await self.emit({"type": "status", "msg":
-                        f"网关不接受 {_param} 参数（{body[:80]}），已自动省略并重试"})
+            orig_user_chars = sent_chars
+            ovf_attempt = 0   # 超窗删减重试计数
+            while True:
+                for prefix in candidates:
+                    path = f"{prefix}/chat/completions"
                     resp_ctx = client.stream("POST", path, json=payload)
                     resp = await enter_stream(resp_ctx)
                     await self._note_mock(resp)
-                break
-            if resp is None:
-                raise RuntimeError("无可用端点")
+                    if resp.status_code == 404 and not self.prefix_locked and prefix == "/v1":
+                        await resp_ctx.__aexit__(None, None, None)
+                        self.api_prefix = ""
+                        self.prefix_locked = True
+                        await self.emit({"type": "status",
+                                         "msg": "检测到网关不带 /v1 前缀（DeepSeek 风格），已切换端点"})
+                        continue
+                    # 严格校验参数的网关：400 且报文点名某参数 → 省略该参数同端点
+                    # 重试并锁定。thinking 为网关级锁定（ADR-0004）；temperature 为
+                    # 模型级——如 Kimi K3 仅允许 0.6，省略后走服务端默认值（ADR-0004）
+                    for _param in ("thinking", "temperature"):
+                        if resp.status_code != 400 or _param not in payload:
+                            continue
+                        body = (await resp.aread()).decode("utf-8", "replace")[:300]
+                        if _param not in body.lower():
+                            continue
+                        await resp_ctx.__aexit__(None, None, None)
+                        payload.pop(_param, None)
+                        if _param == "thinking":
+                            self.thinking_unsupported = True
+                        else:
+                            self.temperature_locked.add(model)
+                        await self.emit({"type": "status", "msg":
+                            f"网关不接受 {_param} 参数（{body[:80]}），已自动省略并重试"})
+                        resp_ctx = client.stream("POST", path, json=payload)
+                        resp = await enter_stream(resp_ctx)
+                        await self._note_mock(resp)
+                    break
+                if resp is None:
+                    raise RuntimeError("无可用端点")
+                if resp.status_code == 200:
+                    break
+                body = (await resp.aread()).decode("utf-8", "replace")[:300]
+                # 超窗回退：prompt 临近模型上下文上限时，输出随机性可能把窗口
+                # 顶爆（context exceeded）——掐掉中段填充语料按 CTX_RETRY_KEEP
+                # 逐档重试，而非直接判失败；重试仍超限才按错误收口
+                if (_is_ctx_overflow(resp.status_code, body)
+                        and ovf_attempt < len(CTX_RETRY_KEEP)
+                        and orig_user_chars > 2000):
+                    await resp_ctx.__aexit__(None, None, None)
+                    resp_ctx = None
+                    keep = int(orig_user_chars * CTX_RETRY_KEEP[ovf_attempt])
+                    ovf_attempt += 1
+                    msgs_sent[1] = {**msgs_sent[1],
+                                    "content": _trim_middle(msgs_sent[1]["content"], keep)}
+                    sent_chars = sum(len(m["content"]) for m in msgs_sent)
+                    est_prompt = round(sent_chars / max(cpt, 0.1))
+                    await self.emit({"type": "status", "msg":
+                        f"{model} 上下文{_fmt_ctx(ctx)} 超出模型上下文窗口，"
+                        f"删减填充语料至约 {keep} 字符重试"
+                        f"（{ovf_attempt}/{len(CTX_RETRY_KEEP)}）"})
+                    continue
+                raise RuntimeError(_classify_http_error(resp.status_code, body))
             pending_line = None
             try:
-                if resp.status_code != 200:
-                    body = (await resp.aread()).decode("utf-8", "replace")[:300]
-                    raise RuntimeError(_classify_http_error(resp.status_code, body))
                 lines = resp.aiter_lines()
                 while True:
                     # 手动迭代 + 1s 超时读行：prefill 等待期（首 token 前）也发 tick，
@@ -1323,7 +1761,7 @@ class BenchRun:
                                 await self.emit({"type": "tick", "tag": tag, "model": model,
                                                  "scenario": scenario, "ctx": ctx, "conc": conc,
                                                  "req": req_i, "phase": "prefill",
-                                                 "speed": round(est_prompt / net0, 1),
+                                                 "speed": round(tick_est / net0, 1),
                                                  "ttft": round(ttft0, 3),
                                                  "elapsed": round(ttft0, 2)})
                         elif now - last > max_gap:
@@ -1342,12 +1780,14 @@ class BenchRun:
                             # 即真实值，与输出内容无关）；未校准回退字符系数（ADR-0007）
                             est = self._est_out(model, scenario, n_chunks,
                                                 reason_len + text_len, out_cpt)
-                            # 滑窗差分速度（2s）：prefill 后首批事件常成批到达
+                            # 滑窗差分速度（3s）：prefill 后首批事件常成批到达
                             # （服务端缓冲/投机采样），累计均值会把这批在 TTFT 窗口
                             # 生成的 token 摊进 decode 分母 → 起步虚高且收敛慢；
-                            # 窗口差分把突发留在基准样本里，只反映当前速率（ADR-0007）
+                            # 窗口差分把突发留在基准样本里，只反映当前速率（ADR-0007）。
+                            # 3s 窗口在响应性与平滑间取中：比 2s 更少受单批推送/
+                            # MTP 接受率抖动的瞬时拉扯，与最终 usage 口径的偏差更小
                             samples.append((now, est))
-                            cutoff = now - 2.0
+                            cutoff = now - 3.0
                             while len(samples) > 1 and samples[1][0] <= cutoff:
                                 samples.popleft()
                             base_t, base_est = samples[0]
@@ -1416,6 +1856,16 @@ class BenchRun:
                             f"{model} / {sc['label']} 实时读数切换为 SSE 事件计数口径"
                             f"（{cobs:.2f} 事件/token）"})
         ttft = (first - t0) if first else None
+        # 前缀缓存命中：多字段名解析（DeepSeek/OpenAI/Anthropic 风格）；网关
+        # 中转剥离扩展字段时记未回传，agent 链按链内差分估算
+        cache_hit, cache_rep = _cache_hit_from_usage(usage)
+        if (usage and not cache_rep and scenario == "agent"
+                and not self._cache_note_done and not quiet):
+            self._cache_note_done = True
+            await self.emit({"type": "status", "msg":
+                "网关未回传缓存命中字段（LiteLLM 等中转会剥离上游 usage 扩展字段）；"
+                "agent 链将按 TTFT 自动判别缓存迹象：有迹象按链内差分估算（≈），"
+                "无迹象则命中显示未回传、prefill 按全量口径；真值需直连推理后端"})
         # 净口径：扣除 RTT 基线，逼近服务端纯处理时间（云端短上下文必看）；
         # 扣减封顶 TTFT 一半——基线抖动超过小 prompt TTFT 时净口径不爆炸
         ttft_net = (_net_elapsed(ttft, self.rtt_s)
@@ -1439,7 +1889,7 @@ class BenchRun:
         return {
             "req": req_i, "err": None,
             "first_abs": first, "last_abs": last,
-            "cache_hit": (usage or {}).get("prompt_cache_hit_tokens") or 0,
+            "cache_hit": cache_hit,
             "cache_miss": (usage or {}).get("prompt_cache_miss_tokens") or 0,
             "ttft_s": round(ttft, 3) if ttft is not None else None,
             "ttft_net_s": round(ttft_net, 3) if ttft_net is not None else None,
@@ -1458,6 +1908,10 @@ class BenchRun:
             # 突发交付：疑似网关缓冲冲刷，decode 速率虚高不可信
             "decode_burst": True if _decode_burst(n_chunks, decode_time) else None,
             "usage_real": bool(usage),
+            # 服务端是否回传了缓存命中字段（agent 链增量口径：有回传按回传值，
+            # 无回传按链内差分估算未命中量）
+            "cache_reported": cache_rep,
+            "sent_chars": sent_chars,   # 实际发送字符数（超窗删减重试后 < 构造量）
             "finish": finished,
             "text_chars": text_len, "reason_chars": reason_len,   # 存档诊断用
         }

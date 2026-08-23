@@ -16,7 +16,8 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 
-from bench import BenchRun, DEFAULT_CONCURRENCIES, DEFAULT_CTX_LIST, SCENARIOS
+from bench import (AGENT_TURNS_DEFAULT, BenchRun, DEFAULT_CONCURRENCIES,
+                   DEFAULT_CTX_LIST, SCENARIOS)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(BASE, "results")
@@ -128,24 +129,38 @@ def resolve_provider(name: str | None) -> dict:
     return providers[0]
 
 
+def _resolve_deployment(provider: dict, model: str) -> dict | None:
+    """模型的生效部署：一个模型允许映射多套部署环境（1 对多），但激活
+    （active=true）的只有一套——激活者生效；无 active 标记回退首个命中
+    （兼容旧配置）。"""
+    hits = [d for d in provider.get("deployments") or []
+            if model in (d.get("models") or [])]
+    if not hits:
+        return None
+    for d in hits:
+        if d.get("active"):
+            return d
+    return hits[0]
+
+
 def match_deployments(provider: dict, models: list[str]) -> dict[str, dict]:
     """按被测模型匹配部署环境，返回 {model: {hardware, framework, params, deploy_label}}。
 
     一个 provider 可挂多套部署（deployments），每套声明其适用的 models；
+    同一模型命中多套时激活的那套生效（无 active 标记回退首个命中）；
     只有被选中的模型命中映射时才携带部署信息（本地多部署场景）。
     """
     out: dict[str, dict] = {}
     for m in models:
-        for dep in provider.get("deployments") or []:
-            if m in (dep.get("models") or []):
-                out[m] = {
-                    "deploy_label": dep.get("label") or "",
-                    "quant": dep.get("quant") or "",   # 模型量化（如 Q8_0），卡片首格展示
-                    "hardware": dep.get("hardware") or "",
-                    "framework": dep.get("framework") or "",
-                    "params": dep.get("params") or "",
-                }
-                break
+        dep = _resolve_deployment(provider, m)
+        if dep:
+            out[m] = {
+                "deploy_label": dep.get("label") or "",
+                "quant": dep.get("quant") or "",   # 模型量化（如 Q8_0），卡片首格展示
+                "hardware": dep.get("hardware") or "",
+                "framework": dep.get("framework") or "",
+                "params": dep.get("params") or "",
+            }
     return out
 
 
@@ -284,7 +299,22 @@ def _validate_providers(providers) -> list[dict]:
             if isinstance(max_ctx, (int, float)) and not isinstance(max_ctx, bool) \
                     and int(max_ctx) > 0:
                 dep["max_ctx"] = int(max_ctx)   # 超窗钳制来源（ADR-0005），非正数视为未配置
+            if d.get("active"):
+                dep["active"] = True   # 激活标记仅在置位时落盘，旧配置保持零字段
             deps.append(dep)
+        # 一个模型允许映射多套部署，但激活只能有一套：重叠激活拒绝写入，
+        # 否则生效口径（_resolve_deployment）出现二义
+        active_by_model: dict[str, str] = {}
+        for dep in deps:
+            if not dep.get("active"):
+                continue
+            for m in dep["models"]:
+                if m in active_by_model:
+                    raise HTTPException(
+                        400, f"{name} 的模型 {m} 同时激活了多套部署环境"
+                             f"（{active_by_model[m]}、{dep['label'] or '未命名部署'}），"
+                             f"同一模型只能激活一套")
+                active_by_model[m] = dep["label"] or "未命名部署"
         out.append({
             "name": name,
             "label": (str(p.get("label") or "").strip() or name)[:64],
@@ -372,13 +402,14 @@ def _validate_bench_cfg(cfg: dict):
     """测速矩阵四要素钳制（ADR-0001）：类型/范围/条数不合法一律 400——畸形 ctx
     （如 1e9）会让引擎按档位构造 GB 级 prompt，直接打爆内存。"""
     models, scens = cfg["models"], cfg["scenarios"]
-    ctxs, concs = cfg["ctx_list"], cfg["concurrencies"]
+    ctxs, concs = cfg.get("ctx_list") or [], cfg["concurrencies"]
     if not isinstance(models, list) or len(models) > 32 or any(
             not isinstance(m, str) or not m.strip() for m in models):
         raise HTTPException(400, "models 须为 ≤32 个非空字符串")
     if not isinstance(scens, list) or any(
             not isinstance(s, str) or s not in SCENARIOS for s in scens):
         raise HTTPException(400, f"scenarios 须取自白名单: {sorted(SCENARIOS)}")
+    # 纯 Agent 场景不以上下文档位为变量（按任务轮次出点），ctx_list 可为空
     if not isinstance(ctxs, list) or len(ctxs) > 16 or any(
             not isinstance(c, (int, float)) or isinstance(c, bool)
             or not 0 <= c <= 4 * 1048576 for c in ctxs):
@@ -387,14 +418,48 @@ def _validate_bench_cfg(cfg: dict):
             not isinstance(c, int) or isinstance(c, bool)
             or not 1 <= c <= 64 for c in concs):
         raise HTTPException(400, "concurrencies 须为 ≤8 个、逐值 1~64 的整数")
+    # Agent 连续任务链参数（可选，缺省引擎用默认值）：两阶段轮数
+    # agent_turns_p1（短文本）/ agent_turns_p2（长文本 ladder）显式配置；
+    # 旧配置 agent_turns 单值由引擎对半切兼容。阶段一每轮新增上下文为
+    # 正态采样（中心 1K）的钳制区间 [min, max]；阶段二 ladder 固定 4K 起翻倍
+    if cfg.get("agent_turns_p1") is not None or cfg.get("agent_turns_p2") is not None:
+        for name in ("agent_turns_p1", "agent_turns_p2"):
+            v = cfg.get(name)
+            if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= 32:
+                raise HTTPException(400, f"{name} 须为 0~32 的整数")
+        if not 1 <= cfg["agent_turns_p1"] + cfg["agent_turns_p2"] <= 32:
+            raise HTTPException(400, "agent_turns_p1 + agent_turns_p2 须在 1~32 之间")
+    else:
+        v = cfg.get("agent_turns")
+        if v is not None and (not isinstance(v, int) or isinstance(v, bool)
+                              or not 1 <= v <= 32):
+            raise HTTPException(400, "agent_turns 须为 1~32 的整数")
+    # 阶段二 ladder 起始增量（可选，默认 4K 逐轮翻倍）
+    vb = cfg.get("agent_phase2_base")
+    if vb is not None and (not isinstance(vb, int) or isinstance(vb, bool)
+                           or not 1024 <= vb <= 65536):
+        raise HTTPException(400, "agent_phase2_base 须为 1024~65536 的整数")
+    dv = cfg.get("agent_turn_delta")
+    if dv is not None:
+        vals = dv if isinstance(dv, list) else [dv]
+        if (len(vals) not in (1, 2) or any(
+                not isinstance(x, int) or isinstance(x, bool)
+                or not 256 <= x <= 32768 for x in vals)):
+            raise HTTPException(400, "agent_turn_delta 须为 256~32768 的整数或 [min, max] 区间")
+        if len(vals) == 2 and vals[0] > vals[1]:
+            raise HTTPException(400, "agent_turn_delta 区间须 min ≤ max")
 
 
 @app.post("/api/bench/start")
 async def bench_start(cfg: dict):
     _purge_finished_runs()
-    for field in ("models", "scenarios", "ctx_list", "concurrencies"):
+    for field in ("models", "scenarios", "concurrencies"):
         if not cfg.get(field):
             raise HTTPException(400, f"缺少配置项: {field}")
+    # 纯 Agent 场景按任务轮次出点，不以上下文档位为变量——ctx_list 可缺省
+    if any(s != "agent" for s in cfg["scenarios"]) and not cfg.get("ctx_list"):
+        raise HTTPException(400, "缺少配置项: ctx_list")
+    cfg.setdefault("ctx_list", [])
     _validate_bench_cfg(cfg)
     # 任务备注：可选短文本，随 cfg 存档、展示在历史标题最前；非字符串/空白丢弃
     note = cfg.get("note")
@@ -418,11 +483,12 @@ async def bench_start(cfg: dict):
         # 部署环境（硬件/框架/参数）跟随被测模型，由服务端按映射注入并随结果存档
         cfg["model_info"] = match_deployments(p, cfg.get("models") or [])
         # 部署的实际上下文上限（deployments[].max_ctx）：超限档位由测速引擎跳过，
-        # 避免构造出必然 400 的超窗 prompt（ADR-0005）
+        # 避免构造出必然 400 的超窗 prompt（ADR-0005）。同一模型多套部署时
+        # 取激活的那套（与 match_deployments 同口径）
         cfg["model_max_ctx"] = {
             m: int(dep["max_ctx"])
-            for dep in p.get("deployments") or [] if dep.get("max_ctx")
-            for m in (dep.get("models") or []) if m in (cfg.get("models") or [])
+            for m in (cfg.get("models") or [])
+            if (dep := _resolve_deployment(p, m)) and dep.get("max_ctx")
         }
         if not p["local"]:
             # 云端不做并发/吞吐测试：响应不受控、可能调度到不同推理设备，
@@ -514,8 +580,15 @@ async def bench_active():
         if r.finished_at is not None:
             continue
         cfg = r.cfg
-        total = (len(cfg.get("models") or []) * len(cfg.get("scenarios") or [])
-                 * len(cfg.get("ctx_list") or []) * len(cfg.get("concurrencies") or []))
+        # agent 场景按任务轮次出点（不以下文档位为变量）：两阶段轮数之和 × 并发链数
+        n_turns = ((cfg["agent_turns_p1"] + cfg["agent_turns_p2"])
+                   if cfg.get("agent_turns_p1") is not None
+                   and cfg.get("agent_turns_p2") is not None
+                   else int(cfg.get("agent_turns") or AGENT_TURNS_DEFAULT))
+        n_scen = sum(n_turns if s == "agent"
+                     else len(cfg.get("ctx_list") or [])
+                     for s in cfg.get("scenarios") or [])
+        total = len(cfg.get("models") or []) * n_scen * len(cfg.get("concurrencies") or [])
         out.append({"run_id": r.run_id, "started_at": r.started_at,
                     "provider": cfg.get("provider_label") or cfg.get("provider") or "",
                     "models": cfg.get("models") or [],
@@ -539,6 +612,9 @@ async def bench_history():
                         "scenarios": cfg.get("scenarios", []),
                         "ctx_list": cfg.get("ctx_list", []),
                         "concurrencies": cfg.get("concurrencies", []),
+                        "agent_turns": cfg.get("agent_turns"),
+                        "agent_turns_p1": cfg.get("agent_turns_p1"),
+                        "agent_turns_p2": cfg.get("agent_turns_p2"),
                         "note": cfg.get("note") or "",
                         "n_points": len(d.get("results", []))})
         except Exception:  # noqa: BLE001

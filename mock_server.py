@@ -16,6 +16,8 @@ DeepSeek 风格（chat 端点不带 /v1 前缀）：MOCK_NO_V1=1 python mock_ser
 模拟流出 N 个 decode token 后裸断连（不发 [DONE]，直接关流）：MOCK_DIE_AT=5
 模拟服务端并发 prefill 串行化（全局排队）：MOCK_SERIALIZE=1
 模拟 /models 慢响应（秒，验证 RTT 基线期停止）：MOCK_MODELS_DELAY=5
+模拟模型上下文窗口上限（tokens，prompt+max_tokens 超限返回 400 context exceeded）：MOCK_MAX_CTX=4096
+模拟服务端前缀缓存（append-only 增长的 prompt 只增量 prefill，usage 回传命中）：MOCK_CACHE=1
 """
 import asyncio
 import json
@@ -41,6 +43,19 @@ NO_USAGE = os.environ.get("MOCK_NO_USAGE", "")  # 置 1 则流末不发 usage �
 DIE_AT = int(os.environ.get("MOCK_DIE_AT", "0"))  # 流出 N 个 decode token 后裸断连（不发 usage/[DONE]，直接关流）
 SERIALIZE = os.environ.get("MOCK_SERIALIZE", "")  # 置 1 则 prefill 全局串行（模拟服务端并发 prefill 串行化）
 MODELS_DELAY = float(os.environ.get("MOCK_MODELS_DELAY", "0"))  # /models 响应前 sleep 秒数（模拟 RTT 基线期慢网关）
+MAX_CTX = int(os.environ.get("MOCK_MAX_CTX", "0"))  # 置 N 则 prompt+max_tokens 超 N 返回 400 超窗（验证删减上下文重试）
+CACHE = os.environ.get("MOCK_CACHE", "")  # 置 1 模拟前缀缓存：与已见 prompt 的公共前缀部分不计 prefill 耗时（验证 agent 连续任务链）
+CACHE_NOREPORT = os.environ.get("MOCK_CACHE_NOREPORT", "")  # 置 1 则缓存生效但 usage 不回传命中字段（验证缓存迹象判别：TTFT 走平 → ≈差分估算）
+
+_SEEN: list[str] = []   # 已见 prompt 全文（前缀缓存匹配源），容量 cap 32
+
+
+def _common_prefix_len(a: str, b: str) -> int:
+    n = min(len(a), len(b))
+    i = 0
+    while i < n and a[i] == b[i]:
+        i += 1
+    return i
 
 _PREFILL_SEM = asyncio.Semaphore(1)   # MOCK_SERIALIZE 的全局 prefill 串行闸
 
@@ -94,18 +109,34 @@ async def _chat_impl(req: Request):
     text = "".join(m.get("content", "") for m in body.get("messages", []))
     prompt_tokens = max(1, int(len(text) / CPT))
     max_tokens = int(body.get("max_tokens") or 256)
+    if MAX_CTX and prompt_tokens + max_tokens > MAX_CTX:
+        # OpenAI 风格超窗报文（code=context_length_exceeded）
+        return JSONResponse({"error": {"message":
+            f"This model's maximum context length is {MAX_CTX} tokens. "
+            f"However, you requested {prompt_tokens + max_tokens} tokens "
+            f"({prompt_tokens} in the messages, {max_tokens} in the completion).",
+            "code": "context_length_exceeded"}}, status_code=400)
+    hit_tokens = 0
+    if CACHE or CACHE_NOREPORT:
+        # 前缀缓存：与任一已见 prompt 的最长公共前缀即命中（append-only
+        # 增长的会话链命中上一轮全文），命中部分不计 prefill 耗时
+        hit_chars = max((_common_prefix_len(text, s) for s in _SEEN), default=0)
+        hit_tokens = int(hit_chars / CPT)
+        _SEEN.append(text)
+        del _SEEN[:-32]
+    prefill_tokens = max(prompt_tokens - hit_tokens, 1)
 
     async def gen():
         if DELAY_HDR:
             pass   # prefill 等待已在端点返回前完成（响应头随首个内容块才发出）
         elif KA > 0:   # prefill 期高频注释心跳：淹没读行超时（回归：估值帧曾因此全程停摆）
-            t_wait, t = prompt_tokens / PP, 0.0
+            t_wait, t = prefill_tokens / PP, 0.0
             while t < t_wait:
                 await asyncio.sleep(KA)
                 t += KA
                 yield ": keepalive\n\n"
         else:
-            await _prefill_sleep(prompt_tokens)          # prefill 耗时
+            await _prefill_sleep(prefill_tokens)         # prefill 耗时（缓存命中部分不计）
         n_content = 0 if NO_CONTENT else max_tokens
         for _ in range(REASON):
             await asyncio.sleep(1.0 / TG)
@@ -131,11 +162,15 @@ async def _chat_impl(req: Request):
         if not NO_USAGE:
             final["usage"] = {"prompt_tokens": prompt_tokens,
                               "completion_tokens": REASON + n_content}
+            if CACHE:
+                final["usage"]["prompt_cache_hit_tokens"] = hit_tokens
+                final["usage"]["prompt_cache_miss_tokens"] = prompt_tokens - hit_tokens
+            # CACHE_NOREPORT：缓存生效但不下发命中字段（模拟剥离 usage 扩展的网关）
         yield "data: " + json.dumps(final) + "\n\n"
         yield "data: [DONE]\n\n"
 
     if DELAY_HDR:   # prefill 等待放在端点返回前：响应头随首个内容块才发出
-        await _prefill_sleep(prompt_tokens)
+        await _prefill_sleep(prefill_tokens)
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
