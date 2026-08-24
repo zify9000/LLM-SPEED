@@ -329,35 +329,41 @@ CTX_HEADROOM = 1024
 CTX_RETRY_KEEP = (0.75, 0.5, 0.3)
 
 # Agent 连续任务链默认参数：agent 场景不以上下文档位为变量，改为按任务轮次
-# 推进的会话链——第 1 轮冷启动（全量 prefill），第 2..K 轮 append-only 增长、
-# 命中服务端前缀缓存只增量 prefill，口径对齐真实 agent 循环。
-# 轮次构成固定两阶段：前一半短文本任务（每轮增量 ~N(1K) 正态、钳制到配置区间），
-# 后一半长文本任务（4K 起逐轮翻倍的 ladder：默认 8 轮 = 4 短 + 4 长，
-# 8K/16K/32K/64K）——短轮测高频小步循环的暖延迟，长轮测偶发大上下文灌入的
-# 增量 prefill 能力
-AGENT_TURNS_DEFAULT = 8               # 链轮数
+# 推进的会话链——轮 0 冷启动（独立配置，默认 10K 上下文全量 prefill），
+# 轮 1..K 暖轮 append-only 增长、命中服务端前缀缓存只增量 prefill，口径对齐
+# 真实 agent 循环。
+# 暖轮构成固定两阶段：阶段一短文本任务（每轮增量 ~N(1K) 正态、钳制到配置
+# 区间），阶段二长文本任务（4K 起逐轮翻倍的 ladder：默认 12 暖轮 = 6 短 +
+# 6 长，4K/8K/16K/32K/64K/128K）——短轮测高频小步循环的暖延迟，长轮测偶发
+# 大上下文灌入的增量 prefill 能力
+AGENT_TURNS_DEFAULT = 12              # 暖轮数（阶段一 + 阶段二），不含冷启动轮
+AGENT_COLD_CTX_DEFAULT = 10240        # 冷启动轮上下文 tokens（独立于两阶段配置）
 AGENT_TURN_DELTA_DEFAULT = (256, 2048)  # 阶段一短轮增量 tokens 钳制区间
 AGENT_TURN_CENTER = 1000              # 阶段一每轮增量正态分布中心（tokens）
-AGENT_PHASE2_BASE = 8192              # 阶段二 ladder 起步增量（tokens），逐轮翻倍
+AGENT_PHASE2_BASE = 4096              # 阶段二 ladder 起步增量（tokens），逐轮翻倍
 AGENT_TURNS_RANGE = (1, 32)
 AGENT_TURN_DELTA_RANGE = (256, 32768)
+AGENT_COLD_CTX_RANGE = (1024, 262144)
 
 
 def _gen_agent_turns(n1: int, n2: int, dmin: int, dmax: int,
-                     rng: random.Random, p2_base: int = AGENT_PHASE2_BASE
+                     rng: random.Random, p2_base: int = AGENT_PHASE2_BASE,
+                     cold_ctx: int = AGENT_COLD_CTX_DEFAULT
                      ) -> list[tuple[int, int]]:
-    """生成各轮（新增 tokens, 阶段）：阶段一 n1 轮短文本——N(1K) 正态采样
-    钳制到 [dmin, dmax] 后升序；阶段二 n2 轮长文本——p2_base 起步逐轮翻倍的
-    ladder（模拟 agent 循环里偶发的大文件读取/长日志灌入）。
-    默认 4+4、8K 起步：短轮测高频小步循环的暖延迟，长轮（8K/16K/32K/64K）测
-    大上下文灌入的增量 prefill。阶段一内部升序 + ladder 天然升序，链平滑
-    增长、冷启动轮输入最小；若把区间上限抬过 ladder 首档，短轮可能超过它，
-    轮序不再全局升序，但 append-only 链语义不受影响。"""
+    """生成各轮（新增 tokens, 阶段）：轮 0 冷启动（cold_ctx，阶段 0，独立配置
+    默认 10K）；阶段一 n1 轮短文本——N(1K) 正态采样钳制到 [dmin, dmax] 后
+    升序；阶段二 n2 轮长文本——p2_base 起步逐轮翻倍的 ladder（模拟 agent
+    循环里偶发的大文件读取/长日志灌入）。
+    默认 1+6+6、4K 起步：冷启动测首轮全量 prefill，短轮测高频小步循环的暖
+    延迟，长轮（4K/8K/16K/32K/64K/128K）测大上下文灌入的增量 prefill。
+    轮目标为增量累积和、天然升序，链平滑增长；若把区间上限抬过 ladder
+    首档，短轮增量可能超过它，增量不再全局升序，但 append-only 链语义
+    不受影响。"""
     sigma = max(150.0, (dmax - dmin) / 6.0)
     phase1 = sorted(max(dmin, min(dmax, round(rng.gauss(AGENT_TURN_CENTER, sigma))))
                     for _ in range(n1))
     phase2 = [p2_base << i for i in range(n2)]
-    return [(s, 1) for s in phase1] + [(s, 2) for s in phase2]
+    return [(cold_ctx, 0)] + [(s, 1) for s in phase1] + [(s, 2) for s in phase2]
 
 
 def _cache_hit_from_usage(usage: dict | None) -> tuple[int, bool]:
@@ -916,7 +922,12 @@ class BenchRun:
                                     f"{max_ctx // 1024}K（config.json deployments.max_ctx）"})
                                 await self.emit({"type": "point_skipped",
                                     "model": model, "scenario": scenario, "ctx": ctx,
-                                    "count": len(cfg["concurrencies"])})
+                                    "count": len(cfg["concurrencies"]),
+                                    # msg 随事件供前端常驻展示（status 行是瞬态的，
+                                    # 跳过原因只说一次会被后续状态冲掉）
+                                    "msg": f"跳过 {model} / 上下文{_fmt_ctx(ctx)}："
+                                           f"连同输出预算超出部署上限 {max_ctx // 1024}K"
+                                           f"（config.json deployments.max_ctx）"})
                                 continue
                             for conc in sorted(cfg["concurrencies"]):
                                 if self.stop_flag:
@@ -1222,18 +1233,18 @@ class BenchRun:
         """Agent 连续任务链：K 轮 append-only 增长会话，逐轮产出测速点。
 
         口径设计（对齐真实 agent 循环，区别于其他场景的单发冷测）：
-        - 轮次任务在链开始前全部生成，固定两阶段：阶段一（前 ⌈K/2⌉ 轮）短文本
-          任务，每轮增量 ~N(1K) 正态采样钳制到配置的增量区间，升序排轮；
-          阶段二（后 ⌊K/2⌋ 轮）长文本任务，4K 起步逐轮翻倍的 ladder
-          （默认 8 轮 = 4 短 + 4 长：8K/16K/32K/64K），模拟偶发的大文件
-          读取/长日志灌入。第 k 轮目标 = 前 k 轮增量累积和。语料流确定性
-          嵌套 + 链内 nonce 固定 → 第 1 轮冷启动全量 prefill，第 2..K 轮
-          命中服务端前缀缓存、只增量 prefill；nonce 跨 rep/链/运行随机，
-          冷启动轮不受残留缓存污染。
+        - 轮次任务在链开始前全部生成：轮 0 冷启动（独立配置 agent_cold_ctx，
+          默认 10K，全量 prefill）；其后暖轮固定两阶段——阶段一短文本任务，
+          每轮增量 ~N(1K) 正态采样钳制到配置的增量区间，升序排轮；阶段二
+          长文本任务，4K 起步逐轮翻倍的 ladder（默认 12 暖轮 = 6 短 + 6 长：
+          4K/8K/16K/32K/64K/128K），模拟偶发的大文件读取/长日志灌入。
+          第 k 轮目标 = 前 k 轮增量累积和。语料流确定性嵌套 + 链内 nonce
+          固定 → 冷启动轮全量 prefill，暖轮命中服务端前缀缓存、只增量
+          prefill；nonce 跨 rep/链/运行随机，冷启动轮不受残留缓存污染。
         - 每轮聚合为一个点：ctx_target = 轮目标 tokens（排序/图表类别轴用），
-          turn = 轮号（1 起），turn_delta = 本轮构造增量 tokens，
-          turn_phase = 1/2（前端按阶段出统计：阶段一看 TTFT 暖延迟，
-          阶段二看增量 prefill）。
+          turn = 轮号（0 起，0=冷启动），turn_delta = 本轮构造增量 tokens，
+          turn_phase = 0/1/2（前端按阶段出统计：0=冷启动看全量 prefill，
+          阶段一暖轮看 TTFT 暖延迟，阶段二看增量 prefill）。
           prefill_tok_s 覆写为**增量口径** = 未命中 tokens ÷ TTFT（服务端
           回传 cache_hit 时按回传值，否则按链内实测差分估算；LiteLLM 等网关
           会剥离上游 usage 扩展字段导致无回传）；无缓存能力的服务端增量读数
@@ -1247,8 +1258,9 @@ class BenchRun:
         - 超窗删减重试（_one 内）掐断某轮中段后，后续轮的前缀命中会缩短——
           命中读数如实反映，不特殊处理。
         """
-        # 两阶段轮数：新配置显式给 agent_turns_p1/p2；旧配置 agent_turns
-        # 单值对半切（⌈K/2⌉ 短 + ⌊K/2⌋ 长）兼容
+        # 两阶段暖轮数：新配置显式给 agent_turns_p1/p2；旧配置 agent_turns
+        # 单值对半切（⌈K/2⌉ 短 + ⌊K/2⌋ 长）兼容；链另有 1 轮冷启动（独立
+        # 配置 agent_cold_ctx，默认 10K）
         p1_cfg, p2_cfg = self.cfg.get("agent_turns_p1"), self.cfg.get("agent_turns_p2")
         if p1_cfg is not None and p2_cfg is not None:
             n1 = max(0, min(AGENT_TURNS_RANGE[1], int(p1_cfg)))
@@ -1258,7 +1270,7 @@ class BenchRun:
                         int(self.cfg.get("agent_turns") or AGENT_TURNS_DEFAULT)))
             n2 = turns // 2
             n1 = turns - n2
-        turns = max(n1 + n2, 1)
+        turns = 1 + n1 + n2   # 轮 0 冷启动 + 轮 1.. 暖轮
         # 增量区间：新配置为 [min, max]（正态采样钳制区间）；兼容旧配置单值
         dv = self.cfg.get("agent_turn_delta")
         if isinstance(dv, (list, tuple)) and len(dv) == 2:
@@ -1274,7 +1286,11 @@ class BenchRun:
         # 轮次构成在链开始前一次性生成并定序：全部 rep 复用同一构成，复测可比
         p2_base = max(1024, min(65536,
                       int(self.cfg.get("agent_phase2_base") or AGENT_PHASE2_BASE)))
-        turn_plan = _gen_agent_turns(n1, n2, dmin, dmax, random.Random(), p2_base)
+        lo, hi = AGENT_COLD_CTX_RANGE
+        cold_ctx = max(lo, min(hi,
+                       int(self.cfg.get("agent_cold_ctx") or AGENT_COLD_CTX_DEFAULT)))
+        turn_plan = _gen_agent_turns(n1, n2, dmin, dmax, random.Random(),
+                                     p2_base, cold_ctx)
         targets: list[int] = []
         acc = 0
         for s, _ph in turn_plan:
@@ -1287,10 +1303,10 @@ class BenchRun:
         cpt = self.cpt_calib.get(key) or base_cpt
         ladder_txt = "/".join(f"{s // 1024}K" for s in ladder) or "无"
         await self.emit({"type": "status", "msg":
-            f"{model} / Agent 连续任务链 / 并行会话 {conc}：{turns} 轮两阶段——"
+            f"{model} / Agent 连续任务链 / 并行会话 {conc}：{turns} 轮——"
+            f"1 轮冷启动（{cold_ctx} tokens 全量 prefill）+ "
             f"{n1} 轮短文本（每轮增量 ~N(1K) 截断 {dmin}~{dmax} tokens）+ "
-            f"{n2} 轮长文本（{ladder_txt} ladder），前缀缓存口径，"
-            f"第 1 轮冷启动"})
+            f"{n2} 轮长文本（{ladder_txt} ladder），前缀缓存口径"})
 
         rep_points: list[list[dict]] = [[] for _ in range(turns)]
         for rep in range(repeats):
@@ -1301,9 +1317,9 @@ class BenchRun:
             nonces = [f"{base_seed}-c{i}" for i in range(conc)]
             prev_prompt = [0] * conc   # 各链上一轮实测 prompt_tokens（增量差分兜底）
             # 暖轮 tick 估值口径跟随上一轮缓存判别结果（True/False；None=尚无
-            # 依据，轮2 默认增量口径）——见下方 tick_est 注释
+            # 依据，轮 1（首个暖轮）默认增量口径）——见下方 tick_est 注释
             prev_cache_active: bool | None = None
-            # 冷轮（轮1）TTFT 基准：服务端不回传缓存命中字段时的缓存迹象判别——
+            # 冷轮（轮 0）TTFT 基准：服务端不回传缓存命中字段时的缓存迹象判别——
             # 暖轮 TTFT 相对冷轮走平（≤1.5×，含固定开销地板的 0.5s 余量）而
             # prompt 在增长，才算「有缓存迹象」，按链内差分估算命中；TTFT 随
             # prompt 增长则判定无缓存——命中显示未回传（None）、prefill 退回
@@ -1317,12 +1333,13 @@ class BenchRun:
                 # 本轮构造增量（tokens）：两阶段构成下逐轮不等长
                 turn_delta = target - (targets[k - 2] if k > 1 else 0)
                 if ctx_limit is not None and target > ctx_limit:
-                    await self.emit({"type": "status", "msg":
-                        f"{model} / Agent 链第 {k} 轮起连同输出预算超出部署上限，"
-                        f"链提前结束（已完成 {k - 1} 轮）"})
+                    skip_msg = (f"{model} / Agent 链第 {k - 1} 轮起连同输出预算"
+                                f"超出部署上限，链提前结束（已完成 {k - 1} 轮）")
+                    await self.emit({"type": "status", "msg": skip_msg})
+                    # msg 随事件供前端常驻展示（status 行是瞬态的，会被后续状态冲掉）
                     await self.emit({"type": "point_skipped",
                         "model": model, "scenario": scenario, "ctx": target,
-                        "count": turns - k + 1})
+                        "count": turns - k + 1, "msg": skip_msg})
                     return
                 # 嵌套前缀记账精确加长（与 _run_point 同公式）
                 kb = self.prefix_kb.get(key)
@@ -1342,7 +1359,7 @@ class BenchRun:
                 # 在 1K 增量上系统性低估 ~20%；块大小取 cache_block 的 gcd
                 # 推断，未回传/推不出时不修正）。无缓存迹象 → 全量 prompt
                 # 估值（tick_est=None 走 est_prompt），否则分子只按增量估、
-                # 读数系统性偏低一半以上。轮2 尚无判别依据，默认增量口径
+                # 读数系统性偏低一半以上。首个暖轮尚无判别依据，默认增量口径
                 tick_est = None
                 if k > 1 and prev_cache_active is not False:
                     tail = 0
@@ -1381,7 +1398,7 @@ class BenchRun:
                 ok = [r for r in reqs if not r.get("err")]
                 point = {
                     "model": model, "scenario": scenario, "ctx_target": target,
-                    "turn": k, "turn_delta": turn_delta,
+                    "turn": k - 1, "turn_delta": turn_delta,   # 轮号 0 起：0=冷启动
                     "turn_phase": turn_plan[k - 1][1], "concurrency": conc,
                     "reqs": reqs, "all_ok": len(ok) == conc,
                     "batch_time_s": round(batch_time, 3),
@@ -1419,7 +1436,7 @@ class BenchRun:
                     # 命中时按回传值；未回传时先做缓存迹象判别（见 cold_ttft
                     # 注释）：TTFT 相对冷轮走平才按链内差分估算（hit≈前轮
                     # prompt），否则 hit=None（前端显示未回传）、uncached=全量，
-                    # prefill 为全量口径真值。轮1冷启动 hit 恒 0
+                    # prefill 为全量口径真值。轮 0 冷启动 hit 恒 0
                     pps, pns, hits = [], [], []
                     for r in ok:
                         ptok, tt = r.get("prompt_tokens"), r.get("ttft_s")
@@ -1448,7 +1465,7 @@ class BenchRun:
                         if ts:
                             cold_ttft = sum(ts) / len(ts)
                     # 本轮判别结果供下一轮 tick 估值口径沿用（有命中 = 回传真值
-                    # 或判别估算的非零值）。轮1 冷启动 hit 恒 0，不代表服务端
+                    # 或判别估算的非零值）。轮 0 冷启动 hit 恒 0，不代表服务端
                     # 无缓存能力，不更新
                     if k > 1 and hits:
                         prev_cache_active = any(h for h in hits if h)
@@ -1494,7 +1511,7 @@ class BenchRun:
                             prev_prompt[r["req"] // turns] = r["prompt_tokens"]
                 # 实测速率登记进先验曲线（conc=1 单链口径，与 _run_point 的高并发
                 # 排除同理）：后续轮/rep 的开局估值锚点是相近上下文的真实速率，
-                # 而非探测请求的全量速率。轮1 冷启动登记全量口径、暖轮登记增量
+                # 而非探测请求的全量速率。轮 0 冷启动登记全量口径、暖轮登记增量
                 # 口径，均为 TTFT 端到端口径，与估值帧语义一致（ADR-0007）
                 if conc == 1 and point.get("all_ok"):
                     rate = point.get("prefill_net_tok_s") or point.get("prefill_tok_s")

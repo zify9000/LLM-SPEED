@@ -418,10 +418,15 @@ def _validate_bench_cfg(cfg: dict):
             not isinstance(c, int) or isinstance(c, bool)
             or not 1 <= c <= 64 for c in concs):
         raise HTTPException(400, "concurrencies 须为 ≤8 个、逐值 1~64 的整数")
-    # Agent 连续任务链参数（可选，缺省引擎用默认值）：两阶段轮数
-    # agent_turns_p1（短文本）/ agent_turns_p2（长文本 ladder）显式配置；
-    # 旧配置 agent_turns 单值由引擎对半切兼容。阶段一每轮新增上下文为
-    # 正态采样（中心 1K）的钳制区间 [min, max]；阶段二 ladder 固定 4K 起翻倍
+    # Agent 连续任务链参数（可选，缺省引擎用默认值）：轮 1 冷启动独立配置
+    # agent_cold_ctx（默认 10K）；两阶段暖轮数 agent_turns_p1（短文本）/
+    # agent_turns_p2（长文本 ladder）显式配置；旧配置 agent_turns 单值由
+    # 引擎对半切兼容。阶段一每轮新增上下文为正态采样（中心 1K）的钳制区间
+    # [min, max]；阶段二 ladder 默认 4K 起翻倍
+    vc = cfg.get("agent_cold_ctx")
+    if vc is not None and (not isinstance(vc, int) or isinstance(vc, bool)
+                           or not 1024 <= vc <= 262144):
+        raise HTTPException(400, "agent_cold_ctx 须为 1024~262144 的整数")
     if cfg.get("agent_turns_p1") is not None or cfg.get("agent_turns_p2") is not None:
         for name in ("agent_turns_p1", "agent_turns_p2"):
             v = cfg.get(name)
@@ -580,11 +585,12 @@ async def bench_active():
         if r.finished_at is not None:
             continue
         cfg = r.cfg
-        # agent 场景按任务轮次出点（不以下文档位为变量）：两阶段轮数之和 × 并发链数
-        n_turns = ((cfg["agent_turns_p1"] + cfg["agent_turns_p2"])
+        # agent 场景按任务轮次出点（不以下文档位为变量）：1 轮冷启动 + 两阶段
+        # 暖轮数之和，再 × 并发链数
+        n_turns = (1 + (cfg["agent_turns_p1"] + cfg["agent_turns_p2"])
                    if cfg.get("agent_turns_p1") is not None
                    and cfg.get("agent_turns_p2") is not None
-                   else int(cfg.get("agent_turns") or AGENT_TURNS_DEFAULT))
+                   else 1 + int(cfg.get("agent_turns") or AGENT_TURNS_DEFAULT))
         n_scen = sum(n_turns if s == "agent"
                      else len(cfg.get("ctx_list") or [])
                      for s in cfg.get("scenarios") or [])
@@ -615,6 +621,7 @@ async def bench_history():
                         "agent_turns": cfg.get("agent_turns"),
                         "agent_turns_p1": cfg.get("agent_turns_p1"),
                         "agent_turns_p2": cfg.get("agent_turns_p2"),
+                        "agent_cold_ctx": cfg.get("agent_cold_ctx"),
                         "note": cfg.get("note") or "",
                         "n_points": len(d.get("results", []))})
         except Exception:  # noqa: BLE001

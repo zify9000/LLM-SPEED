@@ -196,31 +196,37 @@ class TestBuildMessages(unittest.TestCase):
         self.assertEqual(filler0, 0)
 
     def test_agent_turn_sizes(self):
-        """Agent 轮次两阶段构成（ADR-0014）：阶段一 n1 轮短文本（N(1K) 正态
-        钳制到区间，升序）；阶段二 n2 轮长文本 ladder（8K 起逐轮翻倍）。
-        默认 4+4：短轮 256~2048、长轮 8K/16K/32K/64K。"""
-        from bench import AGENT_PHASE2_BASE, _gen_agent_turns
+        """Agent 轮次构成（ADR-0014/0015）：轮 1 冷启动（独立配置默认 10K，
+        阶段 0）；阶段一 n1 轮短文本暖轮（N(1K) 正态钳制到区间，升序）；
+        阶段二 n2 轮长文本 ladder（默认 4K 起逐轮翻倍）。默认 1+6+6：
+        长轮 4K/8K/16K/32K/64K/128K。"""
+        from bench import AGENT_COLD_CTX_DEFAULT, AGENT_PHASE2_BASE, _gen_agent_turns
         import random
-        plan = _gen_agent_turns(4, 4, 256, 2048, random.Random(42))
-        self.assertEqual(len(plan), 8)
+        plan = _gen_agent_turns(6, 6, 256, 2048, random.Random(42))
+        self.assertEqual(len(plan), 13)
+        self.assertEqual(plan[0], (AGENT_COLD_CTX_DEFAULT, 0), "轮 1 冷启动独立成段")
         p1 = [s for s, ph in plan if ph == 1]
         p2 = [s for s, ph in plan if ph == 2]
         self.assertTrue(all(256 <= s <= 2048 for s in p1), "短轮钳制在增量区间内")
         self.assertEqual(p1, sorted(p1), "短轮按增量长度升序")
-        self.assertEqual(p2, [8192, 16384, 32768, 65536], "长轮为 8K 起翻倍 ladder")
+        self.assertEqual(p2, [4096, 8192, 16384, 32768, 65536, 131072],
+                         "长轮为 4K 起翻倍 ladder（默认 4K~128K）")
         self.assertEqual(p2[0], AGENT_PHASE2_BASE)
         # 区间退化为单值时短轮增量恒定（测试/复现口径）
-        fixed = _gen_agent_turns(2, 2, 1024, 1024, random.Random(1))
-        self.assertEqual(fixed, [(1024, 1), (1024, 1), (8192, 2), (16384, 2)])
-        # 单阶段：n1=0 纯长文本链 / n2=0 纯短文本链
-        self.assertEqual(_gen_agent_turns(0, 2, 256, 2048, random.Random(2)),
-                         [(8192, 2), (16384, 2)])
-        only1 = _gen_agent_turns(1, 0, 256, 2048, random.Random(2))
-        self.assertEqual(len(only1), 1)
-        self.assertEqual(only1[0][1], 1)
+        fixed = _gen_agent_turns(2, 2, 1024, 1024, random.Random(1), p2_base=8192)
+        self.assertEqual(fixed, [(10240, 0), (1024, 1), (1024, 1),
+                                 (8192, 2), (16384, 2)])
+        # 冷启动上下文可配：独立于两阶段
+        cold = _gen_agent_turns(1, 0, 256, 2048, random.Random(2), cold_ctx=4096)
+        self.assertEqual(cold[0], (4096, 0))
+        self.assertEqual(len(cold), 2)
+        # 单阶段：n1=0 纯长文本链 / n2=0 纯短文本链（冷启动轮恒在）
+        self.assertEqual(_gen_agent_turns(0, 2, 256, 2048, random.Random(2),
+                                          p2_base=8192),
+                         [(10240, 0), (8192, 2), (16384, 2)])
         # 阶段二起始增量可配：ladder 从 p2_base 起翻倍
-        custom = _gen_agent_turns(1, 3, 256, 2048, random.Random(3), p2_base=4096)
-        self.assertEqual([s for s, _ in custom[1:]], [4096, 8192, 16384])
+        custom = _gen_agent_turns(1, 3, 256, 2048, random.Random(3), p2_base=8192)
+        self.assertEqual([s for s, _ in custom[2:]], [8192, 16384, 32768])
 
 
 class TestAggregateReps(unittest.TestCase):

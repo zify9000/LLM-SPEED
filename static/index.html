@@ -71,6 +71,8 @@ nav .tag{font-size:12px; color:var(--ink-4)}
 .head-actions select{width:auto; min-width:150px; padding:7px 10px; font-size:13px}
 #statusMsg{color:var(--ink-3); font-size:12.5px; min-height:20px; margin-bottom:12px; transition:color .15s}
 #statusMsg.err{color:var(--red)}
+/* 超窗跳过的常驻提示：status 行是瞬态的，跳过原因须留痕（point_skipped.msg） */
+#skipNotes{margin-top:8px; font-size:12px; line-height:1.7; color:var(--yellow)}
 
 /* ============ KPI 卡片行 ============ */
 .kpis{display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px}
@@ -251,11 +253,13 @@ td{padding:10px 12px; border-bottom:1px solid #F3F4F6; white-space:nowrap;
 .rt-scen-name{font-weight:600; color:var(--ink-2); padding:8px 12px; font-size:13px;
   border-bottom:1px solid var(--border); background:var(--bg)}
 /* 卡片内 agent 逐轮构成表：圆角描边容器包裹，对齐统计格/图表组件的视觉语言；
-   阶段一/阶段二左右两栏并排 */
+   冷启动平铺单行置顶，阶段一/阶段二左右两栏并排 */
 .sc-tt-grid{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:12px}
 .sc-tt-wrap{border:1px solid var(--border); border-radius:12px;
   padding:10px 14px 12px; background:#fff}
 .sc-tt-title{font-size:12.5px; font-weight:600; color:var(--ink-2); margin-bottom:6px}
+.sc-tt-cold{margin-top:12px; font-size:13px; color:var(--ink-2)}
+.sc-tt-cold .sc-tt-title{margin-bottom:2px}
 .sc-tt{width:100%; border-collapse:collapse; font-size:13px}
 .sc-tt th{color:var(--ink-4); font-weight:600; font-size:11.5px; letter-spacing:.03em;
   text-align:left; padding:4px 8px 8px; border-bottom:1px solid var(--border)}
@@ -410,26 +414,33 @@ tr.fade td{opacity:.45}
             </div>
           </div>
           <!-- Agent 调用与通用场景分区：变量体系不同（轮次/增量 vs 上下文档位），
-               勾选后才展开两阶段参数；与并发配置同用分割线区隔 -->
+               勾选后才展开链参数（冷启动+两阶段）；与并发配置同用分割线区隔 -->
           <div id="agentWrap">
             <label class="f m-sep">场景二：Agent</label>
             <div id="agentScen" class="ckrow"></div>
             <div id="agentParams" hidden>
+              <div><label class="f" for="fAgentColdCtx">冷启动：首轮上下文 tokens</label>
+                <input type="number" id="fAgentColdCtx" value="10240" min="1024" max="262144" step="1024"></div>
               <div class="grid2">
-                <div><label class="f" for="fAgentP1Turns">阶段一：短文本轮数</label>
-                  <input type="number" id="fAgentP1Turns" value="4" min="0" max="32"></div>
-                <div><label class="f" for="fAgentP2Turns">阶段二：长文本轮数</label>
-                  <input type="number" id="fAgentP2Turns" value="4" min="0" max="32"></div>
-              </div>
-              <div class="grid2">
+                <div><label class="f" for="fAgentP1Turns">阶段一：短文本轮数（暖启动）</label>
+                  <input type="number" id="fAgentP1Turns" value="6" min="0" max="32"></div>
                 <div><label class="f">阶段一每轮新增 tokens（区间）</label>
                   <div style="display:flex; gap:6px; align-items:center">
                     <input type="number" id="fAgentDeltaMin" value="256" min="256" max="32768" step="256">
                     <span class="hint" style="margin:0">~</span>
                     <input type="number" id="fAgentDeltaMax" value="2048" min="256" max="32768" step="256">
                   </div></div>
-                <div><label class="f" for="fAgentP2Base">阶段二起始增量 tokens</label>
-                  <input type="number" id="fAgentP2Base" value="8192" min="1024" max="65536" step="1024"></div>
+              </div>
+              <div class="grid2">
+                <div><label class="f" for="fAgentP2Turns">阶段二：长文本轮数</label>
+                  <input type="number" id="fAgentP2Turns" value="6" min="0" max="32"></div>
+                <div><label class="f" for="fAgentP2Base">阶段二起始增量</label>
+                  <select id="fAgentP2Base">
+                    <option value="4096" selected>4K</option>
+                    <option value="8192">8K</option>
+                    <option value="16384">16K</option>
+                    <option value="32768">32K</option>
+                  </select></div>
               </div>
             </div>
           </div>
@@ -515,6 +526,7 @@ tr.fade td{opacity:.45}
       <p class="v" id="kpiPoints">0 <small>/ 0</small></p>
       <p class="d">模型 × 场景 × 上下文 × 并发</p>
       <div class="progbar" id="progWrap" hidden><div id="progFill"></div></div>
+      <div id="skipNotes" hidden></div>
     </div>
   </div>
 
@@ -683,7 +695,7 @@ async function init(){
   if(savedProv && state.providers.some(p => p.name === savedProv)) sel.value = savedProv;
   else if(firstWithKey) sel.value = firstWithKey.name;
   // 场景分区渲染：通用场景（创意/代码）在档位区上方；Agent 调用独立分区，
-  // 勾选框自带，勾选后才展开两阶段参数
+  // 勾选框自带，勾选后才展开链参数（冷启动+两阶段）
   const agentScen = cfg.scenarios.find(s => s.key === "agent");
   $("#scenarioList").innerHTML = cfg.scenarios.filter(s => s.key !== "agent")
     .map(s => ckHtml("scen", s.key, s.label, true)).join("");
@@ -733,16 +745,16 @@ function ckHtml(group, val, label, on){
 }
 const checkedVals = g => [...document.querySelectorAll(`.ck input[data-g=${g}]:checked`)].map(i => i.value);
 /* 测试矩阵表单联动：Agent 与通用场景分区布局——没有勾选通用场景时隐藏
-   上下文档位区；Agent 分区勾选后才展开两阶段参数 */
+   上下文档位区；Agent 分区勾选后才展开链参数（冷启动+两阶段） */
 function syncMatrixForm(){
   const scens = checkedVals("scen");
   $("#ctxWrap").hidden = !scens.some(s => s !== "agent");
   $("#agentParams").hidden = !scens.includes("agent");
 }
-/* 测试矩阵配置持久化：场景/上下文档位/并发/Agent 两阶段参数存 localStorage，
+/* 测试矩阵配置持久化：场景/上下文档位/并发/Agent 链参数存 localStorage，
    刷新或重进页面自动恢复上一次选择（模型选择另有按 provider 的记忆） */
 const MATRIX_CFG_KEY = "llmspeed.matrixCfg";
-const MATRIX_INPUTS = [["#fAgentP1Turns","p1"],["#fAgentP2Turns","p2"],
+const MATRIX_INPUTS = [["#fAgentColdCtx","cold"],["#fAgentP1Turns","p1"],["#fAgentP2Turns","p2"],
   ["#fAgentDeltaMin","dmin"],["#fAgentDeltaMax","dmax"],["#fAgentP2Base","p2b"]];
 function saveMatrixCfg(){
   try{
@@ -1261,8 +1273,9 @@ function collectCfg(){
     repeats: Math.min(5, Math.max(1, +$("#fRepeats").value || 1)),
     timeout_s: +$("#fTimeout").value || 1200,
     thinking: $("#fThinking").value,
-    agent_turns_p1: Math.min(32, Math.max(0, +$("#fAgentP1Turns").value ?? 4)),
-    agent_turns_p2: Math.min(32, Math.max(0, +$("#fAgentP2Turns").value ?? 4)),
+    agent_cold_ctx: Math.min(262144, Math.max(1024, +$("#fAgentColdCtx").value || 10240)),
+    agent_turns_p1: Math.min(32, Math.max(0, +$("#fAgentP1Turns").value ?? 6)),
+    agent_turns_p2: Math.min(32, Math.max(0, +$("#fAgentP2Turns").value ?? 6)),
     agent_phase2_base: Math.min(65536, Math.max(1024, +$("#fAgentP2Base").value || 4096)),
     agent_turn_delta: [Math.min(dMin, dMax), Math.max(dMin, dMax)],
     note: $("#fNote").value.trim(),
@@ -1283,9 +1296,10 @@ async function startRun(){
   state.points.clear(); state.maxSeq = -1; state.activeReqs.clear();
   state.preMeasured.clear();
   state.donePoints = 0;
+  clearSkipNotes();
   saveMatrixCfg();   // 启动即持久化当前矩阵选择，兜底未经 change 的改动
   state.totalPoints = cfg.models.length * cfg.concurrencies.length *
-    cfg.scenarios.reduce((n, s) => n + (s === "agent" ? cfg.agent_turns_p1 + cfg.agent_turns_p2 : cfg.ctx_list.length), 0);
+    cfg.scenarios.reduce((n, s) => n + (s === "agent" ? 1 + cfg.agent_turns_p1 + cfg.agent_turns_p2 : cfg.ctx_list.length), 0);
   $("#liveTable tbody").innerHTML = "";
   renderAll(); resetKpis();
   $("#progWrap").hidden = false;
@@ -1373,6 +1387,17 @@ function setPill(msg, cls){
   m.textContent = cls==="err" ? msg : (cls==="run" ? "" : msg);
   m.className = cls==="err" ? "err" : "";
 }
+function clearSkipNotes(){
+  const box = $("#skipNotes");
+  box.innerHTML = ""; box.hidden = true;
+}
+function addSkipNote(msg){
+  const box = $("#skipNotes");
+  box.hidden = false;
+  const div = document.createElement("div");
+  div.textContent = "⚠ " + msg;
+  box.appendChild(div);
+}
 function onEvent(ev){
   if(ev.seq != null){
     if(ev.seq <= state.maxSeq) return;
@@ -1382,7 +1407,9 @@ function onEvent(ev){
     // 权威运行配置由服务端随事件流首发（回放即得）：卡片信息不依赖发起页本地状态
     case "cfg": state.cfg = {...(ev.cfg || {}), started_at: ev.started_at}; break;
     case "status": if(state.running) $("#statusMsg").textContent = "▶ " + ev.msg; break;
-    case "point_skipped": state.donePoints += ev.count || 1; bumpProgress(); break;
+    case "point_skipped": state.donePoints += ev.count || 1; bumpProgress();
+      if(ev.msg) addSkipNote(ev.msg);   // 超窗跳过原因常驻展示，不再被瞬态状态行吞没
+      break;
     case "tick": updateLive(ev); break;
     case "point": addPoint(ev.point); markLiveDone(ev.point); break;
     case "done": finishRun("测速完成"); break;
@@ -1566,14 +1593,22 @@ function renderAll(){
 }
 
 /* ---------------- 结果明细表（按场景拆表：通用场景与 Agent 链列结构不同） ---------------- */
+/* 冷启动轮判别：新口径 turn_phase=0（轮 0）；旧存档无 turn_phase=0，回退
+   「轮 1 即冷启动」——新旧暖轮 turn/phase 组合会撞车，靠存档 cfg 有无
+   agent_cold_ctx 区分版本（ADR-0015） */
+function isColdTurn(p){
+  if(p.turn == null) return false;
+  if(state.cfg && state.cfg.agent_cold_ctx != null) return p.turn_phase === 0;
+  return p.turn_phase === 0 || p.turn === 1;
+}
 /* 缓存命中三态判别：reported=服务端回传真值；est=未回传但 TTFT 相对冷轮走平
    （有缓存迹象，链内差分估算）；unknown=未回传且无迹象（不假设命中）；
-   cold=轮1 冷启动（构造保证无命中）；非链点返回 null */
+   cold=轮 0 冷启动（构造保证无命中）；非链点返回 null */
 function hitStateOf(p){
   if(p.turn == null) return null;
   const reported = p.cache_reported ?? (p.reqs||[]).some(r => r.cache_reported);
   if(reported) return "reported";
-  if(p.turn === 1) return "cold";
+  if(isColdTurn(p)) return "cold";
   return p.cache_hit_tokens == null ? "unknown" : "est";
 }
 function renderResultTable(){
@@ -1617,7 +1652,7 @@ function pointRow(p, isAgent, showTotal){
     const isTurn = p.turn != null;
     const phase2 = isTurn && (p.turn_phase ?? (p.turn_delta >= 4096 ? 2 : 1)) === 2;
     const turnCell = isTurn
-      ? `轮 ${p.turn}${p.turn === 1 ? " <small style='color:var(--yellow)'>冷</small>" : ""}${phase2 ? " <small style='color:var(--ink-4)'>长文本</small>" : ""}`
+      ? `轮 ${p.turn}${isColdTurn(p) ? " <small style='color:var(--yellow)'>冷</small>" : ""}${phase2 ? " <small style='color:var(--ink-4)'>长文本</small>" : ""}`
       : fmtK(p.ctx_target);
     const hs = hitStateOf(p);
     const hitPct = (p.prompt_tokens && p.cache_hit_tokens) ? Math.round(p.cache_hit_tokens / p.prompt_tokens * 100) : 0;
@@ -1638,7 +1673,7 @@ function pointRow(p, isAgent, showTotal){
     const decCorrected = p.max_gap_s > 3 && p.decode_tok_s_adj && p.decode_tok_s_adj !== p.decode_tok_s;
     const decTitle = decCorrected ? ` title="已扣除空窗（原始窗口含最长 ${esc(p.max_gap_s)}s 停滞，毛值 ${esc(p.decode_tok_s ?? "-")}）"` : "";
     const ttTitle = isTurn
-      ? (p.turn === 1 ? ` title="冷启动：全量 prefill（链首轮无前缀缓存）"`
+      ? (isColdTurn(p) ? ` title="冷启动：全量 prefill（链首轮无前缀缓存）"`
                       : ` title="暖启动：命中前缀缓存，仅增量 prefill"`) : "";
     const colsPre = isAgent
       ? `<td>${turnCell}</td><td>${p.concurrency}</td><td>${p.prompt_tokens ?? "-"}</td><td>${missCell}</td><td>${hitCell}</td>`
@@ -1762,7 +1797,7 @@ function turnTable(scPts){
     const est = hs === "est" ? "≈" : "";
     const phase2 = (p.turn_phase ?? (p.turn_delta >= 4096 ? 2 : 1)) === 2;
     return `<tr class="${p.all_ok ? "" : "err"}">`
-      + `<td>轮 ${p.turn}${p.turn === 1 ? " <small style='color:var(--yellow)'>冷启动</small>" : ""}${phase2 ? " <small style='color:var(--ink-4)'>长文本</small>" : ""}${multi ? ` · 并发${p.concurrency}` : ""}</td>`
+      + `<td>轮 ${p.turn}${isColdTurn(p) ? " <small style='color:var(--yellow)'>冷启动</small>" : ""}${phase2 ? " <small style='color:var(--ink-4)'>长文本</small>" : ""}${multi ? ` · 并发${p.concurrency}` : ""}</td>`
       + `<td>${p.turn_delta != null ? "+" + fmtK(p.turn_delta) : "-"}</td>`
       + `<td>${p.prompt_tokens != null ? fmtK(p.prompt_tokens) : "-"}</td>`
       + (hs === "unknown" ? `<td style="color:var(--ink-4)">未回传</td><td>—</td><td>—</td>`
@@ -1778,32 +1813,47 @@ function turnTable(scPts){
     + (anyEst ? `<div class="hint">≈ 网关未回传缓存命中字段，但 TTFT 显著低于全量重算预期（有缓存迹象），命中/增量按链内差分估算</div>` : "")
     + (anyMiss ? `<div class="hint">「未回传」= 网关未回传且 TTFT 随全量 prompt 增长（无缓存迹象），命中未知、Prefill 按全量口径；真值需服务端/网关透出 cached_tokens</div>` : "");
 }
-/* 卡片内 agent 逐轮构成表（导出 PNG 随卡片走）：阶段一/阶段二左右两栏，
-   每栏 轮次 | 上下文长度 | 缓存命中 | 未命中 tokens */
+/* 卡片内 agent 逐轮构成表（导出 PNG 随卡片走）：冷启动平铺单行道出，
+   阶段一/阶段二左右两栏对称，每栏 轮次 | 上下文长度 | 缓存命中 | 未命中 tokens */
 function cardTurnTable(pts){
   const rows = pts.filter(p => p.turn != null)
     .sort((a,b) => a.turn - b.turn || a.concurrency - b.concurrency);
   if(!rows.length) return "";
   const multi = new Set(rows.map(p => p.concurrency)).size > 1;
+  // 旧存档无 turn_phase 字段：回退按增量大小判别（冷启动混在阶段一，无法区分）
   const phaseOf = p => p.turn_phase ?? (p.turn_delta >= 4096 ? 2 : 1);
+  const statOf = p => {   // 一轮的 上下文长度/缓存命中/未命中 三值（hitStateOf 三态）
+    const hs = hitStateOf(p);
+    const hit = p.cache_hit_tokens || 0;
+    const hitTxt = hs === "unknown" ? "未回传" : (hs === "est" ? "≈" : "") + fmtK(hit);
+    const missTxt = hs === "unknown"
+      ? (p.prompt_tokens != null ? fmtK(p.prompt_tokens) + " 全量" : "-")
+      : (hs === "est" ? "≈" : "") + (p.prompt_tokens != null
+          ? fmtK(Math.max(p.prompt_tokens - hit, 0)) : "-");
+    const ctxTxt = p.prompt_tokens != null ? fmtK(p.prompt_tokens) : "-";
+    return {hitTxt, missTxt, ctxTxt};
+  };
   const mk = (list, title) => {
     if(!list.length) return "";
     const body = list.map(p => {
-      const hs = hitStateOf(p);
-      const hit = p.cache_hit_tokens || 0;
-      const hitTxt = hs === "unknown" ? "未回传" : (hs === "est" ? "≈" : "") + fmtK(hit);
-      const missTxt = hs === "unknown"
-        ? (p.prompt_tokens != null ? fmtK(p.prompt_tokens) + " 全量" : "-")
-        : (hs === "est" ? "≈" : "") + (p.prompt_tokens != null
-            ? fmtK(Math.max(p.prompt_tokens - hit, 0)) : "-");
-      return `<tr><td>轮 ${p.turn}${p.turn === 1 ? " 冷" : ""}${multi ? ` · 并发${p.concurrency}` : ""}</td>`
-        + `<td>${p.prompt_tokens != null ? fmtK(p.prompt_tokens) : "-"}</td>`
-        + `<td>${hitTxt}</td><td>${missTxt}</td></tr>`;
+      const c = statOf(p);
+      return `<tr><td>轮 ${p.turn}${isColdTurn(p) ? " 冷" : ""}${multi ? ` · 并发${p.concurrency}` : ""}</td>`
+        + `<td>${c.ctxTxt}</td>`
+        + `<td>${c.hitTxt}</td><td>${c.missTxt}</td></tr>`;
     }).join("");
     return `<div class="sc-tt-wrap"><div class="sc-tt-title">${title}</div>`
       + `<table class="sc-tt"><thead><tr><th>轮次</th><th>上下文长度</th><th>缓存命中</th><th>未命中 tokens</th></tr></thead><tbody>${body}</tbody></table></div>`;
   };
-  return `<div class="sc-tt-grid">${mk(rows.filter(p => phaseOf(p) === 1), "阶段一 · 短文本轮")}${mk(rows.filter(p => phaseOf(p) === 2), "阶段二 · 长文本轮")}</div>`;
+  // 冷启动只有一轮（每并发一条），平铺单行不占用栏位，保持阶段一/二左右对称
+  const cold = rows.filter(p => phaseOf(p) === 0);
+  const coldLine = cold.length
+    ? `<div class="sc-tt-wrap sc-tt-cold"><div class="sc-tt-title">冷启动</div>`
+      + cold.map(p => { const c = statOf(p);
+          return `<div>轮 ${p.turn}${multi ? ` · 并发${p.concurrency}` : ""}：上下文长度 ${c.ctxTxt} · 缓存命中 ${c.hitTxt} · 未命中 ${c.missTxt}</div>`;
+        }).join("") + `</div>`
+    : "";
+  return coldLine
+    + `<div class="sc-tt-grid">${mk(rows.filter(p => phaseOf(p) === 1), "阶段一 · 短文本轮（暖启动）")}${mk(rows.filter(p => phaseOf(p) === 2), "阶段二 · 长文本轮")}</div>`;
 }
 
 /* ---------------- 测速卡片（全场景合并） ---------------- */
@@ -1879,15 +1929,16 @@ function cardHTML(model){
     const isAgent = pts.some(p => p.turn != null);   // agent 连续任务链点
     const peakAt = pk => pk?.turn != null ? "轮 " + pk.turn : fmtK(pk?.ctx);
     const cells = [];
-    // agent 链不展示「Prefill 范围」与「冷启动 TTFT」（增量口径逐轮随增量大小
-    // 抖动，范围无意义；冷启动单点值在逐轮构成表/图表里更清楚）
+    // agent 链不展示「Prefill 范围」（增量口径逐轮随增量大小抖动，范围无意义；
+    // 冷启动 TTFT 单独成格，见下方 isAgent 分支）
     if(s.preRange && !isAgent) cells.push(`<div class="sc-stat s1"><div class="k">Prefill 速度范围</div>
       <div class="n">${fmtNum(s.preRange[0])}–${fmtNum(s.preRange[1])}<small> tok/s</small></div>
       <div class="t">峰值 @ ${peakAt(s.prePeak)}</div></div>`);
     if(isAgent){
-      // 两阶段口径：阶段一（短文本轮，含冷启动）看 TTFT 均值——高频小步循环的
-      // 单步延迟；阶段二（长文本 ladder 轮）看增量 Prefill 均值——偶发大上下文
-      // 灌入的处理能力。副标题给该阶段命中率（回传/差分估算）
+      // 分段口径：冷启动轮（阶段 0，独立配置默认 10K）看全量 TTFT——首轮
+      // 无前缀缓存的真实代价；阶段一（短文本暖轮）看 TTFT 均值——高频小步
+      // 循环的单步暖延迟；阶段二（长文本 ladder 轮）看增量 Prefill 均值——
+      // 偶发大上下文灌入的处理能力。副标题给该阶段命中率（回传/差分估算）
       const phaseOf = p => p.turn_phase ?? (p.turn_delta >= 4096 ? 2 : 1);
       const hitPct = arr => {
         // 未回传且无缓存迹象的点（cache_hit_tokens=null）不参与命中率统计——
@@ -1899,13 +1950,18 @@ function cardHTML(model){
         return (rep ? "前缀缓存命中率均值 ≈ " : "缓存命中率（差分估算）≈ ")
           + Math.round(hs.reduce((a,b)=>a+b,0)/hs.length*100) + "%";
       };
+      const p0 = pts.filter(p => p.all_ok && phaseOf(p) === 0);
       const p1 = pts.filter(p => p.all_ok && phaseOf(p) === 1);
       const p2 = pts.filter(p => p.all_ok && phaseOf(p) === 2);
+      const p0Ts = p0.map(p => p.ttft_net_s ?? p.ttft_s).filter(v => v != null);
       const p1Ts = p1.map(p => p.ttft_net_s ?? p.ttft_s).filter(v => v != null);
       const p2Pre = p2.map(p => preOf(p)).filter(v => v != null);
+      if(p0Ts.length) cells.push(`<div class="sc-stat s4"><div class="k">冷启动 TTFT</div>
+        <div class="n">${round1(p0Ts.reduce((a,b)=>a+b,0)/p0Ts.length)}<small> s</small></div>
+        <div class="t">首轮全量 prefill（无前缀缓存）</div></div>`);
       if(p1Ts.length) cells.push(`<div class="sc-stat s3"><div class="k">阶段一 TTFT 均值</div>
         <div class="n">${round1(p1Ts.reduce((a,b)=>a+b,0)/p1Ts.length)}<small> s</small></div>
-        <div class="t">短文本轮 × ${p1Ts.length}${hitPct(p1) ? " · " + hitPct(p1) : ""}</div></div>`);
+        <div class="t">短文本暖轮 × ${p1Ts.length}${hitPct(p1) ? " · " + hitPct(p1) : ""}</div></div>`);
       if(p2Pre.length) cells.push(`<div class="sc-stat s5"><div class="k">阶段二 Prefill 均值</div>
         <div class="n">${fmtNum(p2Pre.reduce((a,b)=>a+b,0)/p2Pre.length)}<small> tok/s</small></div>
         <div class="t">长文本轮 × ${p2Pre.length} · 增量口径${hitPct(p2) ? " · " + hitPct(p2) : ""}</div></div>`);
@@ -2015,8 +2071,9 @@ function historyLabel(h){
   // agent 场景以任务轮次为变量（不以下文档位），标题给链规模；混合场景时
   // 上下文档位仍只作用于其他场景
   const agentOnly = (h.scenarios||[]).length === 1 && h.scenarios[0] === "agent";
-  const nTurns = (h.agent_turns_p1 != null && h.agent_turns_p2 != null)
-    ? h.agent_turns_p1 + h.agent_turns_p2 : (h.agent_turns || 8);
+  const nTurns = ((h.agent_turns_p1 != null && h.agent_turns_p2 != null)
+    ? h.agent_turns_p1 + h.agent_turns_p2 : (h.agent_turns || 12))
+    + (h.agent_cold_ctx != null ? 1 : 0);   // 新口径冷启动独立成轮；旧存档无该字段
   const ctx = agentOnly ? `${nTurns} 轮链`
     : ctxs.length > 1 ? `${fmtK(ctxs[0])}~${fmtK(ctxs[ctxs.length-1])}`
     : ctxs.length === 1 ? fmtK(ctxs[0]) : "";
@@ -2070,6 +2127,7 @@ function enterRun(rid, totalPoints){
   state.points.clear(); state.maxSeq = -1; state.activeReqs.clear();
   state.preMeasured.clear();
   state.donePoints = 0; state.totalPoints = totalPoints || 0;
+  clearSkipNotes();
   $("#liveTable tbody").innerHTML = "";
   renderAll(); resetKpis();
   $("#progWrap").hidden = false;
@@ -2126,6 +2184,7 @@ async function delConfirm(){
 function hydrateArchive(d){
   state.runId = d.run_id;   // 下载 PNG 文件名跟随当前数据所属 run
   state.points.clear();
+  clearSkipNotes();   // 存档不含跳过事件，旧提示不残留
   (d.results||[]).forEach(p => state.points.set(pointKey(p), p));
   state.donePoints = state.points.size;
   state.totalPoints = state.points.size;

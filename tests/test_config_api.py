@@ -224,6 +224,19 @@ class TestValidateBenchCfg(unittest.TestCase):
             self.assertEqual(cm.exception.status_code, 400, bad_base)
         server._validate_bench_cfg(self._cfg(agent_phase2_base=8192))
 
+    def test_agent_cold_ctx_validated(self):
+        """冷启动轮上下文独立配置（ADR-0015）：agent_cold_ctx 为
+        1024~262144 的整数；越界/类型错 400，缺省放行（引擎取默认 10K）。"""
+        bad = [self._cfg(agent_cold_ctx=100), self._cfg(agent_cold_ctx=300000),
+               self._cfg(agent_cold_ctx=1.5), self._cfg(agent_cold_ctx=True),
+               self._cfg(agent_cold_ctx="10240")]
+        for cfg in bad:
+            with self.assertRaises(HTTPException) as cm:
+                server._validate_bench_cfg(cfg)
+            self.assertEqual(cm.exception.status_code, 400, cfg)
+        server._validate_bench_cfg(self._cfg(agent_cold_ctx=10240))
+        server._validate_bench_cfg(self._cfg())   # 缺省放行
+
 
 class _FakeBenchRun:
     """鸭式 BenchRun：只记录装配结果，不启动任何真实测速/网络。"""
