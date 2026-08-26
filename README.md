@@ -22,9 +22,9 @@
 
 ## 🖼️ 测速卡片示例
 
-| DeepSeek 云端 · 0K~256K | Kimi 云端 · 0K~128K |
+| OpenCode Go 云端 · 0K~256K | 本地部署（LiteLLM 网关）· 0K~64K |
 | --- | --- |
-| ![deepseek-v4-pro 测速卡片](case/official-deepseek-v4-pro.png) | ![k3-256k 测速卡片](case/official-k3-256k.png) |
+| ![opencode-go deepseek-v4-flash 测速卡片](case/2-opencode-go-deepseek-v4-flash.png) | ![本地部署 deepseek-v4-flash 测速卡片](case/3-%E6%9C%AC%E5%9C%B0%E9%83%A8%E7%BD%B2-deepseek-v4-flash.png) |
 
 ## 🚀 三分钟上手
 
