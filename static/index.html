@@ -1834,11 +1834,11 @@ function buildChartOpt(pts, metric, title, forExport){
     tooltip:{trigger:"axis", backgroundColor:"#fff", borderColor:"#E5E7EB",
       textStyle:{color:"#111827", fontSize:12}, extraCssText:"box-shadow:0 4px 12px rgba(0,0,0,.08)",
       valueFormatter: v => v==null ? "-" : round1(v).toLocaleString("en-US")},
-    // 图例独占一行排在标题下方：同处 top 行时 scroll 型图例（多系列触发翻页器）
-    // 会横贯顶部压到左上角标题；scroll 型恒为单行，grid 顶距无需随系列数变化
+    // 图例独占一行排在标题下方、右对齐：同处 top 行时 scroll 型图例（多系列触发
+    // 翻页器）会横贯顶部压到左上角标题；scroll 型恒为单行，grid 顶距无需随系列数变化
     legend: forExport
-      ? {textStyle:{color:"#6B7280"}, top:30, left:12, right:8}
-      : {textStyle:{color:"#6B7280"}, top:30, left:12, right:8, type:"scroll"},
+      ? {textStyle:{color:"#6B7280"}, top:30, right:12}
+      : {textStyle:{color:"#6B7280"}, top:30, right:12, type:"scroll"},
     grid:{left:64, right:56, top: forExport ? 40 + 22*legendLines : 64, bottom:40},
     xAxis:{type:"category", name:isAgent?"轮次":"上下文", nameLocation:"middle", nameGap:26, data:cats,
       nameTextStyle:{color:"#6B7280"}, axisLabel:{color:"#6B7280"},
