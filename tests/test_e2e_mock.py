@@ -3,15 +3,17 @@
 覆盖：cfg 事件首发且脱敏、RTT 净口径与 mock 设定一致（±20%）、双并发总吞吐、
 mock 运行不落盘、SSE 注释心跳下 prefill 估值帧不饿死（含 0.95s 节流边界）、
 响应头延迟型网关估值帧覆盖等响应头阶段、探测期停止即时生效、无前缀 chat 端点
-回退锁定、repeats=3 中位聚合、输入系数校准命中目标、temperature 拒参锁定、
+回退锁定、repeats=3 均值聚合、输入系数校准命中目标、temperature 拒参锁定、
 超窗 point_skipped、/models 慢响应下基线期停止、起步突发滑窗上下界、
 无正文/裸断连请求级错误、串行 prefill 总吞吐置空、无 usage 估算兜底、
-超窗删减上下文重试、agent 连续任务链逐轮出点（前缀缓存命中/无缓存退化）。
+超窗删减上下文重试、agent 连续任务链逐轮出点（前缀缓存命中/无缓存退化）、
+输出上限治理（忽略 max_tokens 时断流并改用 max_completion_tokens、新名被 400
+拒收时回退防振荡、system 提示长度引导注入）。
 运行：python3 -m unittest tests.test_e2e_mock -v
 """
 import asyncio
-import logging
 import os
+import re
 import socket
 import threading
 import time
@@ -24,13 +26,66 @@ os.environ.setdefault("MOCK_CPT", "1.8")
 
 import mock_server          # noqa: E402
 import uvicorn              # noqa: E402
-from bench import BenchRun  # noqa: E402
+from bench import BenchRun, SCENARIOS  # noqa: E402
 
 
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def _start_raw_die_server(port: int, n_chunks: int = 5) -> socket.socket:
+    """原始 socket HTTP 服务（模拟裸断连网关，绕过 ASGI 的干净收口）：
+    GET 返回模型列表（RTT 基线与 /v1 前缀探测用）；POST chat 流出 n_chunks 个
+    SSE 块后，chunked 流不发终止块直接 FIN——httpx 判「不完整 chunked 读」。
+    新版 uvicorn/starlette 会把 StreamingResponse 生成器异常干净收口（客户端
+    视作正常结束），mock 进程内已无法模拟断连，故用原始 socket。"""
+
+    def _handle(conn: socket.socket):
+        with conn:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    return
+                data += chunk
+            head, _, rest = data.partition(b"\r\n\r\n")
+            if not head.startswith(b"POST"):
+                body = b'{"data":[{"id":"raw-llm"}]}'
+                conn.sendall(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n"
+                             b"content-length: %d\r\nx-mock-server: 1\r\n\r\n%s"
+                             % (len(body), body))
+                return
+            m = re.search(rb"content-length:\s*(\d+)", head, re.I)   # 读全请求体再回
+            need = int(m.group(1)) if m else 0
+            while len(rest) < need:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    return
+                rest += chunk
+            conn.sendall(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n"
+                         b"transfer-encoding: chunked\r\nx-mock-server: 1\r\n\r\n")
+            frame = 'data: {"choices":[{"delta":{"content":"测"}}]}\n\n'.encode()
+            for _ in range(n_chunks):
+                conn.sendall(b"%x\r\n%s\r\n" % (len(frame), frame))
+                time.sleep(0.01)
+            # 裸断连：不发 chunked 终止块/[DONE]/usage，with 收口直接关连接
+
+    def _loop():
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=_handle, args=(conn,), daemon=True).start()
+
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", port))
+    srv.listen(8)
+    threading.Thread(target=_loop, daemon=True).start()
+    return srv
 
 
 class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
@@ -487,9 +542,9 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(points), 1)
         self.assertTrue(points[0]["all_ok"])
 
-    async def test_repeats_median_aggregation(self):
-        """repeats=3 全链路：n_reps==3、reps 摘要 3 条、点级 decode_tok_s
-        为三次复测的中位值（ADR-0006 聚合口径）。"""
+    async def test_repeats_mean_aggregation(self):
+        """repeats=3 全链路：n_reps==3、reps 摘要 3 条（含每次全字段口径）、
+        点级 decode_tok_s 为三次复测的均值（ADR-0017 聚合口径）。"""
         _, events = await self._run_and_collect(max_tokens=32, repeats=3)
         points = [e["point"] for e in events if e.get("type") == "point"]
         self.assertEqual(len(points), 1)
@@ -497,9 +552,9 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(p["n_reps"], 3)
         self.assertEqual(len(p["reps"]), 3)
         self.assertTrue(all(r["all_ok"] for r in p["reps"]))
-        median = sorted(r["decode_tok_s"] for r in p["reps"])[1]
-        self.assertEqual(p["decode_tok_s"], median,
-                         "点级 decode_tok_s 应取三次复测中位值")
+        mean = round(sum(r["decode_tok_s"] for r in p["reps"]) / len(p["reps"]), 1)
+        self.assertEqual(p["decode_tok_s"], mean,
+                         "点级 decode_tok_s 应取三次复测均值")
 
     async def test_cpt_calibration_hits_target(self):
         """MOCK_CPT=3.9（与默认估算 1.8 偏差超一倍）：探测校准输入系数后
@@ -772,19 +827,34 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
         self.assertIn("未收到任何输出 token", p["reqs"][0]["err"])
 
     async def test_die_at_request_error(self):
-        """MOCK_DIE_AT=5：流出 5 个 token 后裸断连（无 usage/[DONE]）→
-        请求级 err、点级 all_ok=False（模拟服务端/链路中途崩断）。"""
-        old = mock_server.DIE_AT
-        mock_server.DIE_AT = 5
-        # 裸断连会让 uvicorn 打印 ASGI 异常栈（预期行为），测试期临时压住
-        log = logging.getLogger("uvicorn.error")
-        old_level = log.level
-        log.setLevel(logging.CRITICAL)
+        """裸断连（原始 socket 服务：流出 5 个 SSE 块后 chunked 流不发终止块
+        直接 FIN）→ 请求级 err、点级 all_ok=False（模拟服务端/链路中途崩断）。
+        MOCK_DIE_AT 的生成器抛错在新版 uvicorn/starlette 下会被干净收口
+        （客户端视作正常结束），已无法模拟真断连，改用原始 socket 模拟。"""
+        port = _free_port()
+        srv = _start_raw_die_server(port)
         try:
-            _, events = await self._run_and_collect(max_tokens=32)
+            run = BenchRun({
+                "gateway_url": f"http://127.0.0.1:{port}",
+                "models": ["raw-llm"], "scenarios": ["creative"],
+                "ctx_list": [0], "concurrencies": [1],
+                "max_tokens": 32, "repeats": 1, "timeout_s": 30,
+                "thinking": "disabled",
+            })
+            q: asyncio.Queue = asyncio.Queue()
+            run.subs.add(q)
+            task = asyncio.create_task(run.run())
+            events = []
+            try:
+                while True:
+                    ev = await asyncio.wait_for(q.get(), timeout=30)
+                    if ev is None:
+                        break
+                    events.append(ev)
+            finally:
+                await task
         finally:
-            mock_server.DIE_AT = old
-            log.setLevel(old_level)
+            srv.close()
         points = [e["point"] for e in events if e.get("type") == "point"]
         self.assertEqual(len(points), 1)
         p = points[0]
@@ -833,6 +903,62 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
         # 兜底口径：16 字符正文 ÷ 创意场景 out_cpt 1.5 ≈ 11（≠ 真实 16）
         self.assertEqual(r["out_tokens"], round(16 / 1.5))
         self.assertEqual(run.chunk_calib, {}, "无 usage 时 chunk_calib 不得播种")
+
+    async def test_max_tokens_ignored_flip_and_cut(self):
+        """MOCK_IGNORE_MAX_TOKENS=1（opencode zen 行为：忽略旧名、认新名）：
+        探测请求（cap 64）输出跑飞 4× → 客户端断流兜底并判定改用
+        max_completion_tokens；后续正式点被服务端按新名精确截断（ADR-0016）。"""
+        old = mock_server.IGNORE_MT
+        mock_server.IGNORE_MT = "1"
+        try:
+            run, events = await self._run_and_collect(max_tokens=16)
+        finally:
+            mock_server.IGNORE_MT = old
+        self.assertEqual(run.mt_param.get("mock-llm-7b"), "max_completion_tokens",
+                         "探测断流后应判定改用新参数名")
+        statuses = [e["msg"] for e in events if e.get("type") == "status"]
+        self.assertTrue(any("改用 max_completion_tokens" in s for s in statuses),
+                        f"应有参数名翻转提示: {statuses}")
+        points = [e["point"] for e in events if e.get("type") == "point"]
+        self.assertEqual(len(points), 1)
+        self.assertTrue(points[0]["all_ok"], f"翻转后点应成功: {points[0].get('reqs')}")
+        self.assertEqual(points[0]["reqs"][0]["out_tokens"], 16,
+                         "新名生效后服务端应精确截断在 max_tokens")
+
+    async def test_mct_rejected_falls_back_no_oscillation(self):
+        """IGNORE_MT + REJECT_MCT（两种参数名都不生效的极端网关）：探测断流
+        翻转新名 → 正式请求 400 → 回退旧名并锁定（mt_mct_rejected）→ 之后只
+        断流兜底不再翻转（防振荡），点仍成功、finish=client_cut（ADR-0016）。"""
+        old_i, old_r = mock_server.IGNORE_MT, mock_server.REJECT_MCT
+        mock_server.IGNORE_MT, mock_server.REJECT_MCT = "1", "1"
+        try:
+            run, events = await self._run_and_collect(max_tokens=16)
+        finally:
+            mock_server.IGNORE_MT, mock_server.REJECT_MCT = old_i, old_r
+        self.assertEqual(run.mt_param.get("mock-llm-7b"), "max_tokens",
+                         "新名被 400 拒收后应回退旧名")
+        self.assertIn("mock-llm-7b", run.mt_mct_rejected)
+        statuses = [e["msg"] for e in events if e.get("type") == "status"]
+        self.assertTrue(any("已回退 max_tokens" in s for s in statuses),
+                        f"应有新名 400 回退提示: {statuses}")
+        points = [e["point"] for e in events if e.get("type") == "point"]
+        self.assertTrue(points[0]["all_ok"], f"断流兜底下点应成功: {points[0].get('reqs')}")
+        self.assertEqual(points[0]["reqs"][0]["finish"], "client_cut",
+                         "两种参数名都失效时应以客户端断流收口")
+        # 断流把输出收在 2× 上限附近（估算口径），而非跑飞 4×（64）
+        self.assertLessEqual(points[0]["reqs"][0]["out_tokens"], 16 * 2 + 8)
+
+    async def test_out_hint_injected_into_system_prompt(self):
+        """ADR-0016 防线 2：system 提示注入输出字数上限（max_tokens × out_cpt
+        先验 × 1.2）——零输入档 sent_chars 应恰好多出引导文案长度。"""
+        _, events = await self._run_and_collect(max_tokens=16)
+        points = [e["point"] for e in events if e.get("type") == "point"]
+        self.assertEqual(len(points), 1)
+        sc = SCENARIOS["creative"]
+        hint = "\n\n" + sc["out_hint"].format(limit=int(16 * sc["out_cpt"] * 1.2))
+        expect = len(sc["system"]) + len(hint) + len(sc["zero_instruction"])
+        self.assertEqual(points[0]["reqs"][0]["sent_chars"], expect,
+                         "system 提示应恰好追加输出长度引导文案")
 
 
 if __name__ == "__main__":

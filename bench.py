@@ -270,6 +270,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "filler_pool": _CREATIVE_POOL,
         "in_cpt": 1.5,             # 输入系数先验：中文散文实测 ~1.5 字符/token（探测校准前的兜底，ADR-0006）
         "out_cpt": 1.5,            # 输出估算：中文 ~1.5 字符/token（仅 usage 缺失时的兜底）
+        "out_hint": "篇幅要求：全文控制在 {limit} 字以内，不得超出。",   # 输出长度引导（ADR-0016）
         "max_tokens_default": 1024,
     },
     "code": {
@@ -287,6 +288,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "filler_blocks": None,     # 导入后由 _load_code_pool() 填充（模块块级；corpus 优先，内置池兜底）
         "in_cpt": 3.9,             # 输入系数先验：llama.cpp C/C++ 实测 ~3.9 字符/token（探测校准前的兜底，ADR-0006）
         "out_cpt": 3.4,            # 输出估算：C/C++ ~3.4 字符/token（仅 usage 缺失时的兜底）
+        "out_hint": "篇幅要求：回复总长度控制在 {limit} 字符以内，不得超出。",   # 输出长度引导（ADR-0016）
         "max_tokens_default": 1024,
     },
     "agent": {
@@ -310,6 +312,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "filler_pool": _AGENT_POOL,  # 导入后由 _load_agent_pool() 覆盖（corpus 优先，内置块兜底）
         "in_cpt": 3.5,             # 输入系数先验：英文代码/日志/JSON 混合轨迹 ~3.5 字符/token（探测校准前的兜底）
         "out_cpt": 3.4,            # 输出估算：命令/补丁类英文 ~3.4 字符/token（仅 usage 缺失时的兜底）
+        "out_hint": "Length limit: the entire reply must stay within {limit} characters.",   # 输出长度引导（ADR-0016）
         "max_tokens_default": 512,  # agent 单步动作短，512 足够覆盖思考+一个动作
     },
 }
@@ -327,6 +330,17 @@ CTX_HEADROOM = 1024
 # 仍不够时，临近上下文上限的点位会因输出随机性被服务端判 context exceeded
 # 直接失败。此时按原填充长度逐档保留比例掐掉中段语料重试，而非判失败
 CTX_RETRY_KEEP = (0.75, 0.5, 0.3)
+
+# 输出长度三道防线（ADR-0016，opencode zen 忽略 max_tokens 致输出跑飞至
+# 131K tokens 的教训）：
+# 1) 参数名实测判定：探测/正式请求观察截断是否生效，旧名 max_tokens 被忽略
+#    时改用 max_completion_tokens（五类网关实测四种行为，无法按身份预判）
+# 2) system 提示长度引导：把 max_tokens 按 out_cpt 先验折成字数（×本容差）
+#    要求模型收敛在预设长度附近——服务端不截断时的软约束
+# 3) 客户端断流兜底：输出估算超下发上限 ×CLIENT_CUT_FACTOR 仍未见 finish，
+#    主动断流，防止跑飞请求拖垮单点耗时与消耗
+OUT_HINT_FACTOR = 1.2
+CLIENT_CUT_FACTOR = 2
 
 # Agent 连续任务链默认参数：agent 场景不以上下文档位为变量，改为按任务轮次
 # 推进的会话链——轮 0 冷启动（独立配置，默认 10K 上下文全量 prefill），
@@ -385,15 +399,16 @@ def _cache_hit_from_usage(usage: dict | None) -> tuple[int, bool]:
         return int(v), True
     return 0, False
 
-# decode 空窗校正上限（秒）：相邻内容块间隔超过此值视为传输/调度停滞
-# （WireGuard 隧道抖动实测空窗 18~90s），校正口径从 decode 窗口中只保留
-# 上限内的部分；正常 decode 间隔（200 tok/s → 5ms，5 tok/s → 200ms，
-# 云端调度停顿 ≤1~2s）不受影响，只削病理拖尾
-DECODE_GAP_CAP = 3.0
+# decode 空窗校正上限（秒）：相邻内容块间隔超过此值即在净口径中封顶扣除。
+# ADR-0017 由 3s 降为 1s（用户拍板，更积极的校正）——不再是「分布分离点」
+# 口径：健康尾部的 1~2s 云端调度停顿也会被校正（当前存档实测 1/49 样本）。
+# 与 0.5s 停滞诊断闸（STALL_THRESHOLD_S）构成两档：≥0.5s 标注留痕不改数、
+# >1s 才在净口径中封顶扣除
+DECODE_GAP_CAP = 1.0
 
 # 停滞复合记账门限（秒）：≥该值的相邻块间隔记为一次停滞、满额计入累计
-# （门限是检测闸，不是时长折扣）。比 DECODE_GAP_CAP 低一档——10s decode
-# 里 1s 的停顿（10% 污染）够不上空窗校正，但诊断上应留痕（借鉴 pi-tps）
+# （门限是检测闸，不是时长折扣）。比 DECODE_GAP_CAP 低一档——亚秒级停顿
+# （如 10s decode 里 0.6s）诊断上应留痕但不做读数校正（借鉴 pi-tps）
 STALL_THRESHOLD_S = 0.5
 # 突发交付甄别：全部 chunk 以亚毫秒平均间隔到达 → 窗口测的是网关缓冲冲刷
 # （buffer-flush dispatch）而非真实流式，decode 速率虚高不可信。真流式即使
@@ -588,12 +603,6 @@ def build_messages(scenario: str, target_tokens: int, cpt: float, nonce: str,
     return messages, est_tokens, len(filler)
 
 
-def _median(vals: list[float]) -> float:
-    s = sorted(vals)
-    n = len(s)
-    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
-
-
 def _net_elapsed(elapsed: float, rtt: float | None) -> float:
     """净耗时 = 实测耗时 − RTT 基线，扣减**封顶为实测值的一半**。
     RTT 基线取自 /models 元数据接口，与 /chat 推理调度路径不完全同构，
@@ -638,7 +647,9 @@ _ROUND = {"ttft_s": 3, "ttft_net_s": 3, "prefill_tok_s": 1, "prefill_net_tok_s":
 
 
 def _aggregate_reps(reps: list[dict]) -> dict:
-    """多次复测聚合：标量取中位，reqs 明细保留 decode 中位的那一次（ADR-0006）。
+    """多次复测聚合：标量取均值（ADR-0017——中位改均值，明细表聚合行即均值行，
+    各次实测以复测子行逐次列出）；停滞/空窗诊断同取均值（出现停滞的复测之间），
+    聚合行不再有「非均值」特例。reqs 明细保留 decode 居中的一次作代表样本。
     all_ok 多数决：过半复测成功才视为成功点。"""
     ok_reps = [p for p in reps if p["all_ok"]]
     pool = ok_reps or reps
@@ -647,24 +658,30 @@ def _aggregate_reps(reps: list[dict]) -> dict:
     for f, nd in _ROUND.items():
         vals = [p[f] for p in pool if p.get(f) is not None]
         if vals:
-            m = _median(vals)
+            m = sum(vals) / len(vals)   # ADR-0017：复测聚合由中位改均值
             point[f] = int(round(m)) if nd == 0 else round(m, nd)
     point["all_ok"] = len(ok_reps) * 2 >= len(reps)
     gaps = [p["max_gap_s"] for p in reps if p.get("max_gap_s")]
     if gaps:
-        point["max_gap_s"] = max(gaps)   # 停滞诊断取各次复测最差
+        point["max_gap_s"] = round(sum(gaps) / len(gaps), 2)   # 停滞诊断同取均值
     stall_reps = [p for p in reps if p.get("stall_s")]
-    if stall_reps:   # 停滞复合记账同取最差（与 max_gap_s 同口径）
-        point["stall_s"] = max(p["stall_s"] for p in stall_reps)
-        point["stall_count"] = max(p.get("stall_count") or 0 for p in stall_reps)
-    # 突发交付多数决（与 all_ok 同口径）；dict(rep_point) 可能带入中位次的
+    if stall_reps:   # 停滞复合记账同取均值（与 max_gap_s 同口径）
+        point["stall_s"] = round(sum(p["stall_s"] for p in stall_reps) / len(stall_reps), 2)
+        point["stall_count"] = round(sum(p.get("stall_count") or 0
+                                         for p in stall_reps) / len(stall_reps)) or 1
+    # 突发交付多数决（与 all_ok 同口径）；dict(rep_point) 可能带入居中次样本的
     # True，需显式覆写
     point["decode_burst"] = (sum(bool(p.get("decode_burst")) for p in reps) * 2
                              > len(reps)) or None
     point["n_reps"] = len(reps)
+    # 复测摘要：供前端明细表逐次子行展示（字段与聚合行同口径；旧存档缺新增
+    # 字段时前端按空值回退显示）
     point["reps"] = [{k: p.get(k) for k in
-                      ("ttft_s", "prefill_tok_s", "decode_tok_s",
-                       "decode_total_tok_s", "out_tokens", "all_ok")} for p in reps]
+                      ("prompt_tokens", "ttft_s", "prefill_tok_s", "prefill_net_tok_s",
+                       "decode_tok_s", "decode_tok_s_adj", "decode_total_tok_s",
+                       "out_tokens", "all_ok", "finish", "stall_s", "stall_count",
+                       "max_gap_s", "decode_burst",
+                       "cache_hit_tokens", "cache_reported")} for p in reps]
     return point
 
 
@@ -728,6 +745,14 @@ class BenchRun:
         # 模型级温度限制（400 且报错提及 temperature，如 Kimi K3 仅允许 0.6）：
         # 省略 temperature 参数走服务端默认，按模型锁定（ADR-0004）
         self.temperature_locked: set[str] = set(cfg.get("temperature_locked") or [])
+        # 输出上限参数名实测判定（model → "max_completion_tokens"）：默认旧名
+        # max_tokens；「usage 为真且输出超限」或触发客户端断流即判定旧名被网关
+        # 忽略，单向改用新名（opencode zen 只认新名、DeepSeek 官方只认旧名、
+        # Kimi/本地 vLLM 都认——行为无法按身份预判，只采信实测，ADR-0016）；
+        # mt_mct_rejected = 新名被严格网关 400 拒收的模型（回退旧名并锁定，
+        # 防翻转振荡）
+        self.mt_param: dict[str, str] = {}
+        self.mt_mct_rejected: set[str] = set()
         # 网关不回传缓存命中字段的一次性提示（LiteLLM 中转会剥离上游 usage
         # 扩展字段，实测只回传 prompt/completion/total 三字段）
         self._cache_note_done = False
@@ -942,7 +967,7 @@ class BenchRun:
                                 for rep in range(repeats):
                                     if repeats > 1:
                                         await self.emit({"type": "status", "msg":
-                                            f"　复测 {rep + 1}/{repeats}（取中位）"})
+                                            f"　复测 {rep + 1}/{repeats}（取均值）"})
                                     pt = await self._run_point(client, model, scenario,
                                                                ctx, conc, cpt, rep)
                                     if self.stop_flag:
@@ -1312,7 +1337,7 @@ class BenchRun:
         for rep in range(repeats):
             if repeats > 1:
                 await self.emit({"type": "status", "msg":
-                    f"　复测 {rep + 1}/{repeats}（取中位）"})
+                    f"　复测 {rep + 1}/{repeats}（取均值）"})
             base_seed = random.randint(100000, 999999)
             nonces = [f"{base_seed}-c{i}" for i in range(conc)]
             prev_prompt = [0] * conc   # 各链上一轮实测 prompt_tokens（增量差分兜底）
@@ -1544,6 +1569,11 @@ class BenchRun:
             return n_chunks / ratio
         return n_chars / out_cpt
 
+    def _mt_name(self, model: str) -> str:
+        """当前对 model 下发的输出上限参数名（实测判定，默认 max_tokens，
+        ADR-0016）。"""
+        return self.mt_param.get(model, "max_tokens")
+
     async def _note_mock(self, resp: httpx.Response):
         if resp.headers.get("x-mock-server") and not self.mock_seen:
             self.mock_seen = True
@@ -1560,7 +1590,17 @@ class BenchRun:
         # 输出内容不符时实时读数会数倍虚高（实测 70+ vs 25+，ADR-0005）
         out_cpt = self.out_cpt_calib.get((model, scenario)) or sc["out_cpt"]
         tag = f"{model}|{scenario}|{ctx}|{conc}|rep{rep}|r{req_i}"
-        est_prompt = round((len(messages[0]["content"]) + len(messages[1]["content"])) / max(cpt, 0.1))
+        # messages 拷成 msgs_sent 再入 payload：超窗删减重试只改副本，
+        # 调用方（_run_point）持有的原始构造不被改写
+        msgs_sent = [dict(m) for m in messages]
+        # 输出长度引导（ADR-0016 防线 2）：上限按 out_cpt 先验折成字数（×1.2
+        # 容差）写进 system——服务端不截断时，模型自身尽量收在预设长度附近。
+        # 先验固定，run 内 system 恒定（前缀缓存/嵌套前缀记账不受影响）
+        limit_chars = int(max_tokens * sc["out_cpt"] * OUT_HINT_FACTOR)
+        msgs_sent[0] = {**msgs_sent[0], "content":
+                        msgs_sent[0]["content"] + "\n\n"
+                        + sc["out_hint"].format(limit=limit_chars)}
+        est_prompt = round((len(msgs_sent[0]["content"]) + len(msgs_sent[1]["content"])) / max(cpt, 0.1))
         # tick 展示估值：agent 链暖轮只增量 prefill，按调用方给的增量估值显示
         # （全量估值在短 TTFT 上会爆出天文数字）；est_prompt 本体仍用于 usage
         # 缺失时的兜底记账，不受展示估值影响
@@ -1571,13 +1611,11 @@ class BenchRun:
                              "tokens": 0, "speed": 0, "elapsed": 0,
                              "est_prompt_tokens": est_prompt})
 
-        # messages 拷成 msgs_sent 再入 payload：超窗删减重试只改副本，
-        # 调用方（_run_point）持有的原始构造不被改写
-        msgs_sent = [dict(m) for m in messages]
-        sent_chars = sum(len(m["content"]) for m in messages)   # 实际发送字符数（删减重试后 < 构造量）
+        sent_chars = sum(len(m["content"]) for m in msgs_sent)   # 实际发送字符数（删减重试后 < 构造量）
         payload = {
             "model": model, "messages": msgs_sent, "stream": True,
-            "max_tokens": max_tokens,
+            # 参数名按实测判定（ADR-0016 防线 1）：旧名被忽略的网关改用新名
+            self._mt_name(model): max_tokens,
             "stream_options": {"include_usage": True},
         }
         # 测速用贪心输出：长度方差小、可复现；对 decode 速度本身影响可忽略。
@@ -1677,8 +1715,10 @@ class BenchRun:
                         continue
                     # 严格校验参数的网关：400 且报文点名某参数 → 省略该参数同端点
                     # 重试并锁定。thinking 为网关级锁定（ADR-0004）；temperature 为
-                    # 模型级——如 Kimi K3 仅允许 0.6，省略后走服务端默认值（ADR-0004）
-                    for _param in ("thinking", "temperature"):
+                    # 模型级——如 Kimi K3 仅允许 0.6，省略后走服务端默认值（ADR-0004）；
+                    # max_completion_tokens 为模型级回退——老规范网关不认新名时
+                    # 改回 max_tokens 并锁定（mt_mct_rejected 防翻转振荡，ADR-0016）
+                    for _param in ("thinking", "temperature", "max_completion_tokens"):
                         if resp.status_code != 400 or _param not in payload:
                             continue
                         body = (await resp.aread()).decode("utf-8", "replace")[:300]
@@ -1688,10 +1728,17 @@ class BenchRun:
                         payload.pop(_param, None)
                         if _param == "thinking":
                             self.thinking_unsupported = True
-                        else:
+                            note = "已自动省略并重试"
+                        elif _param == "temperature":
                             self.temperature_locked.add(model)
+                            note = "已自动省略并重试"
+                        else:
+                            payload["max_tokens"] = max_tokens
+                            self.mt_param[model] = "max_tokens"
+                            self.mt_mct_rejected.add(model)
+                            note = "已回退 max_tokens 并重试"
                         await self.emit({"type": "status", "msg":
-                            f"网关不接受 {_param} 参数（{body[:80]}），已自动省略并重试"})
+                            f"网关不接受 {_param} 参数（{body[:80]}），{note}"})
                         resp_ctx = client.stream("POST", path, json=payload)
                         resp = await enter_stream(resp_ctx)
                         await self._note_mock(resp)
@@ -1820,6 +1867,26 @@ class BenchRun:
                                 "ttft": round(first - t0, 3),
                                 "thinking": bool(reason_len)})
                             last_emit = now
+                    # 客户端断流兜底（ADR-0016 防线 3）：输出估算超下发上限
+                    # ×CLIENT_CUT_FACTOR 仍未见 finish → 网关未执行截断，主动
+                    # 断流（resp_ctx 收口时关闭连接），finish 记 client_cut；
+                    # 旧名 max_tokens 在用时同时判定其被忽略，改用新名
+                    if (piece or rpiece) and self._est_out(
+                            model, scenario, n_chunks, reason_len + text_len,
+                            out_cpt) > max_tokens * CLIENT_CUT_FACTOR:
+                        finished = "client_cut"
+                        if (self._mt_name(model) == "max_tokens"
+                                and model not in self.mt_mct_rejected):
+                            self.mt_param[model] = "max_completion_tokens"
+                            await self.emit({"type": "status", "msg":
+                                f"{model} 输出超 {max_tokens}×{CLIENT_CUT_FACTOR} "
+                                f"仍未被截断：网关忽略 max_tokens 参数，后续请求改用 "
+                                f"max_completion_tokens（本次已客户端断流）"})
+                        else:
+                            await self.emit({"type": "status", "msg":
+                                f"{model} 输出超上限 ×{CLIENT_CUT_FACTOR} 仍未被截断，"
+                                f"本次已客户端断流兜底（防跑飞）"})
+                        break
                     if ch.get("finish_reason"):
                         finished = ch["finish_reason"]
             finally:
@@ -1849,6 +1916,18 @@ class BenchRun:
                       if usage and usage.get("completion_tokens") else round(est_out))
         prompt_tokens = (usage.get("prompt_tokens")
                          if usage and usage.get("prompt_tokens") else est_prompt)
+        # 截断异常判定（ADR-0016 防线 1 的事中复核）：usage 为真且输出明显超下发
+        # 上限（>20% 容差，兜住 reasoning 记账差异）→ 旧名未被服务端执行，单向
+        # 改用 max_completion_tokens。超限未达断流阈值的漏网情形由此兜住；
+        # 新名也不生效时不回翻（防振荡），由断流兜底
+        if (usage and usage.get("completion_tokens")
+                and out_tokens > max_tokens * 1.2
+                and self._mt_name(model) == "max_tokens"
+                and model not in self.mt_mct_rejected):
+            self.mt_param[model] = "max_completion_tokens"
+            await self.emit({"type": "status", "msg":
+                f"{model} 实测输出 {round(out_tokens)} tokens 超出 max_tokens="
+                f"{max_tokens} 上限，网关未执行截断，后续请求改用 max_completion_tokens"})
         # 输出系数实测校准：真实 completion_tokens 反推字符/token，后续请求的
         # 实时 tick 与兜底估算按此口径（探测请求已播种，首个正式点即准）
         if usage and usage.get("completion_tokens"):

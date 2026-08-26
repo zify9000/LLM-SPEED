@@ -13,11 +13,12 @@ DeepSeek 风格（chat 端点不带 /v1 前缀）：MOCK_NO_V1=1 python mock_ser
 模拟响应头延迟到首个内容 token（prefill 期间无任何字节，LiteLLM→vLLM 链路行为）：MOCK_DELAY_HEADERS=1
 模拟 decode 中段一次停滞（秒，验证空窗诊断）：MOCK_STALL=4
 模拟流末不发 usage 帧（测速端走估算兜底）：MOCK_NO_USAGE=1
-模拟流出 N 个 decode token 后裸断连（不发 [DONE]，直接关流）：MOCK_DIE_AT=5
 模拟服务端并发 prefill 串行化（全局排队）：MOCK_SERIALIZE=1
 模拟 /models 慢响应（秒，验证 RTT 基线期停止）：MOCK_MODELS_DELAY=5
 模拟模型上下文窗口上限（tokens，prompt+max_tokens 超限返回 400 context exceeded）：MOCK_MAX_CTX=4096
 模拟服务端前缀缓存（append-only 增长的 prompt 只增量 prefill，usage 回传命中）：MOCK_CACHE=1
+模拟忽略 max_tokens（只认 max_completion_tokens，opencode zen 行为；旧名请求输出跑飞 4× 上限）：MOCK_IGNORE_MAX_TOKENS=1
+模拟严格校验网关拒收 max_completion_tokens（400 Unrecognized request argument）：MOCK_REJECT_MCT=1
 """
 import asyncio
 import json
@@ -40,12 +41,13 @@ DELAY_HDR = os.environ.get("MOCK_DELAY_HEADERS", "")  # 置 1 则响应头延迟
 STALL = float(os.environ.get("MOCK_STALL", "0"))  # decode 中段插入一次停滞秒数（模拟传输/调度空窗）
 NO_V1 = os.environ.get("MOCK_NO_V1", "")  # 置 1 则 /v1/chat/completions 404（chat 端点无前缀，DeepSeek 风格）
 NO_USAGE = os.environ.get("MOCK_NO_USAGE", "")  # 置 1 则流末不发 usage 帧（测速端 usage_real=False，走估算兜底）
-DIE_AT = int(os.environ.get("MOCK_DIE_AT", "0"))  # 流出 N 个 decode token 后裸断连（不发 usage/[DONE]，直接关流）
 SERIALIZE = os.environ.get("MOCK_SERIALIZE", "")  # 置 1 则 prefill 全局串行（模拟服务端并发 prefill 串行化）
 MODELS_DELAY = float(os.environ.get("MOCK_MODELS_DELAY", "0"))  # /models 响应前 sleep 秒数（模拟 RTT 基线期慢网关）
 MAX_CTX = int(os.environ.get("MOCK_MAX_CTX", "0"))  # 置 N 则 prompt+max_tokens 超 N 返回 400 超窗（验证删减上下文重试）
 CACHE = os.environ.get("MOCK_CACHE", "")  # 置 1 模拟前缀缓存：与已见 prompt 的公共前缀部分不计 prefill 耗时（验证 agent 连续任务链）
 CACHE_NOREPORT = os.environ.get("MOCK_CACHE_NOREPORT", "")  # 置 1 则缓存生效但 usage 不回传命中字段（验证缓存迹象判别：TTFT 走平 → ≈差分估算）
+IGNORE_MT = os.environ.get("MOCK_IGNORE_MAX_TOKENS", "")  # 置 1 则忽略 max_tokens（只认 max_completion_tokens，opencode zen 行为；旧名请求输出跑飞 4× 上限）
+REJECT_MCT = os.environ.get("MOCK_REJECT_MCT", "")  # 置 1 则带 max_completion_tokens 参数的请求 400（严格校验的老规范网关）
 
 _SEEN: list[str] = []   # 已见 prompt 全文（前缀缓存匹配源），容量 cap 32
 
@@ -106,9 +108,20 @@ async def _chat_impl(req: Request):
         return JSONResponse({"error": {"message":
             "invalid temperature: only 0.6 is allowed for this model"}},
             status_code=400)
+    if REJECT_MCT and "max_completion_tokens" in body:
+        return JSONResponse({"error": {"message":
+            "Unrecognized request argument supplied: max_completion_tokens"}},
+            status_code=400)
     text = "".join(m.get("content", "") for m in body.get("messages", []))
     prompt_tokens = max(1, int(len(text) / CPT))
     max_tokens = int(body.get("max_tokens") or 256)
+    if IGNORE_MT:
+        # opencode zen 行为：旧名 max_tokens 静默忽略、输出跑飞到 4× 上限；
+        # 新名 max_completion_tokens 正常执行截断
+        if "max_completion_tokens" in body:
+            max_tokens = int(body["max_completion_tokens"])
+        else:
+            max_tokens *= 4
     if MAX_CTX and prompt_tokens + max_tokens > MAX_CTX:
         # OpenAI 风格超窗报文（code=context_length_exceeded）
         return JSONResponse({"error": {"message":
@@ -142,22 +155,13 @@ async def _chat_impl(req: Request):
             await asyncio.sleep(1.0 / TG)
             yield "data: " + json.dumps({"choices": [{"delta": {"reasoning_content": "思"}}]}) + "\n\n"
         burst = min(BURST, n_content)
-        n_out = 0   # 已流出的 decode token 数（MOCK_DIE_AT 断点计数）
         if burst:   # 首批 token 一次性吐出（不占 decode 时间轴上的间隔）
-            n_out += burst
             yield "data: " + json.dumps({"choices": [{"delta": {"content": "测" * burst}}]}) + "\n\n"
         for i in range(n_content - burst):
-            if DIE_AT and n_out >= DIE_AT:
-                # 裸断连：不发 usage/[DONE]，生成器抛错让 uvicorn 直接断 TCP，
-                # 测速端读到不完整流 → 请求级 err（模拟服务端/链路中途崩断）
-                raise RuntimeError("mock: simulated connection drop")
             await asyncio.sleep(1.0 / TG)                # decode 逐 token
             if STALL and i == (n_content - burst) // 2:
                 await asyncio.sleep(STALL)               # 中段一次停滞（空窗诊断）
-            n_out += 1
             yield "data: " + json.dumps({"choices": [{"delta": {"content": "测"}}]}) + "\n\n"
-        if DIE_AT and n_out >= DIE_AT:   # 断点恰在最后一个 token（usage 帧之前）
-            raise RuntimeError("mock: simulated connection drop")
         final = {"choices": [{"delta": {}, "finish_reason": "stop"}]}
         if not NO_USAGE:
             final["usage"] = {"prompt_tokens": prompt_tokens,

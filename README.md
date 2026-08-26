@@ -18,13 +18,13 @@
 
 | 🧮 口径透明 | 📡 逐帧实测 | 🎭 多场景模拟 |
 | --- | --- | --- |
-| prefill 扣除实测网络往返、decode 按 2 秒滑窗差分并以服务端 usage 回写校准；缓存命中区分服务端真值与链内估算；网络卡顿、网关缓冲冲刷造成的虚高读数一律显式标记 | prefill 等待期逐秒给出估值、decode 逐帧刷新；跑完自动生成折线图和测速卡片 PNG，一键分享 | 创意写作读公版《红楼梦》、代码生成读 llama.cpp 真实源码；Agent 调用跑多轮连续任务链 |
+| prefill 扣除实测网络往返、decode 按 2 秒滑窗差分、缓存命中逐轮测算、服务端回写校准、异常卡顿显式标记 | prefill 等待期逐秒给出估值、decode 逐帧刷新；跑完自动生成折线图和测速卡片 PNG，一键分享 | 创意写作读公版《红楼梦》、代码生成读 llama.cpp 真实源码；Agent 调用跑 SWE 多轮连续任务链 |
 
 ## 🖼️ 测速卡片示例
 
 | DeepSeek 云端 · 0K~256K | Kimi 云端 · 0K~128K |
 | --- | --- |
-| ![deepseek-v4-pro 测速卡片](docs/images/speed-card-deepseek-v4-pro.png) | ![k3-256k 测速卡片](docs/images/speed-card-k3-256k.png) |
+| ![deepseek-v4-pro 测速卡片](case/official-deepseek-v4-pro.png) | ![k3-256k 测速卡片](case/official-k3-256k.png) |
 
 ## 🚀 三分钟上手
 
@@ -60,7 +60,7 @@ static/index.html  单页前端（ECharts 图表 + html2canvas 卡片 + 配置�
 mock_server.py     假 OpenAI 网关（自测）
 corpus/            真实语料（code: llama.cpp 源码 / creative: 公版《红楼梦》/ agent: SWE-agent 真实执行轨迹）
 scripts/           语料构建脚本（agent 轨迹提取，仅构建期用）
-docs/images/       测速卡片示例图（README 引用）
+case/              测速卡片示例图（README 引用）
 tests/             回归测试
 config.json / .env  provider 配置与凭据（不入库）
 results/           历次测速结果 JSON

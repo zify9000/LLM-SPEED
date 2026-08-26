@@ -13,6 +13,8 @@ import unittest.mock
 import bench
 from bench import (
     BenchRun,
+    CLIENT_CUT_FACTOR,
+    OUT_HINT_FACTOR,
     SCENARIOS,
     _aggregate_reps,
     _classify_http_error,
@@ -22,7 +24,6 @@ from bench import (
     _load_code_pool,
     _make_module_stream,
     _make_stream,
-    _median,
     _net_elapsed,
     _trim_middle,
     build_messages,
@@ -230,7 +231,7 @@ class TestBuildMessages(unittest.TestCase):
 
 
 class TestAggregateReps(unittest.TestCase):
-    """ADR-0006 复测取中位：标量中位、decode 中位的一次、all_ok 多数决。"""
+    """ADR-0017 复测取均值：标量均值、reqs 明细取 decode 居中的一次、all_ok 多数决。"""
 
     def _rep(self, decode, all_ok=True):
         return {
@@ -242,14 +243,19 @@ class TestAggregateReps(unittest.TestCase):
             "cache_hit_tokens": 0, "reqs": [{"req": 0, "err": None}],
         }
 
-    def test_median_of_odd(self):
+    def test_mean_of_reps(self):
         reps = [self._rep(50), self._rep(10), self._rep(30)]
         agg = _aggregate_reps(reps)
-        self.assertEqual(agg["decode_tok_s"], 30)
+        self.assertEqual(agg["decode_tok_s"], 30)     # (50+10+30)/3 均值
         self.assertTrue(agg["all_ok"])
         self.assertEqual(agg["n_reps"], 3)
-        # reqs 明细取 decode 中位的那一次
+        # reqs 明细取 decode 居中的一次作代表样本
         self.assertEqual(agg["reqs"][0]["req"], 0)
+
+    def test_mean_of_even_reps(self):
+        """偶数次复测：均值（非中位）——[50,10] 均值 30。"""
+        agg = _aggregate_reps([self._rep(50), self._rep(10)])
+        self.assertEqual(agg["decode_tok_s"], 30.0)
 
     def test_majority_rule(self):
         ok = [self._rep(50), self._rep(10)]
@@ -257,38 +263,35 @@ class TestAggregateReps(unittest.TestCase):
         self.assertTrue(_aggregate_reps(ok + [bad])["all_ok"])       # 2/3 多数
         self.assertFalse(_aggregate_reps([ok[0], bad, bad])["all_ok"])  # 1/3 少数
 
-    def test_median_even(self):
-        self.assertEqual(_median([1, 4]), 2.5)
-        self.assertEqual(_median([4, 1, 9, 2]), 3.0)
-
-    def test_max_gap_takes_worst_across_reps(self):
-        """停滞诊断 max_gap_s 取各次复测最差（max，不是中位）；无停滞不产出该键。"""
+    def test_max_gap_takes_mean_across_reps(self):
+        """停滞诊断 max_gap_s 取各次复测均值（与标量同口径）；无停滞不产出该键。"""
         reps = [self._rep(50), self._rep(40), self._rep(30)]
         reps[0]["max_gap_s"], reps[1]["max_gap_s"], reps[2]["max_gap_s"] = 1.5, 7.0, 2.0
         agg = _aggregate_reps(reps)
-        self.assertEqual(agg["max_gap_s"], 7.0)              # 各次最差，非中位 2.0
+        self.assertEqual(agg["max_gap_s"], 3.5)              # 各次均值，非最差 7.0
         self.assertNotIn("max_gap_s", _aggregate_reps([self._rep(1), self._rep(2)]))
 
-    def test_stall_takes_worst_across_reps(self):
-        """停滞复合记账（stall_s/stall_count）与 max_gap_s 同取各次复测最差。"""
+    def test_stall_takes_mean_across_reps(self):
+        """停滞复合记账（stall_s/stall_count）与 max_gap_s 同取各次复测均值
+        （在出现停滞的复测之间）。"""
         reps = [self._rep(50), self._rep(40), self._rep(30)]
         reps[0].update(stall_s=1.2, stall_count=2)
         reps[1].update(stall_s=6.5, stall_count=1)
         agg = _aggregate_reps(reps)
-        self.assertEqual(agg["stall_s"], 6.5)
-        self.assertEqual(agg["stall_count"], 2)   # 次数取各次最大，不随时长那条
+        self.assertEqual(agg["stall_s"], 3.85)              # (1.2+6.5)/2 均值
+        self.assertEqual(agg["stall_count"], 2)             # 次数均值取整 (2+1)/2→2
         clean = _aggregate_reps([self._rep(1), self._rep(2)])
         self.assertFalse(clean.get("stall_s"))
         self.assertFalse(clean.get("decode_burst"))
 
     def test_burst_majority_across_reps(self):
-        """突发交付多数决：过半复测突发才标记；且不被中位次残留污染。"""
+        """突发交付多数决：过半复测突发才标记；且不被居中次样本残留污染。"""
         reps = [self._rep(50), self._rep(40), self._rep(30)]
         reps[0]["decode_burst"] = reps[1]["decode_burst"] = True
         self.assertTrue(_aggregate_reps(reps)["decode_burst"])      # 2/3 多数
         reps[1]["decode_burst"] = None
         self.assertFalse(_aggregate_reps(reps)["decode_burst"])     # 1/3 少数
-        # 中位次本身带 True 但多数不成立时，显式覆写为否
+        # 居中次本身带 True 但多数不成立时，显式覆写为否
         only_mid = [self._rep(10), self._rep(20), self._rep(30)]
         only_mid[1]["decode_burst"] = True
         self.assertFalse(_aggregate_reps(only_mid)["decode_burst"])
@@ -302,25 +305,25 @@ class TestAggregateReps(unittest.TestCase):
         self.assertFalse(_decode_burst(1, 0.001))       # 除零保护
 
     def test_all_failed_pool_falls_back_to_reps(self):
-        """all_ok 全 False：聚合池回退为 reps 本身，标量中位照常算，all_ok=False。"""
+        """all_ok 全 False：聚合池回退为 reps 本身，标量均值照常算，all_ok=False。"""
         reps = [self._rep(50, all_ok=False), self._rep(10, all_ok=False),
                 self._rep(30, all_ok=False)]
         agg = _aggregate_reps(reps)
         self.assertFalse(agg["all_ok"])
-        self.assertEqual(agg["decode_tok_s"], 30)            # 回退池的中位
+        self.assertEqual(agg["decode_tok_s"], 30)            # 回退池的均值
         self.assertEqual(agg["n_reps"], 3)
 
-    def test_decode_adj_in_median(self):
-        """decode_tok_s_adj（空窗校正口径）参与聚合中位；缺该值的复测不计入。"""
+    def test_decode_adj_in_mean(self):
+        """decode_tok_s_adj（空窗校正口径）参与聚合均值；缺该值的复测不计入。"""
         reps = [self._rep(50), self._rep(10), self._rep(30)]
         reps[0]["decode_tok_s_adj"] = 60.0
         reps[1]["decode_tok_s_adj"] = 10.0
         reps[2]["decode_tok_s_adj"] = 40.0
         agg = _aggregate_reps(reps)
-        self.assertEqual(agg["decode_tok_s_adj"], 40.0)      # [60,10,40] 中位
+        self.assertAlmostEqual(agg["decode_tok_s_adj"], 36.7, places=1)   # 均值
         reps[2]["decode_tok_s_adj"] = None                   # 该次无校正口径
         agg2 = _aggregate_reps(reps)
-        self.assertEqual(agg2["decode_tok_s_adj"], 35.0)     # 仅 [60,10] 中位
+        self.assertEqual(agg2["decode_tok_s_adj"], 35.0)     # 仅 [60,10] 均值
 
 
 class TestInterruptible(unittest.IsolatedAsyncioTestCase):
@@ -405,6 +408,26 @@ class TestCtxOverflowRetry(unittest.TestCase):
         self.assertIn("已删减", trimmed)
         # keep ≥ 原长时不动
         self.assertEqual(_trim_middle(content, len(content) + 1), content)
+
+
+class TestOutLimitGuards(unittest.TestCase):
+    """ADR-0016 输出长度治理的参数面：三场景引导文案模板齐全、容差与断流
+    系数固定（行为路径见 test_e2e_mock 的翻转/回退/断流用例）。"""
+
+    def test_hint_templates_per_scenario(self):
+        for key, sc in SCENARIOS.items():
+            self.assertIn("{limit}", sc["out_hint"], f"{key} 缺输出长度引导模板")
+        # 中文场景按字/字符引导，英文 agent 场景按 characters
+        self.assertIn("字", SCENARIOS["creative"]["out_hint"])
+        self.assertIn("字符", SCENARIOS["code"]["out_hint"])
+        self.assertIn("characters", SCENARIOS["agent"]["out_hint"])
+
+    def test_factors(self):
+        self.assertEqual(OUT_HINT_FACTOR, 1.2)     # 引导上限 = 预设 ×1.2
+        self.assertEqual(CLIENT_CUT_FACTOR, 2)     # 断流阈值 = 下发上限 ×2
+        # 引导字数折算：512 tokens 创意档 × 1.5 字/token × 1.2 = 921 字
+        self.assertEqual(int(512 * SCENARIOS["creative"]["out_cpt"]
+                             * OUT_HINT_FACTOR), 921)
 
 
 if __name__ == "__main__":

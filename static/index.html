@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LLM-SPEED · LLM 测速台</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23EEF2FF'/%3E%3Cpolygon points='34.7 5.3 8 37.3 32 37.3 29.3 58.7 56 26.7 32 26.7' fill='%234F46E5'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
@@ -129,14 +130,21 @@ textarea{resize:vertical; min-height:auto}
 .deploy-item .kv{display:flex; gap:8px; margin-top:6px; font-size:12.5px}
 .deploy-item .kv .k{color:var(--ink-4); flex:none; min-width:60px}
 .deploy-item .kv .v{color:var(--ink-2); word-break:break-all}
-/* agent 链逐轮输入构成表（轮次 × 输入/命中/增量/TTFT/TPS） */
+/* 图末详细数据表：agent 链逐轮输入构成（轮次 × 输入/命中/增量/TTFT/TPS），
+   通用场景逐档位读数（档位 × 输入/TTFT/Prefill/净Decode/输出）——共用样式 */
 .turntable{margin-top:10px; border:1px solid var(--border); border-radius:10px; overflow:hidden}
 .turntable table{font-size:12.5px}
 .turntable th, .turntable td{padding:7px 12px}
 .turntable td{font-family:var(--mono)}
 .turntable .hint{margin:8px 12px 10px}
-/* 测试矩阵分区隔线：场景一（通用）/ 场景二（Agent 调用）/ 并发配置 */
-.m-sep{margin-top:12px; padding-top:12px; border-top:1px solid var(--border)}
+/* 测试矩阵分区隔线：场景一（通用）/ 场景二（Agent 调用）/ 并发配置。
+   注意优先级：两个 m-sep label 都是各自 wrap 的 :first-child，会被
+   label.f:first-child{margin-top:0} 顶掉上边距、分割线贴上内容——
+   label.f.m-sep（0,2,1 且后定义）才能盖过它 */
+label.f.m-sep{margin-top:16px; padding-top:14px; border-top:1px solid var(--border)}
+/* 展开区（ctxWrap/agentParams）内的组件标题同样是容器 :first-child 或紧跟
+   输入行，统一补呼吸间距，避免贴上上一行 */
+#ctxWrap > label.f, #agentParams label.f{margin-top:16px}
 /* 朴素勾选项（无放大效果） */
 .ckrow{display:flex; flex-wrap:wrap; gap:2px 0}
 .ck{display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--ink-2);
@@ -249,6 +257,21 @@ td{padding:10px 12px; border-bottom:1px solid #F3F4F6; white-space:nowrap;
   font-variant-numeric:tabular-nums; color:var(--ink-2)}
 #liveTable td:nth-child(n+7), .resultTable td:nth-child(n+4){font-family:var(--mono); font-size:12.5px}
 .rt-scen{border:1px solid var(--border); border-radius:10px; overflow:hidden}
+/* 表格自身的横向滚动层：表超宽时在场景块内滚动（外层 .rt-scen 的 overflow:hidden
+   只管圆角裁切，滚动挂错层级会把超宽内容硬裁掉且不出滚动条）；场景名标题栏
+   留在滚动层外，横滚时保持可见 */
+.rt-scroll{overflow-x:auto}
+/* 状态列是最宽列（✓/✗ 符号 + ⚠停滞复合文本），允许换行吸收宽度挤压 */
+.resultTable td:last-child{white-space:normal; min-width:7em}
+/* 复测明细子行：聚合（均值）行之下逐次列出，弱化底色+小字处理 */
+.resultTable tr.rep-row td{font-size:12px; color:var(--ink-3); background:var(--bg)}
+.resultTable tr.rep-row td.rep-tag{color:var(--ink-4)}
+/* 二级表头的分组标签：居中、略强调；分组底线画在内层 span 上并左右内缩，
+   相邻 colspan 组（缓存/Prefill/Decode）的分隔线自然断开，不加竖线 */
+.resultTable th.colgroup{text-align:center; color:var(--ink-2); font-weight:600;
+  border-bottom:none; padding-bottom:0}
+.resultTable th.colgroup>span{display:block; margin:0 10px; padding-bottom:9px;
+  border-bottom:1px solid var(--border)}
 .rt-scen + .rt-scen{margin-top:12px}
 .rt-scen-name{font-weight:600; color:var(--ink-2); padding:8px 12px; font-size:13px;
   border-bottom:1px solid var(--border); background:var(--bg)}
@@ -461,9 +484,9 @@ tr.fade td{opacity:.45}
                 <option value="512">512</option>
                 <option value="1024" selected>1024</option>
               </select></div>
-            <div><label class="f" for="fRepeats">每点重复次数（取中位）</label><input type="number" id="fRepeats" value="1" min="1" max="5"></div>
+            <div><label class="f" for="fRepeats">每点重复次数（取均值）</label><input type="number" id="fRepeats" value="1" min="1" max="5"></div>
           </div>
-          <div class="hint">云端读数有调度抖动，关键点建议 3 次取中位；本地稳定环境保持 1 即可</div>
+          <div class="hint">云端读数有调度抖动，关键点建议 3 次取均值；本地稳定环境保持 1 即可</div>
           <label class="f" for="fTimeout">单请求超时（秒）</label>
           <input type="number" id="fTimeout" value="1200">
           <label class="f" for="fThinking">思考模式</label>
@@ -474,7 +497,8 @@ tr.fade td{opacity:.45}
           </select>
           <div class="hint">按模型的实际使用形态选择：有的模型默认思考效果更好，有的相反；禁用思考只测正文速度，启用则思考流计入测速</div>
           <label class="f" for="fNote">任务备注（可选）</label>
-          <input type="text" id="fNote" maxlength="80" placeholder="如：有线环境复测 · 对比 v0.6 基线">
+          <!-- autocomplete=off：浏览器表单历史会把曾误粘的网关地址回填进备注框 -->
+          <input type="text" id="fNote" maxlength="80" autocomplete="off" placeholder="如：有线环境复测 · 对比 v0.6 基线">
           <div class="hint">展示在历史记录标题最前，便于区分多次测速；历史记录也可事后改备注</div>
         </div>
       </div>
@@ -524,7 +548,7 @@ tr.fade td{opacity:.45}
     <div class="kpi prog">
       <p class="k">已完成测试点</p>
       <p class="v" id="kpiPoints">0 <small>/ 0</small></p>
-      <p class="d">模型 × 场景 × 上下文 × 并发</p>
+      <p class="d">模型 × 场景 × 上下文/轮次 × 并发</p>
       <div class="progbar" id="progWrap" hidden><div id="progFill"></div></div>
       <div id="skipNotes" hidden></div>
     </div>
@@ -1114,6 +1138,7 @@ function ceDepAdd(){
 function ceStash(){
   const p = ceCurrent();
   if(!p) return;
+  const prevName = p.name;   // 改名前的身份（ceCurrent 按 name 匹配，改名后需同步）
   p.name = $("#ceName").value.trim();
   p.label = $("#ceLabel").value.trim();
   p.gateway_urls = [...document.querySelectorAll("#ceUrls .ce-url")]
@@ -1131,6 +1156,13 @@ function ceStash(){
     active: el.querySelector(".d-active").checked || undefined,
     _collapsed: el.classList.contains("collapsed") || prev[i]?._collapsed || undefined,
   }));
+  // 名称可编辑：改名后同步编辑目标（ceCurrent 按 name 匹配）与下拉选项，
+  // 否则保存时 selName 仍是旧名，ceCurrent() 失配 → 新增 provider 保存被误拦
+  if(prevName !== p.name){
+    state.cfgEdit.selName = p.name;
+    const opt = [...$("#ceProv").options].find(o => o.value === prevName);
+    if(opt){ opt.value = p.name; opt.text = `${p.label || p.name}（${p.name}）`; }
+  }
 }
 async function ceSave(){
   ceStash();
@@ -1543,13 +1575,19 @@ function markLiveDone(p){
 const pointKey = p => `${p.model}|${p.scenario}|${p.ctx_target}|${p.concurrency}`;
 // Prefill 展示口径：优先扣 RTT 的净值（ADR-0006），旧存档无该字段时回退毛值
 const preOf = p => p.prefill_net_tok_s ?? p.prefill_tok_s;
-// Decode 展示口径：点带显著空窗（max_gap_s>3，传输/调度停滞）且引擎给出
-// 校正口径时取校正值——停滞拖尾只污染毛窗口，校正值更接近服务端真实节奏；
-// 无停滞时与毛值一致，旧存档无 adj 字段回退毛值
-const decOf = p => (p.max_gap_s > 3 && p.decode_tok_s_adj) ? p.decode_tok_s_adj : p.decode_tok_s;
-// decode 总耗时按同窗口反推：decode_tok_s ≡ out_tokens ÷ decode 窗口时长
-// （引擎口径一致，无需引擎加字段）；带空窗的点随 decOf 取校正口径
-const decTimeOf = p => (p.out_tokens && decOf(p)) ? Math.round(p.out_tokens / decOf(p) * 10) / 10 : null;
+// Decode 双口径：
+// 净口径（扣停滞）：相邻内容块间隔 >1s 的部分逐段封顶后重算窗口（decode_tok_s_adj），
+// 剔除传输/调度停滞拖尾，更接近服务端真实节奏；旧存档无 adj 字段时回退均口径。
+// 均口径（原始）：各请求 completion_tokens ÷（末 token − 首 token）的均值
+// （decode_tok_s），窗口含网络传输/调度停滞——与净口径并列展示，量化停滞影响。
+const decNetOf = p => p.decode_tok_s_adj ?? p.decode_tok_s;
+const decAvgOf = p => p.decode_tok_s ?? p.decode_tok_s_adj;
+// KPI 权威回写沿用净口径（ADR-0007）
+const decOf = decNetOf;
+// 耗时按同窗口反推：速度 ≡ out_tokens ÷ decode 窗口时长（引擎口径一致）
+const decTimeOf = (tokens, speed) => (tokens && speed) ? Math.round(tokens / speed * 10) / 10 : null;
+const decNetTimeOf = p => decTimeOf(p.out_tokens, decNetOf(p));
+const decTotalTimeOf = p => decTimeOf(p.out_tokens, decAvgOf(p));
 function addPoint(p){
   if(!state.points.has(pointKey(p))) state.donePoints++;
   state.points.set(pointKey(p), p);
@@ -1620,30 +1658,61 @@ function renderResultTable(){
     const scRows = rows.filter(p => p.scenario === sc);
     const isAgent = scRows.some(p => p.turn != null);
     const totalTh = showTotal ? "<th>总吞吐(tok/s)</th>" : "";
-    // agent 链：轮次 | 上下文长度（实际 prompt tokens）| 未命中 tokens | 缓存命中；
-    // 通用场景：上下文档位 | 实际 prompt tokens（无缓存构成列）
-    const head = isAgent
-      ? `<tr><th>模型</th><th>轮次</th><th>并发</th><th>上下文长度</th><th>未命中 tokens</th><th>缓存命中</th><th>TTFT(s)</th><th>Prefill(tok/s)</th><th>Decode(tok/s)</th><th>Decode耗时(s)</th>${totalTh}<th>输出tokens</th><th>结束</th><th>状态</th></tr>`
-      : `<tr><th>模型</th><th>上下文</th><th>并发</th><th>实际 prompt tokens</th><th>TTFT(s)</th><th>Prefill(tok/s)</th><th>Decode(tok/s)</th><th>Decode耗时(s)</th>${totalTh}<th>输出tokens</th><th>结束</th><th>状态</th></tr>`;
+    // 二级表头：缓存组 = 未命中/命中（仅 agent）；Prefill 组 = TTFT + 速度；
+    // Decode 组 = 净速/均速 + 净/总耗时（多并发矩阵再含总吞吐）；
+    // 其余列 rowspan=2 贯通两行；子列保留口径悬浮提示
+    const cacheTh = isAgent ? `<th colspan="2" class="colgroup"><span>缓存</span></th>` : "";
+    const cacheSub = isAgent
+      ? `<th title="未命中前缀缓存的 prompt tokens（本轮增量计算量）">未命中</th>`
+        + `<th title="命中前缀缓存的 prompt tokens">命中</th>` : "";
+    const subHead = `<tr>${cacheSub}<th>TTFT(s)</th><th>速度(tok/s)</th>`
+      + `<th title="净口径：completion tokens ÷ 空窗校正窗口（相邻内容块间隔 >1s 的部分逐段封顶）">净速(tok/s)</th>`
+      + `<th title="均口径：各请求 completion tokens ÷（末 token − 首 token）的均值，含传输/调度停滞">均速(tok/s)</th>`
+      + `<th title="Decode 净耗时：输出 tokens ÷ 净Decode（校正窗口）">净耗时(s)</th>`
+      + `<th title="Decode 总耗时：输出 tokens ÷ 均Decode（原始窗口，含停滞）">总耗时(s)</th>${totalTh}</tr>`;
+    const decSpan = showTotal ? 5 : 4;
+    // agent 链：轮次 | 上下文长度 | 并发 | 缓存组（未命中/命中）；
+    // 通用场景：档位 | 上下文长度 | 并发（无缓存构成列）
+    const head = (isAgent
+      ? `<tr><th rowspan="2">模型</th><th rowspan="2">轮次</th><th rowspan="2">上下文长度</th><th rowspan="2">并发</th>${cacheTh}`
+      : `<tr><th rowspan="2">模型</th><th rowspan="2">档位</th><th rowspan="2">上下文长度</th><th rowspan="2">并发</th>`)
+      + `<th colspan="2" class="colgroup"><span>Prefill</span></th><th colspan="${decSpan}" class="colgroup"><span>Decode</span></th>`
+      + `<th rowspan="2">输出 tokens</th><th rowspan="2">结束</th><th rowspan="2">状态</th></tr>${subHead}`;
     const title = scens.length > 1 ? `<div class="rt-scen-name">${SCEN_LABEL[sc] || esc(sc)}</div>` : "";
-    return `<div class="rt-scen">${title}<table class="resultTable"><thead>${head}</thead>
-      <tbody>${scRows.map(p => pointRow(p, isAgent, showTotal)).join("")}</tbody></table></div>`;
+    return `<div class="rt-scen">${title}<div class="rt-scroll"><table class="resultTable"><thead>${head}</thead>
+      <tbody>${scRows.map(p => pointRow(p, isAgent, showTotal)).join("")}</tbody></table></div></div>`;
   }).join("") : `<div class="hint" style="text-align:center; padding:28px">暂无测速点</div>`;
 }
 function pointRow(p, isAgent, showTotal){
     const reqErr = p.reqs.filter(r=>r.err);
-    let st = p.all_ok ? "✓ 成功" : (reqErr.length===p.reqs.length ? "✗ 失败" : `部分 ${p.reqs.length-reqErr.length}/${p.reqs.length}`);
-    if(p.n_reps > 1) st += ` · 中位×${p.n_reps}`;
-    // decode 中途停滞警示：优先展示复合记账（累计停滞×次数，引擎 0.5s 门限
-    // 满额计入，区分一次大停滞与频繁小抖动）；旧存档无该字段回退单段最长
-    // 空窗。毛窗口被拖尾——decode 列已按扣除空窗校正显示（标*），仍标记提示
+    // 状态列只用符号：✓ 全部成功 / ✗ 全部失败 / ✓ n/N 部分成功；复测为均值行
+    // （ADR-0017），不再缀「均值×N」字样
+    let st = p.all_ok ? "✓" : (reqErr.length===p.reqs.length ? "✗" : `✓ ${p.reqs.length-reqErr.length}/${p.reqs.length}`);
+    // decode 中途停滞警示：显示只留累计秒数「⚠停滞 Xs」，次数/最长单段等
+    // 明细收进 title 悬浮（引擎 0.5s 门限满额计入）；旧存档无该字段回退
+    // 单段最长空窗。净口径已剔除停滞拖尾，均口径保留原始窗口，仍标记提示
     // 该点受过停滞影响（实测隧道拥塞曾把窗口放大 14 倍）
+    const stallN = p.stall_count || 1;
+    // 复测聚合行的停滞/空窗同取各次均值（与速度列同口径）——注记随 n_reps>1 补充
+    const repsNote = p.n_reps > 1 ? "各次复测均值，逐次明细见下方复测行；" : "";
+    // 空窗校正发生过 ⇔ 净/均口径读数不同（逐次校正后聚合，均值保持该等价）
+    const gapCorrected = p.decode_tok_s_adj != null
+                      && p.decode_tok_s_adj !== p.decode_tok_s;
+    // 两档门限显式科普（ADR-0017）：≥0.5s 停滞只标注留痕不改数；>1s 空窗的
+    // 超出部分在净口径（净速/净耗时）中封顶扣除并标*
+    const twoGateTxt = "两档门限：单次间隔 ≥0.5s 记为停滞（只标注留痕、不改读数）；单段空窗 >1s 的超出部分在净口径（净速/净耗时）中封顶扣除并标*";
+    const gapFixTxt = p.decode_tok_s_adj == null
+      ? "旧存档无空窗校正字段，净口径暂以均口径回退"
+      : gapCorrected
+        ? "本点净速/净耗时已按 >1s 空窗封顶校正（标*），均速/总耗时为含停滞原始口径"
+        : "本点空窗未超过 1s 校正门限，净/均口径一致";
     const gapWarn = p.stall_s
-      ? ` <span style="color:var(--yellow);cursor:help" title="decode 中途累计停滞 ${p.stall_s}s（${p.stall_count || 1} 次，单次 ≥0.5s 满额计入，最长 ${p.max_gap_s ?? "-"}s；网络传输或服务端调度停滞）；decode 列已按扣除空窗校正（标*），毛值受拖尾不可用于跨次比较">⚠停滞${p.stall_s}s×${p.stall_count || 1}</span>`
-      : p.max_gap_s > 3
-      ? ` <span style="color:var(--yellow);cursor:help" title="decode 中途最长空窗 ${p.max_gap_s}s（网络传输或服务端调度停滞）；decode 列已按扣除空窗校正（标*），毛值受拖尾不可用于跨次比较">⚠空窗${p.max_gap_s}s</span>` : "";
+      ? ` <span style="color:var(--yellow);cursor:help" title="${repsNote}decode 中途停滞 ${stallN} 次，累计 ${p.stall_s}s（最长 ${p.max_gap_s ?? "-"}s；网络传输或服务端调度停滞）。${twoGateTxt}。${gapFixTxt}">⚠停滞 ${p.stall_s}s</span>`
+      : p.max_gap_s > 1
+      ? ` <span style="color:var(--yellow);cursor:help" title="${repsNote}decode 中途最长空窗 ${p.max_gap_s}s（网络传输或服务端调度停滞）。${twoGateTxt}。${gapFixTxt}">⚠空窗${p.max_gap_s}s</span>` : "";
     // 突发交付：chunk 平均间隔 <1ms，疑似网关缓冲冲刷而非真实流式——decode
-    // 速率虚高不可信，值仍展示但标记不可用于比较
+    // 读数虚高不可信，值仍展示但标记不可用于比较（挂在均口径列，因突发按
+    // 原始 chunk 时间线判别）
     const burstMark = p.decode_burst
       ? ` <span style="color:var(--yellow);cursor:help" title="突发交付：输出以亚毫秒间隔一次性到达，疑似网关缓冲冲刷而非真实流式，decode 读数虚高不可信，不可用于跨次比较">⚠突发</span>` : "";
     // agent 连续任务链点（turn 存在）：轮次列 + 缓存构成列（未命中/缓存命中）。
@@ -1670,22 +1739,86 @@ function pointRow(p, isAgent, showTotal){
       preNotes.push(`净口径：已扣除网络往返 ${p.rtt_ms}ms（毛值 ${p.prefill_tok_s ?? "-"}）`);
     if(hs === "unknown") preNotes.push("无缓存迹象：Prefill 为全量口径（上下文长度 ÷ TTFT）实测真值，非增量估算");
     const preTitle = preNotes.length ? ` title="${esc(preNotes.join("；"))}"` : "";
-    const decCorrected = p.max_gap_s > 3 && p.decode_tok_s_adj && p.decode_tok_s_adj !== p.decode_tok_s;
-    const decTitle = decCorrected ? ` title="已扣除空窗（原始窗口含最长 ${esc(p.max_gap_s)}s 停滞，毛值 ${esc(p.decode_tok_s ?? "-")}）"` : "";
+    // Decode 双口径与耗时列：净 = 空窗校正窗口；均 = 原始窗口均值（含停滞）。
+    // 所有 Decode 数值列都常驻悬浮提示（问题 3：旧版仅校正点有 title）
+    const decNet = decNetOf(p);
+    const decAvg = decAvgOf(p);
+    const decNetTime = decNetTimeOf(p);
+    const decTotalTime = decTotalTimeOf(p);
+    const decDiff = gapCorrected;
+    const decNetTip = [
+      "净口径：completion tokens ÷ 校正窗口（相邻内容块间隔 >1s 的部分逐段封顶，剔除传输/调度停滞拖尾）",
+      p.decode_tok_s_adj == null ? "旧存档无净口径字段，暂以均口径回退显示"
+                                 : `均口径 ${decAvg ?? "-"} tok/s`,
+      decDiff ? `已扣除最长 ${p.max_gap_s}s 空窗（毛值 ${p.decode_tok_s ?? "-"} tok/s）`
+              : "空窗未超过 1s 校正门限时与均口径一致",
+    ].join("；");
+    const decAvgTip = [
+      "均口径：并发请求各自 completion tokens ÷（末 token − 首 token）的均值，窗口含网络传输/调度停滞（原始口径）",
+      `净口径 ${decNet ?? "-"} tok/s`,
+      p.decode_burst ? "⚠突发交付：读数虚高不可信" : null,
+    ].filter(Boolean).join("；");
+    const decNetTimeTip = [
+      "Decode净耗时 = 输出 tokens ÷ 净速（校正窗口，>1s 空窗封顶，剔除传输/调度停滞拖尾）",
+      `Decode总耗时 ${decTotalTime ?? "-"}s`,
+      p.decode_tok_s_adj == null ? "旧存档无净口径字段，暂以均口径回退显示" : null,
+    ].filter(Boolean).join("；");
+    const decTotalTimeTip = [
+      "Decode总耗时 = 输出 tokens ÷ 均速（原始窗口，含网络传输/调度停滞）",
+      `Decode净耗时 ${decNetTime ?? "-"}s`,
+    ].join("；");
+    const decNetTitle = ` title="${esc(decNetTip)}"`;
+    const decAvgTitle = ` title="${esc(decAvgTip)}"`;
+    const decNetTimeTitle = ` title="${esc(decNetTimeTip)}"`;
+    const decTotalTimeTitle = ` title="${esc(decTotalTimeTip)}"`;
     const ttTitle = isTurn
       ? (isColdTurn(p) ? ` title="冷启动：全量 prefill（链首轮无前缀缓存）"`
                       : ` title="暖启动：命中前缀缓存，仅增量 prefill"`) : "";
+    // 列序与二级表头一致：档位/轮次 → 上下文长度 → 并发（→ 缓存构成列）
     const colsPre = isAgent
-      ? `<td>${turnCell}</td><td>${p.concurrency}</td><td>${p.prompt_tokens ?? "-"}</td><td>${missCell}</td><td>${hitCell}</td>`
-      : `<td>${turnCell}</td><td>${p.concurrency}</td><td>${p.prompt_tokens ?? "-"}</td>`;
-    return `<tr class="${p.all_ok?"":"err"}">
+      ? `<td>${turnCell}</td><td>${p.prompt_tokens ?? "-"}</td><td>${p.concurrency}</td><td>${missCell}</td><td>${hitCell}</td>`
+      : `<td>${turnCell}</td><td>${p.prompt_tokens ?? "-"}</td><td>${p.concurrency}</td>`;
+    const mainRow = `<tr class="${p.all_ok?"":"err"}">
       <td>${esc(p.model)}</td>${colsPre}<td${ttTitle}>${p.ttft_s ?? "-"}</td><td${preTitle}>${preOf(p) ?? "-"}</td>
-      <td${decTitle}>${decOf(p) ?? "-"}${decCorrected ? "*" : ""}${burstMark}</td><td>${decTimeOf(p) ?? "-"}${decCorrected ? "*" : ""}</td>${showTotal ? `<td>${p.decode_total_tok_s ?? "-"}</td>` : ""}<td>${p.out_tokens ?? "-"}</td>
-      <td>${p.finish==="length" ? "截断" : (p.finish!=null ? esc(String(p.finish)) : "-")}</td><td>${st}${gapWarn}</td></tr>`;
+      <td${decNetTitle}>${decNet ?? "-"}${decDiff ? "*" : ""}</td>
+      <td${decAvgTitle}>${decAvg ?? "-"}${burstMark}</td>
+      <td${decNetTimeTitle}>${decNetTime ?? "-"}${decDiff ? "*" : ""}</td>
+      <td${decTotalTimeTitle}>${decTotalTime ?? "-"}</td>
+      ${showTotal ? `<td>${p.decode_total_tok_s ?? "-"}</td>` : ""}<td>${p.out_tokens ?? "-"}</td>
+      <td>${p.finish==="length" ? "截断" : p.finish==="client_cut" ? "断流" : (p.finish!=null ? esc(String(p.finish)) : "-")}</td><td>${st}${gapWarn}</td></tr>`;
+    // 复测子行（n_reps>1）：每次复测按自身口径逐行列出，聚合行保持均值口径；
+    // 旧存档 reps 缺新增字段时按空值/回退口径显示
+    const repRows = (p.n_reps > 1 && Array.isArray(p.reps) ? p.reps : []).map((r, i) => {
+      const rGapFix = r.max_gap_s > 1 && r.decode_tok_s_adj != null && r.decode_tok_s_adj !== r.decode_tok_s;
+      const rStall = r.stall_s
+        ? ` <span style="color:var(--yellow);cursor:help" title="本次复测 decode 中途停滞 ${r.stall_count || 1} 次，累计 ${r.stall_s}s（最长 ${r.max_gap_s ?? "-"}s）。两档门限：≥0.5s 只标注留痕、>1s 空窗超出部分在净口径封顶扣除（标*）">⚠停滞 ${r.stall_s}s</span>`
+        : r.max_gap_s > 1
+        ? ` <span style="color:var(--yellow);cursor:help" title="本次复测 decode 最长空窗 ${r.max_gap_s}s，>1s 部分已在净口径封顶扣除（标*）">⚠空窗${r.max_gap_s}s</span>` : "";
+      const rBurst = r.decode_burst
+        ? ` <span style="color:var(--yellow);cursor:help" title="突发交付：读数虚高不可信">⚠突发</span>` : "";
+      const rMiss = r.prompt_tokens != null ? fmtK(Math.max(r.prompt_tokens - (r.cache_hit_tokens || 0), 0)) : "-";
+      const rHit = r.cache_hit_tokens == null ? "-"
+        : `${r.cache_reported === false ? "≈" : ""}${r.cache_hit_tokens ? fmtK(r.cache_hit_tokens) : "0"}`;
+      const colsPreR = isAgent
+        ? `<td class="rep-tag">↳ 复测${i + 1}</td><td>${r.prompt_tokens ?? "-"}</td><td>${p.concurrency}</td><td>${rMiss}</td><td>${rHit}</td>`
+        : `<td class="rep-tag">↳ 复测${i + 1}</td><td>${r.prompt_tokens ?? "-"}</td><td>${p.concurrency}</td>`;
+      return `<tr class="rep-row${r.all_ok === false ? " err" : ""}">
+        <td></td>${colsPreR}<td>${r.ttft_s ?? "-"}</td><td>${preOf(r) ?? "-"}</td>
+        <td>${decNetOf(r) ?? "-"}${rGapFix ? "*" : ""}</td>
+        <td>${decAvgOf(r) ?? "-"}${rBurst}</td>
+        <td>${decNetTimeOf(r) ?? "-"}${rGapFix ? "*" : ""}</td>
+        <td>${decTotalTimeOf(r) ?? "-"}</td>
+        ${showTotal ? `<td>${r.decode_total_tok_s ?? "-"}</td>` : ""}<td>${r.out_tokens ?? "-"}</td>
+        <td>${r.finish === "length" ? "截断" : r.finish === "client_cut" ? "断流" : (r.finish != null ? esc(String(r.finish)) : "-")}</td>
+        <td>${r.all_ok === false ? "✗" : "✓"}${rStall}</td></tr>`;
+    }).join("");
+    return mainRow + repRows;
 }
 
 /* ---------------- 折线图（类别轴 4K/8K/16K；agent 场景按轮次） ---------------- */
-function buildChartOpt(pts, metric, title){
+/* forExport=true 用于卡片离屏出图：静态 PNG 里 scroll 图例的翻页器点不动，
+   第二页系列会永久丢失，故图例改回自动换行的普通型并按行数抬高 grid */
+function buildChartOpt(pts, metric, title, forExport){
   // agent 连续任务链：点带 turn 字段，类别轴为轮次；其他场景为上下文档位
   const isAgent = pts.some(p => p.turn != null);
   const xs = isAgent ? [...new Set(pts.map(p=>p.turn))].sort((a,b)=>a-b)
@@ -1697,12 +1830,16 @@ function buildChartOpt(pts, metric, title){
   const single = concs.length===1;   // 单并发时并发数无增量信息，图例直接标指标名
   const baseOpt = (series, yAxis) => ({
     backgroundColor:"transparent",
-    title:{text:title, textStyle:{color:"#111827", fontSize:14, fontFamily:"Inter"}, left:12, top:8},
+    title:{text:title, textStyle:{color:"#111827", fontSize:14, fontFamily:"Inter"}, left:12, top:6},
     tooltip:{trigger:"axis", backgroundColor:"#fff", borderColor:"#E5E7EB",
       textStyle:{color:"#111827", fontSize:12}, extraCssText:"box-shadow:0 4px 12px rgba(0,0,0,.08)",
       valueFormatter: v => v==null ? "-" : round1(v).toLocaleString("en-US")},
-    legend:{textStyle:{color:"#6B7280"}, top:8, right:8, type:"scroll"},
-    grid:{left:64, right:56, top:52, bottom:40},
+    // 图例独占一行排在标题下方：同处 top 行时 scroll 型图例（多系列触发翻页器）
+    // 会横贯顶部压到左上角标题；scroll 型恒为单行，grid 顶距无需随系列数变化
+    legend: forExport
+      ? {textStyle:{color:"#6B7280"}, top:30, left:12, right:8}
+      : {textStyle:{color:"#6B7280"}, top:30, left:12, right:8, type:"scroll"},
+    grid:{left:64, right:56, top: forExport ? 40 + 22*legendLines : 64, bottom:40},
     xAxis:{type:"category", name:isAgent?"轮次":"上下文", nameLocation:"middle", nameGap:26, data:cats,
       nameTextStyle:{color:"#6B7280"}, axisLabel:{color:"#6B7280"},
       axisLine:{lineStyle:{color:"#D1D5DB"}}, axisTick:{alignWithLabel:true}},
@@ -1710,11 +1847,10 @@ function buildChartOpt(pts, metric, title){
   });
   // agent 输入构成/缓存命中按表格展示（renderCharts 里的 .turntable），不再出图
   const isPre = metric==="prefill";
-  const getVal = isPre ? preOf : decOf;
   const ttftOf = p => p.ttft_net_s ?? p.ttft_s;   // 与 prefill 同取净口径
-  const mk = (getv, conc, name, dashed, color, yAxisIndex) => ({
+  const mk = (getv, conc, name, lineType, color, yAxisIndex) => ({
     name, type:"line", symbolSize:8, symbol: STYLE[String(conc)]?.symbol || "circle",
-    lineStyle:{width:2, type:dashed?"dashed":"solid"},
+    lineStyle:{width:2, type: lineType || "solid"},
     itemStyle:{color: color || STYLE[String(conc)]?.color || "#16A34A"},
     yAxisIndex: yAxisIndex || 0,
     data: xs.map(x => {
@@ -1723,22 +1859,48 @@ function buildChartOpt(pts, metric, title){
     }),
   });
   const series = concs.flatMap(c => {
-    const s = [mk(getVal, c, single
-                  ? (isPre ? (isAgent ? "增量 Prefill（tok/s）" : "Prefill（tok/s）") : "Decode（tok/s）")
-                  : (isPre ? `并发 ${c} ${isAgent ? "增量" : ""} Prefill（tok/s）` : `并发 ${c} 单请求均值（tok/s）`))];
-    if(metric==="decode" && c > 1 && !isAgent)
-      s.push(mk(p=>p.decode_total_tok_s, c, `并发 ${c} 总吞吐（tok/s）`, true, "#16A34A"));
-    // 双纵轴：右轴叠加耗时（虚线、独立琥珀色），单位信息在图例上——
-    // prefill 叠 TTFT；decode 叠 decode 总耗时（同窗口反推，口径随 decOf）
-    if(isPre)
-      s.push(mk(ttftOf, c, single ? "TTFT（s）" : `并发 ${c} TTFT（s）`, true, "#F59E0B", 1));
-    else
-      s.push(mk(decTimeOf, c, single ? "Decode 耗时（s）" : `并发 ${c} Decode 耗时（s）`, true, "#F59E0B", 1));
+    const baseColor = STYLE[String(c)]?.color || "#16A34A";
+    if(isPre){
+      return [
+        mk(preOf, c, single
+            ? (isAgent ? "增量 Prefill（tok/s）" : "Prefill（tok/s）")
+            : `并发 ${c} ${isAgent ? "增量" : ""} Prefill（tok/s）`, "solid", baseColor),
+        mk(ttftOf, c, single ? "TTFT（s）" : `并发 ${c} TTFT（s）`, "dashed", "#F59E0B", 1),
+      ];
+    }
+    // decode 双口径 + 双耗时拆分：左轴速度（净=并发色实线、均=绿色实线；多并发
+    // 叠加绿色点线总吞吐），右轴耗时（净=琥珀虚线、总=橙虚线），单位在图例上。
+    // 全图净/均口径逐点一致（未发生空窗校正）时合并为单口径「速度/耗时」
+    const noDiff = pts.every(p => decNetOf(p) === decAvgOf(p));
+    if(noDiff){
+      const s = [
+        mk(decNetOf, c, single ? "速度（tok/s）" : `并发 ${c} 速度（tok/s）`, "solid", baseColor),
+      ];
+      if(c > 1 && !isAgent)
+        s.push(mk(p=>p.decode_total_tok_s, c, `并发 ${c} 总吞吐（tok/s）`, "dotted", "#16A34A"));
+      s.push(mk(decNetTimeOf, c, single ? "耗时（s）" : `并发 ${c} 耗时（s）`, "dashed", "#F59E0B", 1));
+      return s;
+    }
+    const s = [
+      mk(decNetOf, c, single ? "净速（tok/s）" : `并发 ${c} 净速（tok/s）`, "solid", baseColor),
+      mk(decAvgOf, c, single ? "均速（tok/s）" : `并发 ${c} 均速（tok/s）`, "solid", "#16A34A"),
+    ];
+    if(c > 1 && !isAgent)
+      s.push(mk(p=>p.decode_total_tok_s, c, `并发 ${c} 总吞吐（tok/s）`, "dotted", "#16A34A"));
+    s.push(
+      mk(decNetTimeOf, c, single ? "净耗时（s）" : `并发 ${c} 净耗时（s）`, "dashed", "#F59E0B", 1),
+      mk(decTotalTimeOf, c, single ? "总耗时（s）" : `并发 ${c} 总耗时（s）`, "dashed", "#EA580C", 1),
+    );
     return s;
   });
   const speedAxis = {type:"value",
     axisLabel:{color:"#6B7280", formatter:v=>v>=1000?(v/1000)+"K":v},
     splitLine:{lineStyle:{color:"#F3F4F6"}}};
+  // 导出模式图例自动换行，行数决定 grid 顶距：系列名宽（全角≈12px、半角≈7px）
+  // + 图标/间距 34px，按离屏图内宽 516px（540 − 左右边距）折行估算
+  const legendW = series.reduce((a,s) =>
+    a + [...s.name].reduce((w,ch) => w + (ch.charCodeAt(0) > 0xFF ? 12 : 7), 34), 0);
+  const legendLines = Math.max(1, Math.ceil(legendW / 516));
   return baseOpt(series, [speedAxis,
     {type:"value", axisLabel:{color:"#D97706"}, splitLine:{show:false}}]);
 }
@@ -1761,24 +1923,27 @@ function renderCharts(){
         <div class="cm-scen-name">${SCEN_LABEL[sc] || esc(sc)}</div>
         <div class="grid2">
           <div class="chartbox" data-scen="${esc(sc)}" data-metric="prefill" role="img" aria-label="Prefill / TTFT 折线图"></div>
-          <div class="chartbox" data-scen="${esc(sc)}" data-metric="decode" role="img" aria-label="Decode 折线图"></div>
+          <div class="chartbox" data-scen="${esc(sc)}" data-metric="decode" role="img" aria-label="Decode 与耗时折线图"></div>
         </div>
-        ${sc === "agent" ? `<div class="turntable" data-scen="${esc(sc)}"></div>` : ""}
+        ${`<div class="turntable" data-scen="${esc(sc)}"></div>`}
       </div>`).join("");
     box.appendChild(blk);
     blk.querySelectorAll(".chartbox").forEach(el => {
       const scPts = pts.filter(p => p.scenario === el.dataset.scen);
       const ch = echarts.init(el);
-      const titles = {prefill: scPts.some(p=>p.turn!=null) ? "Prefill / TTFT · 轮次" : "Prefill / TTFT",
-                      decode: scPts.some(p=>p.turn!=null) ? "Decode · 轮次" : "Decode"};
+      // agent 链类别轴即轮次（xAxis 名已标「轮次」），图题不再带轮次后缀
+      const titles = {prefill: "Prefill / TTFT", decode: "Decode"};
       ch.setOption(buildChartOpt(scPts, el.dataset.metric, titles[el.dataset.metric]), true);
       state.charts.push(ch);
     });
-    // agent 链逐轮输入构成表：输入 = 缓存命中 + 增量计算，附命中率/TTFT/TPS
+    // 图末详细数据表：agent 链给逐轮输入构成（输入 = 缓存命中 + 增量计算）；
+    // 通用场景给逐档位读数表
     blk.querySelectorAll(".turntable").forEach(el => {
-      const scPts = pts.filter(p => p.scenario === el.dataset.scen && p.turn != null)
-        .sort((a,b) => a.turn - b.turn || a.concurrency - b.concurrency);
-      el.innerHTML = turnTable(scPts);
+      const scPts = pts.filter(p => p.scenario === el.dataset.scen);
+      el.innerHTML = el.dataset.scen === "agent"
+        ? turnTable(scPts.filter(p => p.turn != null)
+            .sort((a,b) => a.turn - b.turn || a.concurrency - b.concurrency))
+        : ctxTable(scPts.sort((a,b) => a.ctx_target - b.ctx_target || a.concurrency - b.concurrency));
     });
   }
 }
@@ -1804,14 +1969,32 @@ function turnTable(scPts){
                  : `<td>${est}${fmtK(hit)}</td><td>${est}${miss != null ? fmtK(miss) : "-"}</td><td>${pct}%</td>`)
       + `<td>${p.ttft_s ?? "-"}</td>`
       + `<td>${preOf(p) ?? "-"}</td>`
-      + `<td>${decOf(p) ?? "-"}</td>`
+      + `<td>${decNetOf(p) ?? "-"}</td>`
       + `<td>${p.out_tokens ?? "-"}</td></tr>`;
   }).join("");
   return `<table><thead><tr><th>轮次</th><th>新增 tokens</th><th>输入 tokens</th>`
     + `<th>缓存命中</th><th>增量计算</th><th>命中率</th><th>TTFT(s)</th>`
-    + `<th>Prefill(tok/s)</th><th>Decode(tok/s)</th><th>输出 tokens</th></tr></thead><tbody>${rows}</tbody></table>`
+    + `<th>Prefill(tok/s)</th><th title="净口径：completion tokens ÷ 空窗校正窗口（相邻内容块间隔 >1s 的部分逐段封顶）">净Decode(tok/s)</th><th>输出 tokens</th></tr></thead><tbody>${rows}</tbody></table>`
     + (anyEst ? `<div class="hint">≈ 网关未回传缓存命中字段，但 TTFT 显著低于全量重算预期（有缓存迹象），命中/增量按链内差分估算</div>` : "")
     + (anyMiss ? `<div class="hint">「未回传」= 网关未回传且 TTFT 随全量 prompt 增长（无缓存迹象），命中未知、Prefill 按全量口径；真值需服务端/网关透出 cached_tokens</div>` : "");
+}
+/* 通用场景逐档位读数表（与 agent 逐轮表同位）：档位 | 输入 | TTFT | Prefill |
+   净Decode | 输出；多并发矩阵时档位格附并发数 */
+function ctxTable(scPts){
+  if(!scPts.length) return "";
+  const multi = new Set(scPts.map(p => p.concurrency)).size > 1;
+  const rows = scPts.map(p =>
+    `<tr class="${p.all_ok ? "" : "err"}">`
+      + `<td>${fmtK(p.ctx_target)}${multi ? ` · 并发${p.concurrency}` : ""}</td>`
+      + `<td>${p.prompt_tokens != null ? fmtK(p.prompt_tokens) : "-"}</td>`
+      + `<td>${p.ttft_s ?? "-"}</td>`
+      + `<td>${preOf(p) ?? "-"}</td>`
+      + `<td>${decNetOf(p) ?? "-"}</td>`
+      + `<td>${p.out_tokens ?? "-"}</td></tr>`).join("");
+  return `<table><thead><tr><th>档位</th><th>输入 tokens</th>`
+    + `<th>TTFT(s)</th><th>Prefill(tok/s)</th>`
+    + `<th title="净口径：completion tokens ÷ 空窗校正窗口（相邻内容块间隔 >1s 的部分逐段封顶）">净Decode(tok/s)</th>`
+    + `<th>输出 tokens</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 /* 卡片内 agent 逐轮构成表（导出 PNG 随卡片走）：冷启动平铺单行道出，
    阶段一/阶段二左右两栏对称，每栏 轮次 | 上下文长度 | 缓存命中 | 未命中 tokens */
@@ -1857,39 +2040,47 @@ function cardTurnTable(pts){
 }
 
 /* ---------------- 测速卡片（全场景合并） ---------------- */
-/* 某模型的部署环境：优先本次运行/存档的 cfg.model_info（服务端按映射注入），
-   无则回退当前 provider 的 deployments 映射 */
+/* 某模型的部署环境：面板 provider 与数据所属 provider 一致时，优先当前 provider
+   的 deployments 映射——部署信息是描述性文案（硬件/框架/参数），配置更新后重新
+   生成卡片应同步纠正；面板已切走 provider 或当前无映射时，回退本次运行/存档的
+   cfg.model_info 快照（hydrateArchive 会把面板回切到记录所属 provider，正常
+   路径下两者恒一致） */
 function modelInfo(model){
   const fromProv = resolveDeployment(currentProvider()?.deployments, model);
   const fromCfg = state.cfg?.model_info?.[model];
-  const mi = fromCfg || fromProv || null;
-  // quant 是后加字段：旧存档的 model_info 没有它，用当前 provider 配置补齐
-  if(mi && !mi.quant && fromProv?.quant) return {...mi, quant: fromProv.quant};
+  const provMatch = !state.cfg?.provider || state.cfg.provider === currentProvider()?.name;
+  const mi = provMatch ? (fromProv || fromCfg) : (fromCfg || fromProv);
+  if(!mi) return null;
+  // quant 是后加字段：旧存档的 model_info 没有它，用另一来源的配置补齐
+  const other = provMatch ? fromCfg : fromProv;
+  if(!mi.quant && other?.quant) return {...mi, quant: other.quant};
   return mi;
 }
 function scenarioStats(pts){
   const ok = pts.filter(p=>p.all_ok);
   const withCtx = (arr) => arr.reduce((m,p)=>p.v>m.v?{v:p.v,ctx:p.ctx,turn:p.turn}:m, {v:-Infinity,ctx:null,turn:null});
+  const rangeOf = arr => arr.length ? [Math.min(...arr), Math.max(...arr)] : null;
   const pre = ok.map(p=>({v:preOf(p), ctx:p.ctx_target, turn:p.turn})).filter(x=>x.v!=null);
-  const dec = ok.map(p=>({v:decOf(p), ctx:p.ctx_target, turn:p.turn})).filter(x=>x.v!=null);
-  const preRange = pre.length ? [Math.min(...pre.map(x=>x.v)), Math.max(...pre.map(x=>x.v))] : null;
-  const decRange = dec.length ? [Math.min(...dec.map(x=>x.v)), Math.max(...dec.map(x=>x.v))] : null;
+  const decNet = ok.map(p=>({v:decNetOf(p), ctx:p.ctx_target, turn:p.turn})).filter(x=>x.v!=null);
+  const decAvg = ok.map(p=>({v:decAvgOf(p), ctx:p.ctx_target, turn:p.turn})).filter(x=>x.v!=null);
+  const preRange = rangeOf(pre.map(x=>x.v));
+  const decRange = rangeOf(decNet.map(x=>x.v));
+  const decAvgRange = rangeOf(decAvg.map(x=>x.v));
   const prePeak = pre.length ? withCtx(pre) : null;
-  const decPeak = dec.length ? withCtx(dec) : null;
   const concs = [...new Set(ok.map(p=>p.concurrency))].sort((a,b)=>a-b);
   const baseConc = concs[0];
   const preAvg = pre.length ? pre.reduce((a,x)=>a+x.v,0)/pre.length : null;   // 全档上下文均值
-  const baseDec = ok.filter(p=>p.concurrency===baseConc).map(p=>decOf(p)).filter(v=>v!=null);
-  const baseDecAvg = baseDec.length ? baseDec.reduce((a,b)=>a+b,0)/baseDec.length : null;
-  // decode 总耗时均值：同批基准并发点逐点反推（out_tokens ÷ decOf）后取均值——
-  // 逐点算再平均，而非均值速率反推，避免倒数变换的偏差
-  const baseDecTime = ok.filter(p=>p.concurrency===baseConc).map(p=>decTimeOf(p)).filter(v=>v!=null);
-  const baseDecTimeAvg = baseDecTime.length ? baseDecTime.reduce((a,b)=>a+b,0)/baseDecTime.length : null;
+  const basePts = ok.filter(p=>p.concurrency===baseConc);
+  const baseDecNet = basePts.map(p=>decNetOf(p)).filter(v=>v!=null);
+  const baseDecAvg = basePts.map(p=>decAvgOf(p)).filter(v=>v!=null);
+  const baseDecNetAvg = baseDecNet.length ? baseDecNet.reduce((a,b)=>a+b,0)/baseDecNet.length : null;
+  const baseDecAvgRaw = baseDecAvg.length ? baseDecAvg.reduce((a,b)=>a+b,0)/baseDecAvg.length : null;
   const hiConc = concs.length > 1 ? concs[concs.length-1] : null;
   const hiVals = hiConc ? ok.filter(p=>p.concurrency===hiConc)
       .map(p=>p.decode_total_tok_s).filter(v=>v!=null) : [];
   const hiTotal = hiVals.length ? hiVals.reduce((a,b)=>a+b,0)/hiVals.length : null;   // 均值而非峰值
-  return {preRange, decRange, prePeak, decPeak, preAvg, baseConc, baseDecAvg, baseDecTimeAvg, hiConc, hiTotal};
+  return {preRange, decRange, decAvgRange, prePeak, preAvg,
+          baseConc, baseDecNetAvg, baseDecAvg: baseDecAvgRaw, hiConc, hiTotal};
 }
 /* 生成单个模型的卡片 HTML（全场景合并）；多模型时由 genCards 平铺多张 */
 function cardHTML(model){
@@ -1956,28 +2147,37 @@ function cardHTML(model){
       const p0Ts = p0.map(p => p.ttft_net_s ?? p.ttft_s).filter(v => v != null);
       const p1Ts = p1.map(p => p.ttft_net_s ?? p.ttft_s).filter(v => v != null);
       const p2Pre = p2.map(p => preOf(p)).filter(v => v != null);
+      // 冷启动上下文档位：取实测 prompt tokens（旧存档回退配置的 agent_cold_ctx）
+      const coldCtx = p0[0]?.prompt_tokens ?? state.cfg?.agent_cold_ctx;
       if(p0Ts.length) cells.push(`<div class="sc-stat s4"><div class="k">冷启动 TTFT</div>
         <div class="n">${round1(p0Ts.reduce((a,b)=>a+b,0)/p0Ts.length)}<small> s</small></div>
-        <div class="t">首轮全量 prefill（无前缀缓存）</div></div>`);
+        <div class="t">首轮无缓存 prefill-${coldCtx ? fmtK(coldCtx) : "10K"}</div></div>`);
       if(p1Ts.length) cells.push(`<div class="sc-stat s3"><div class="k">阶段一 TTFT 均值</div>
         <div class="n">${round1(p1Ts.reduce((a,b)=>a+b,0)/p1Ts.length)}<small> s</small></div>
-        <div class="t">短文本暖轮 × ${p1Ts.length}${hitPct(p1) ? " · " + hitPct(p1) : ""}</div></div>`);
+        <div class="t">${hitPct(p1)}</div></div>`);
       if(p2Pre.length) cells.push(`<div class="sc-stat s5"><div class="k">阶段二 Prefill 均值</div>
         <div class="n">${fmtNum(p2Pre.reduce((a,b)=>a+b,0)/p2Pre.length)}<small> tok/s</small></div>
-        <div class="t">长文本轮 × ${p2Pre.length} · 增量口径${hitPct(p2) ? " · " + hitPct(p2) : ""}</div></div>`);
+        <div class="t">${hitPct(p2)}</div></div>`);
     }
-    if(s.decRange) cells.push(`<div class="sc-stat s2"><div class="k">Decode 速度范围</div>
-      <div class="n">${fmtNum(s.decRange[0])}–${fmtNum(s.decRange[1])}<small> tok/s</small></div>
-      <div class="t">峰值 @ ${peakAt(s.decPeak)}</div></div>`);
+    // Decode 范围/均值主展示均口径（原始窗口），备注给净口径对照
+    if(s.decAvgRange) cells.push(`<div class="sc-stat s2"><div class="k">Decode 均速范围</div>
+      <div class="n">${fmtNum(s.decAvgRange[0])}–${fmtNum(s.decAvgRange[1])}<small> tok/s</small></div>
+      <div class="t">${s.decRange ? `Decode 净速范围 ${fmtNum(s.decRange[0])}–${fmtNum(s.decRange[1])} tok/s` : ""}</div></div>`);
     if(s.preAvg && !isAgent) cells.push(`<div class="sc-stat s3"><div class="k">Prefill 均值</div>
       <div class="n">${fmtNum(s.preAvg)}<small> tok/s</small></div>
       <div class="t">全档上下文均值</div></div>`);
     if(s.baseDecAvg) cells.push(`<div class="sc-stat s4"><div class="k">Decode 均值</div>
       <div class="n">${fmtNum(s.baseDecAvg)}<small> tok/s</small></div>
-      <div class="t">并发 ${s.baseConc}${s.baseDecTimeAvg ? ` · 总耗时均值 ≈ ${round1(s.baseDecTimeAvg)}s` : ""}</div></div>`);
+      <div class="t">${s.baseDecNetAvg ? `净口径 Decode 均值 ${fmtNum(s.baseDecNetAvg)}` : ""}</div></div>`);
     if(s.hiTotal) cells.push(`<div class="sc-stat s5"><div class="k">并发 ${s.hiConc} 总吞吐均值</div>
       <div class="n">${fmtNum(s.hiTotal)}<small> tok/s</small></div>
       <div class="t">${s.baseDecAvg ? "≈ " + round1(s.hiTotal/s.baseDecAvg) + " × 单请求" : ""}</div></div>`);
+    // 停滞单元格：本场景有测试点出现 decode 停滞（≥0.5s 门限）时才展示；
+    // 主数值 = 各点单段最长空窗的最大值，备注 = 各点停滞累计时长的总和
+    const stalled = pts.filter(p => p.stall_s);
+    if(stalled.length) cells.push(`<div class="sc-stat s4"><div class="k">最长停滞时间</div>
+      <div class="n">${round1(Math.max(...stalled.map(p => p.max_gap_s || 0)))}<small> s</small></div>
+      <div class="t">累积停滞时间 ${round1(stalled.reduce((a,p) => a + p.stall_s, 0))}s</div></div>`);
     const chartImgs = imgs[sc] || {};
     return `<div class="sc-scen-block">
       <div class="sc-scen-head"><span class="bar"></span><span class="name">${SCEN_LABEL[sc]||esc(sc)}</span></div>
@@ -2007,7 +2207,7 @@ function cardHTML(model){
     <div class="sc-prov">${esc(provLine)}</div>
     ${metaHtml}
     ${scenHtml}
-    <div class="sc-foot">Prefill 速度 = 实际 prompt tokens ÷（TTFT − 网络往返基线）· Decode 速度 = 生成 tokens ÷ 生成耗时 · 由 LLM-SPEED 生成</div>
+    <div class="sc-foot">Prefill 速度 = 实际 prompt tokens ÷（TTFT − 网络往返基线）· 净 Decode = 生成 tokens ÷ 校正窗口（相邻内容块间隔 >1s 的部分封顶）· 均 Decode = 生成 tokens ÷ 原始窗口（含停滞）· 由 LLM-SPEED 生成</div>
   </div>`;
 }
 /* 按模型平铺生成卡片（多模型各一张）；历史载入时自动调用并滚动到位 */
@@ -2027,9 +2227,9 @@ function captureScenarioCharts(model, scens){
     if(!pts.length) continue;
     out[sc] = {};
     // 卡片上部已有场景名（sc-scen-head），图内标题只留指标名，不重复场景
-    offChart.setOption({...buildChartOpt(pts, "prefill", "Prefill / TTFT"), animation:false}, true);
+    offChart.setOption({...buildChartOpt(pts, "prefill", "Prefill / TTFT", true), animation:false}, true);
     const pre = offChart.getDataURL({pixelRatio:2, backgroundColor:"#FFFFFF"});
-    offChart.setOption({...buildChartOpt(pts, "decode", "Decode"), animation:false}, true);
+    offChart.setOption({...buildChartOpt(pts, "decode", "Decode", true), animation:false}, true);
     const dec = offChart.getDataURL({pixelRatio:2, backgroundColor:"#FFFFFF"});
     out[sc] = {...out[sc], prefill: pre, decode: dec};
   }
