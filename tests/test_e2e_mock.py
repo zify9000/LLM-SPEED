@@ -5,8 +5,8 @@ mock 运行不落盘、SSE 注释心跳下 prefill 估值帧不饿死（含 0.95
 响应头延迟型网关估值帧覆盖等响应头阶段、探测期停止即时生效、无前缀 chat 端点
 回退锁定、repeats=3 均值聚合、输入系数校准命中目标、temperature 拒参锁定、
 超窗 point_skipped、/models 慢响应下基线期停止、起步突发滑窗上下界、
-无正文/裸断连请求级错误、串行 prefill 总吞吐置空、无 usage 估算兜底、
-超窗删减上下文重试、agent 连续任务链逐轮出点（前缀缓存命中/无缓存退化）、
+无正文/裸断连请求级错误、串行 prefill 总吞吐置空、无 usage 估算兜底（SSE 事件数直计，英文形态输出不虚发）、
+超窗删减上下文重试、软超窗（fastllm 系 200+"prompt too long"占位回复）判错、agent 连续任务链逐轮出点（前缀缓存命中/无缓存退化）、
 输出上限治理（忽略 max_tokens 时断流并改用 max_completion_tokens、新名被 400
 拒收时回退防振荡、system 提示长度引导注入）。
 运行：python3 -m unittest tests.test_e2e_mock -v
@@ -630,6 +630,29 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("删减" in s and "重试" in s for s in statuses),
                         f"应有删减重试状态播报: {statuses}")
 
+    async def test_soft_ctx_overflow_rejected(self):
+        """fastllm 系软超窗（MOCK_SOFT_MAX_CTX）：HTTP 200 + 正文被替换为
+        "prompt too long"（finish=stop、带 usage）——不再记成「拒绝耗时 ÷
+        prompt 长度」的数十万 tok/s 假 prefill，该点按错误收口。"""
+        old = mock_server.SOFT_MAX_CTX
+        mock_server.SOFT_MAX_CTX = 3800   # 4K 档首请求 ~4096+16 tokens 超限
+        try:
+            _, events = await self._run_and_collect(ctx_list=[4096], max_tokens=16)
+        finally:
+            mock_server.SOFT_MAX_CTX = old
+        pts = [e["point"] for e in events if e.get("type") == "point"]
+        self.assertEqual(len(pts), 1)
+        self.assertFalse(pts[0]["all_ok"], "软超窗点必须判失败，不得出假速度")
+        req = pts[0]["reqs"][0]
+        self.assertIsNotNone(req.get("err"))
+        self.assertIn("prompt too long", req["err"])
+        self.assertIn("上下文", req["err"])
+        self.assertIsNone(req.get("prefill_tok_s"), "软超窗不得记录 prefill 读数")
+        ticks = [e["msg"] for e in events if e.get("type") == "tick"
+                 and e.get("phase") == "error"]
+        self.assertTrue(any("占位回复" in t for t in ticks),
+                        f"应有软超窗错误帧: {ticks}")
+
     async def test_agent_chain_turns_with_cache(self):
         """agent 连续任务链（MOCK_CACHE=1 前缀缓存）：不以下文档位为变量，
         4 轮（1 冷启动 + 短轮固定增量 1024 × 2 + 长轮 ladder 8192）逐轮出点。
@@ -887,7 +910,8 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_usage_estimation_fallback(self):
         """MOCK_NO_USAGE=1：流末无 usage 帧 → usage_real=False，终值按
-        字符/输出系数估算兜底，chunk_calib 不播种（校准依赖真实 usage）。"""
+        SSE 事件数直计兜底（1 事件/token，mock 每事件 1 字符即 16 tokens，
+        与真实值一致），chunk_calib 不播种（校准依赖真实 usage）。"""
         old = mock_server.NO_USAGE
         mock_server.NO_USAGE = "1"
         try:
@@ -900,9 +924,33 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(p["all_ok"], "无 usage 不是错误，估算兜底应照常出点")
         r = p["reqs"][0]
         self.assertFalse(r["usage_real"])
-        # 兜底口径：16 字符正文 ÷ 创意场景 out_cpt 1.5 ≈ 11（≠ 真实 16）
-        self.assertEqual(r["out_tokens"], round(16 / 1.5))
+        # 兜底口径：16 个内容事件直计 = 16（= 真实 token 数，旧字符口径为 11）
+        self.assertEqual(r["out_tokens"], 16)
+        self.assertEqual(r["finish"], "stop")
         self.assertEqual(run.chunk_calib, {}, "无 usage 时 chunk_calib 不得播种")
+
+    async def test_no_usage_multichar_chunks_not_overshot(self):
+        """英文形态输出（MOCK_CHUNK_CHARS=4：1 事件/token、每事件 4 字符）
+        + 无 usage：旧口径按中文 1.5 字符/token 估算 64/1.5≈43，超断流阈值
+        32 触发 client_cut；新口径按事件数直计 16，自然收尾 finish=length——
+        fastllm 英文输出 decode 虚高 2.8 倍的回归（ADR-0019）。"""
+        old_u, old_ch = mock_server.NO_USAGE, mock_server.CH
+        mock_server.NO_USAGE, mock_server.CH = "1", 4
+        try:
+            run, events = await self._run_and_collect()
+        finally:
+            mock_server.NO_USAGE, mock_server.CH = old_u, old_ch
+        points = [e["point"] for e in events if e.get("type") == "point"]
+        self.assertEqual(len(points), 1)
+        p = points[0]
+        self.assertTrue(p["all_ok"], f"英文形态输出不得误判断流: {p['reqs']}")
+        r = p["reqs"][0]
+        self.assertFalse(r["usage_real"])
+        self.assertEqual(r["finish"], "stop", "自然收尾（mock  finish_reason 恒为 stop），不得 client_cut")
+        self.assertEqual(r["out_tokens"], 16, "事件数直计 = 真实 token 数")
+        self.assertEqual(r["text_chars"], 64)
+        # decode 读数按真实 token 数 / 实测窗口，接近 mock TG（±20%）
+        self.assertGreater(r["decode_tok_s"], 300 * 0.8)
 
     async def test_max_tokens_ignored_flip_and_cut(self):
         """MOCK_IGNORE_MAX_TOKENS=1（opencode zen 行为：忽略旧名、认新名）：

@@ -695,6 +695,14 @@ def _is_ctx_overflow(status: int, body: str) -> bool:
                                  or "maximum context" in low)
 
 
+def _is_soft_ctx_overflow(head_text: str, total_chars: int) -> bool:
+    """服务端「软超限」：HTTP 200 + 正文被替换为占位串（fastllm 系引擎对超长
+    prompt 不回 4xx，而是正常流式返回 content="prompt too long"、finish=stop、
+    单 token）。不识别的话该点会记成「拒绝耗时 ÷ prompt 长度」的数十万 tok/s
+    假 prefill。按占位串精确匹配（整体输出 ≤32 字符），正常模型输出不会命中。"""
+    return total_chars <= 32 and head_text.strip().lower() == "prompt too long"
+
+
 def _classify_http_error(status: int, body: str) -> str:
     """把裸 HTTP 错误翻译成可行动的提示（ADR-0008）。"""
     low = body.lower()
@@ -1561,12 +1569,17 @@ class BenchRun:
 
     def _est_out(self, model: str, scenario: str, n_chunks: int,
                  n_chars: float, out_cpt: float) -> float:
-        """输出 tokens 实时估算：优先按 SSE 内容事件 ÷ 实测事件/token 比
+        """输出 tokens 实时估算：按 SSE 内容事件数 ÷ 实测事件/token 比
         （每 token 一事件的服务上即真实值，不受中英/代码内容混合影响）；
-        未校准时回退字符数 ÷ 输出系数（ADR-0007）。"""
+        未校准时默认 1 事件/token 直计——OpenAI 兼容服务主流形态，chars/token
+        随输出语言在 1.5~4.3 间漂移，字符系数先验不可信（fastllm 英文输出
+        曾按 1.5 超发 2.8 倍触发断流、丢 usage、永远无法校准）；无事件可用时
+        才回退字符数 ÷ 输出系数（ADR-0019）。"""
         ratio = self.chunk_calib.get((model, scenario))
         if ratio:
             return n_chunks / ratio
+        if n_chunks:
+            return float(n_chunks)
         return n_chars / out_cpt
 
     def _mt_name(self, model: str) -> str:
@@ -1646,6 +1659,7 @@ class BenchRun:
         stall_count = 0         # 停滞次数：区分「一次大停滞」与「频繁小抖动」
         text_len = 0
         reason_len = 0          # reasoning_content（思考流）字符数，也计入测速
+        head_text = ""          # 正文前 32 字符：识别服务端软超限占位回复（prompt too long）
         n_chunks = 0            # 携带正文/思考内容的 SSE 事件数（≈token 事件）
         samples: deque[tuple[float, float]] = deque()   # (t, est_tokens) 滑窗采样
         usage = None
@@ -1808,6 +1822,8 @@ class BenchRun:
                     rpiece = delta.get("reasoning_content")
                     if piece:
                         text_len += len(piece)
+                        if len(head_text) < 32:
+                            head_text = (head_text + piece)[:32]
                     if rpiece:
                         reason_len += len(rpiece)
                     if piece or rpiece:
@@ -1911,9 +1927,28 @@ class BenchRun:
                 await self.emit({"type": "tick", "tag": tag, "model": model, "scenario": scenario,
                                  "ctx": ctx, "conc": conc, "req": req_i, "phase": "error", "msg": msg})
             return {"req": req_i, "err": msg}
+        # 服务端软超限（fastllm 系）：超长 prompt 不报 4xx，而是 200 + 正文替换为
+        # 占位串 "prompt too long"（finish=stop、单 token）。此时 TTFT/prefill 是
+        # 「拒绝耗时 ÷ prompt 长度」，会冒出数十万 tok/s 的假数据——按错误点收口，
+        # 与硬超限（_is_ctx_overflow）同口径提示（config.json 配 max_ctx 自动跳档）
+        if _is_soft_ctx_overflow(head_text, text_len + reason_len):
+            msg = (f"服务端将超长 prompt 替换为占位回复（prompt too long），该点数据无效："
+                   f"{model} 在 {_fmt_ctx(ctx)} 超出服务端上下文上限"
+                   f"（config.json deployments 配 max_ctx 可自动跳过超限档位）")
+            if not quiet:
+                await self.emit({"type": "tick", "tag": tag, "model": model, "scenario": scenario,
+                                 "ctx": ctx, "conc": conc, "req": req_i, "phase": "error", "msg": msg})
+            return {"req": req_i, "err": msg}
+        # 输出 token 兜底估算与 _est_out 同口径：SSE 事件数优先（未校准时按
+        # 1 事件/token 直计），无事件才回退字符数 ÷ 输出系数（ADR-0019）——
+        # 字符系数按中文先验 1.5 估英文输出（~4.2 字符/token）会超发 ~2.8 倍，
+        # 触发断流丢 usage、永远无法校准的恶性循环
+        est_chunks = (n_chunks / self.chunk_calib.get((model, scenario), 1.0)
+                      if n_chunks else None)
         est_out = (reason_len + text_len) / out_cpt
         out_tokens = (usage.get("completion_tokens")
-                      if usage and usage.get("completion_tokens") else round(est_out))
+                      if usage and usage.get("completion_tokens")
+                      else round(est_chunks if est_chunks is not None else est_out))
         prompt_tokens = (usage.get("prompt_tokens")
                          if usage and usage.get("prompt_tokens") else est_prompt)
         # 截断异常判定（ADR-0016 防线 1 的事中复核）：usage 为真且输出明显超下发

@@ -21,6 +21,7 @@ from bench import (
     _decode_burst,
     _fill,
     _is_ctx_overflow,
+    _is_soft_ctx_overflow,
     _load_code_pool,
     _make_module_stream,
     _make_stream,
@@ -409,6 +410,17 @@ class TestCtxOverflowRetry(unittest.TestCase):
         # keep ≥ 原长时不动
         self.assertEqual(_trim_middle(content, len(content) + 1), content)
 
+    def test_soft_overflow_detection(self):
+        """fastllm 系软超窗占位回复：整体输出即 "prompt too long"（≤32 字符）。"""
+        self.assertTrue(_is_soft_ctx_overflow("prompt too long", 15))
+        self.assertTrue(_is_soft_ctx_overflow("  Prompt Too Long\n", 18))  # 大小写/空白
+        self.assertTrue(_is_soft_ctx_overflow("prompt too long", 32))      # 边界长度
+        # 正常输出不误判：前缀相同但有后续内容 / 超长
+        self.assertFalse(_is_soft_ctx_overflow("prompt too long, please retry", 29))
+        self.assertFalse(_is_soft_ctx_overflow("prompt too long" + "x" * 20, 35))
+        self.assertFalse(_is_soft_ctx_overflow("Prompt is too long to process", 29))
+        self.assertFalse(_is_soft_ctx_overflow("", 0))
+
 
 class TestOutLimitGuards(unittest.TestCase):
     """ADR-0016 输出长度治理的参数面：三场景引导文案模板齐全、容差与断流
@@ -428,6 +440,30 @@ class TestOutLimitGuards(unittest.TestCase):
         # 引导字数折算：512 tokens 创意档 × 1.5 字/token × 1.2 = 921 字
         self.assertEqual(int(512 * SCENARIOS["creative"]["out_cpt"]
                              * OUT_HINT_FACTOR), 921)
+
+
+class TestEstOut(unittest.TestCase):
+    """ADR-0019 输出估算口径：SSE 事件数优先，未校准时按 1 事件/token 直计，
+    无事件才回退字符系数（英文输出 ~4.2 字符/token 按中文先验 1.5 估会超发
+    ~2.8 倍，触发断流丢 usage 的恶性循环）。"""
+
+    def _run(self):
+        r = BenchRun.__new__(BenchRun)
+        r.chunk_calib = {}
+        return r
+
+    def test_chunk_first_uncalibrated(self):
+        # 未校准：100 事件直计 100（字符数 430 不参与），英文形态不虚发
+        self.assertEqual(self._run()._est_out("m", "creative", 100, 430, 1.5), 100.0)
+
+    def test_calibrated_ratio(self):
+        r = self._run()
+        r.chunk_calib[("m", "creative")] = 2.0   # 实测 2 事件/token
+        self.assertEqual(r._est_out("m", "creative", 100, 430, 1.5), 50.0)
+
+    def test_no_chunk_falls_back_to_chars(self):
+        # 零事件（如无正文纯思考被剥离等）才回退字符系数
+        self.assertEqual(self._run()._est_out("m", "creative", 0, 30, 1.5), 20.0)
 
 
 if __name__ == "__main__":

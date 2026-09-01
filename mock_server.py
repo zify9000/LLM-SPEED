@@ -13,9 +13,11 @@ DeepSeek 风格（chat 端点不带 /v1 前缀）：MOCK_NO_V1=1 python mock_ser
 模拟响应头延迟到首个内容 token（prefill 期间无任何字节，LiteLLM→vLLM 链路行为）：MOCK_DELAY_HEADERS=1
 模拟 decode 中段一次停滞（秒，验证空窗诊断）：MOCK_STALL=4
 模拟流末不发 usage 帧（测速端走估算兜底）：MOCK_NO_USAGE=1
+模拟每 token 多字符输出（英文形态：1 事件/token、chars/token≈4）：MOCK_CHUNK_CHARS=4
 模拟服务端并发 prefill 串行化（全局排队）：MOCK_SERIALIZE=1
 模拟 /models 慢响应（秒，验证 RTT 基线期停止）：MOCK_MODELS_DELAY=5
 模拟模型上下文窗口上限（tokens，prompt+max_tokens 超限返回 400 context exceeded）：MOCK_MAX_CTX=4096
+模拟 fastllm 系「软超窗」（超限不报错，200 + 正文 "prompt too long"）：MOCK_SOFT_MAX_CTX=4096
 模拟服务端前缀缓存（append-only 增长的 prompt 只增量 prefill，usage 回传命中）：MOCK_CACHE=1
 模拟忽略 max_tokens（只认 max_completion_tokens，opencode zen 行为；旧名请求输出跑飞 4× 上限）：MOCK_IGNORE_MAX_TOKENS=1
 模拟严格校验网关拒收 max_completion_tokens（400 Unrecognized request argument）：MOCK_REJECT_MCT=1
@@ -31,6 +33,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 PP = float(os.environ.get("MOCK_PP", "1200"))    # 模拟 prefill 速度 tok/s
 TG = float(os.environ.get("MOCK_TG", "60"))     # 模拟单请求 decode 速度 tok/s
 CPT = float(os.environ.get("MOCK_CPT", "1.8"))  # 字符/token，需与测速端估算一致才准
+CH = int(os.environ.get("MOCK_CHUNK_CHARS", "1"))  # 每 token 事件的字符数：置 4 模拟英文输出（1 事件/token 但 chars/token≈4，验证 chunk 直计不虚发）
 REASON = int(os.environ.get("MOCK_REASON", "0"))   # 正文前先输出多少个 reasoning_content token
 NO_CONTENT = os.environ.get("MOCK_NO_CONTENT", "")  # 置 1 则只输出思考、无正文
 REJECT_THINKING = os.environ.get("MOCK_REJECT_THINKING", "")  # 置 1 则带 thinking 参数的请求 400
@@ -44,6 +47,7 @@ NO_USAGE = os.environ.get("MOCK_NO_USAGE", "")  # 置 1 则流末不发 usage �
 SERIALIZE = os.environ.get("MOCK_SERIALIZE", "")  # 置 1 则 prefill 全局串行（模拟服务端并发 prefill 串行化）
 MODELS_DELAY = float(os.environ.get("MOCK_MODELS_DELAY", "0"))  # /models 响应前 sleep 秒数（模拟 RTT 基线期慢网关）
 MAX_CTX = int(os.environ.get("MOCK_MAX_CTX", "0"))  # 置 N 则 prompt+max_tokens 超 N 返回 400 超窗（验证删减上下文重试）
+SOFT_MAX_CTX = int(os.environ.get("MOCK_SOFT_MAX_CTX", "0"))  # 置 N 则 prompt+max_tokens 超 N 时 200 + 正文 "prompt too long"（fastllm 系软超窗，验证测速端识别兜底）
 CACHE = os.environ.get("MOCK_CACHE", "")  # 置 1 模拟前缀缓存：与已见 prompt 的公共前缀部分不计 prefill 耗时（验证 agent 连续任务链）
 CACHE_NOREPORT = os.environ.get("MOCK_CACHE_NOREPORT", "")  # 置 1 则缓存生效但 usage 不回传命中字段（验证缓存迹象判别：TTFT 走平 → ≈差分估算）
 IGNORE_MT = os.environ.get("MOCK_IGNORE_MAX_TOKENS", "")  # 置 1 则忽略 max_tokens（只认 max_completion_tokens，opencode zen 行为；旧名请求输出跑飞 4× 上限）
@@ -129,6 +133,18 @@ async def _chat_impl(req: Request):
             f"However, you requested {prompt_tokens + max_tokens} tokens "
             f"({prompt_tokens} in the messages, {max_tokens} in the completion).",
             "code": "context_length_exceeded"}}, status_code=400)
+    if SOFT_MAX_CTX and prompt_tokens + max_tokens > SOFT_MAX_CTX:
+        # fastllm 系软超窗：不报 4xx，HTTP 200 流式返回、正文替换为占位串
+        # "prompt too long"、finish=stop、带 usage（与真实 fastllm 行为一致）
+        async def gen_soft():
+            yield "data: " + json.dumps({"choices":
+                [{"delta": {"content": "prompt too long"}, "finish_reason": None}]}) + "\n\n"
+            yield "data: " + json.dumps({"choices":
+                [{"delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": prompt_tokens,
+                          "completion_tokens": 1}}) + "\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(gen_soft(), media_type="text/event-stream")
     hit_tokens = 0
     if CACHE or CACHE_NOREPORT:
         # 前缀缓存：与任一已见 prompt 的最长公共前缀即命中（append-only
@@ -156,12 +172,12 @@ async def _chat_impl(req: Request):
             yield "data: " + json.dumps({"choices": [{"delta": {"reasoning_content": "思"}}]}) + "\n\n"
         burst = min(BURST, n_content)
         if burst:   # 首批 token 一次性吐出（不占 decode 时间轴上的间隔）
-            yield "data: " + json.dumps({"choices": [{"delta": {"content": "测" * burst}}]}) + "\n\n"
+            yield "data: " + json.dumps({"choices": [{"delta": {"content": "测" * (burst * CH)}}]}) + "\n\n"
         for i in range(n_content - burst):
             await asyncio.sleep(1.0 / TG)                # decode 逐 token
             if STALL and i == (n_content - burst) // 2:
                 await asyncio.sleep(STALL)               # 中段一次停滞（空窗诊断）
-            yield "data: " + json.dumps({"choices": [{"delta": {"content": "测"}}]}) + "\n\n"
+            yield "data: " + json.dumps({"choices": [{"delta": {"content": "测" * CH}}]}) + "\n\n"
         final = {"choices": [{"delta": {}, "finish_reason": "stop"}]}
         if not NO_USAGE:
             final["usage"] = {"prompt_tokens": prompt_tokens,
