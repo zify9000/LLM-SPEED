@@ -390,6 +390,8 @@ tr.fade td{opacity:.45}
 .sc-run-chip-t{font-size:13px; color:var(--ink)}
 .sc-run-chip-t b{font-family:var(--mono)}
 .sc-run-chip-s{font-size:12px; color:var(--ink-4); margin-top:2px; font-family:var(--mono)}
+.sc-run-chip-d{font-size:11.5px; color:var(--ink-4); margin-top:3px; word-break:break-all}
+.sc-foot a{color:var(--primary); text-decoration:none}
 .sc-run-dot{display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px}
 .sc-tt td.sc-best{color:var(--green); font-weight:700}
 .sc-cmp-badge{display:inline-block; font-size:11px; font-weight:600; color:var(--primary);
@@ -2748,6 +2750,23 @@ function cardHTML(model){
     </div>`;
   }).join("");
 
+  // 底部注释按需装配：只解释图上/统计区真实出现的口径（净/均区别未发生不出、
+  // 超物理界剔除未发生不出），无关公式不堆砌；出处附 GitHub 地址
+  const footNotes = [];
+  if(runKind === "llm"){
+    footNotes.push("Prefill 速度 = 实际 prompt tokens ÷（TTFT − 网络往返基线）"
+      + (all.some(p => p.turn != null) ? "，agent 场景暖轮为增量口径（（prompt − 前缀命中）÷ TTFT）" : ""));
+    if(all.some(p => decNetOf(p) !== decAvgOf(p)))
+      footNotes.push("净 Decode = 生成 tokens ÷ 校正窗口（相邻内容块间隔 >1s 的部分封顶）· 均 Decode = 生成 tokens ÷ 原始窗口（含停滞）");
+    const nPhys = all.filter(p => preOf(p) != null && preOf(p) > PRE_PHYS_GATE).length;
+    if(nPhys) footNotes.push(`${nPhys} 点 Prefill 读数超物理界（> ${fmtNum(PRE_PHYS_GATE)} tok/s）已从均值/范围统计剔除`);
+  } else if(runKind === "ocr"){
+    footNotes.push("单张时延 = 总耗时 ÷ 图片张数 · 并发吞吐 = 总张数 ÷ 批窗口");
+  } else {
+    footNotes.push("RTF = 净耗时 ÷ 音频时长 · 倍速 = 音频时长 ÷ 净耗时 · 并发吞吐 = 总音频量 ÷ 批窗口（音频分钟/分钟）");
+  }
+  const footHtml = `<div class="sc-foot">${footNotes.join(" · ")} · 由 <a href="https://${REPO_URL}" target="_blank" rel="noopener">LLM-SPEED</a> 生成 · ${REPO_URL}</div>`;
+
   return `<div class="speed-card" data-model="${esc(model)}">
     <div class="sc-head">
       <div class="sc-brand">
@@ -2769,11 +2788,7 @@ function cardHTML(model){
     ${metaHtml}
     ${scenHtml}
     ${cardDetailHTML(model)}
-    <div class="sc-foot">${runKind === "llm"
-      ? "Prefill 速度 = 实际 prompt tokens ÷（TTFT − 网络往返基线），agent 场景暖轮为增量口径（（prompt − 前缀命中）÷ TTFT）· 净 Decode = 生成 tokens ÷ 校正窗口（相邻内容块间隔 >1s 的部分封顶）· 均 Decode = 生成 tokens ÷ 原始窗口（含停滞）· Prefill 读数超物理界（> " + fmtNum(PRE_PHYS_GATE) + " tok/s）的点已从均值/范围统计剔除 · 由 LLM-SPEED 生成"
-      : runKind === "ocr"
-      ? "单张时延 = 总耗时 ÷ 图片张数 · 并发吞吐 = 总张数 ÷ 批窗口 · 由 LLM-SPEED 生成"
-      : "RTF = 净耗时 ÷ 音频时长 · 倍速 = 音频时长 ÷ 净耗时 · 并发吞吐 = 总音频量 ÷ 批窗口（音频分钟/分钟）· 由 LLM-SPEED 生成"}</div>
+    ${footHtml}
   </div>`;
 }
 /* 按模型平铺生成卡片（多模型各一张）；历史载入时自动调用并滚动到位。
@@ -2960,7 +2975,11 @@ async function downloadCard(){
    跨运行同色即同次。agent 链按轮次推进、各次轮次轴不可对齐，只进汇总表
    不出叠加曲线；Decode 对比图聚焦主指标（净速/净耗时，多并发叠加总吞吐），
    均速/总耗时口径回单次卡片查看 */
-const RUN_COLORS = CONC_COLORS;   // 运行配色复用并发档调色板（≥8 色，循环取）
+/* 运行配色：跨次对比的首要区分维度，前四色取两两高对比组合（靛蓝/橙/青/品红）。
+   不复用 CONC_COLORS——其 #1 靛 #2 紫是相邻色，双运行对比时几乎不可分辨 */
+const RUN_COLORS = ["#4F46E5", "#EA580C", "#0D9488", "#DB2777", "#CA8A04",
+  "#2563EB", "#7C3AED", "#16A34A", "#DC2626", "#0891B2"];
+const REPO_URL = "github.com/zify9000/LLM-SPEED";   // 卡片页脚出处链接
 const cmpLegendKey = (sc, metric) => `cmp::${sc}::${metric}`;   // 对比卡跨模型合图，键不带模型
 
 /* 对比记录选择弹窗：勾选 ≥2 条历史（默认勾选最新两条），确认后逐条拉取存档 */
@@ -3064,14 +3083,24 @@ function cardToolsHTML(hasCharts){
   </div>`;
 }
 /* 对比卡片：运行色签条（仪表盘式横排卡片）——颜色点=叠加图系列颜色，兼作
-   图例键；主行 #N+时间+备注，副行模型+Provider+测点数 */
+   图例键；主行 #N+时间+备注，副行模型+Provider+测点数，第三行部署信息
+   （本地部署：量化/硬件/推理框架/核心参数，存档 cfg.model_info 快照；云端
+   deployments 只承载 max_ctx 钳制，不出此行——与单次卡片 meta 同口径） */
 function cmpRunsStripHTML(runs){
-  return `<div class="sc-run-chips">${runs.map(r => `<div class="sc-run-chip">
+  return `<div class="sc-run-chips">${runs.map(r => {
+    const dep = (r.cfg.provider_local ?? true) ? r.models
+      .map(m => r.cfg.model_info?.[m]).filter(Boolean)
+      .map(mi => [mi.deploy_label, mi.quant, mi.hardware, mi.framework, mi.params]
+        .filter(Boolean).join(" · "))
+      .filter(Boolean).join(" ｜ ") : "";
+    return `<div class="sc-run-chip">
     <span class="sc-run-dot" style="background:${r.color}"></span>
     <div class="sc-run-chip-body">
       <div class="sc-run-chip-t"><b>${r.tag}</b> ${esc(r.started_at || "-")}${r.note ? ` · ${esc(r.note)}` : ""}</div>
       <div class="sc-run-chip-s">${esc(r.models.join("、"))}${r.provider_label ? " · " + esc(r.provider_label) : ""} · ${r.results.length} 点</div>
-    </div></div>`).join("")}</div>`;
+      ${dep ? `<div class="sc-run-chip-d">${esc(dep)}</div>` : ""}
+    </div></div>`;
+  }).join("")}</div>`;
 }
 /* 对比汇总表：行=运行，列随场景类型切（llm 主指标 / 媒体指标 / agent 链分段口径，
    与单次卡片统计格同一套 scenarioStats 来源；prefill 超物理界读数在 scenarioStats
@@ -3081,7 +3110,10 @@ function cmpScenSummaryHTML(sc, entries){
   const kind = entries[0].pts[0] ? (entries[0].pts[0].kind || scenKind(sc)) : "llm";
   const isAgent = entries.some(e => e.pts.some(p => p.turn != null));
   const tagCell = e => `<td><span class="sc-run-dot" style="background:${e.color}"></span>${e.tag}</td>`;
-  const modelCell = e => `<td>${esc(e.models.join("、"))}</td>`;
+  // 模型列仅在确有对比价值时出现（全部运行同一模型时该列无增量信息）
+  const multiModel = new Set(entries.flatMap(e => e.models || [])).size > 1;
+  const modelCell = e => multiModel ? `<td>${esc(e.models.join("、"))}</td>` : "";
+  const modelTh = multiModel ? "<th>模型</th>" : "";
   const okN = e => `${e.pts.filter(p => p.all_ok).length}/${e.pts.length}`;
   const mean = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
   const bestIdx = (vals, lower) => { let bi = -1;
@@ -3090,7 +3122,7 @@ function cmpScenSummaryHTML(sc, entries){
   const td = (v, fmt, bi, i) => `<td${bi === i ? ` class="sc-best"` : ""}>${v != null ? fmt(v) : "-"}</td>`;
   let head, rows;
   if(isAgent){
-    head = "<tr><th>运行</th><th>模型</th><th>冷启动 TTFT(s)</th><th>阶段一 TTFT 均值(s)</th>"
+    head = `<tr><th>运行</th>${modelTh}<th>冷启动 TTFT(s)</th><th>阶段一 TTFT 均值(s)</th>`
       + "<th>阶段二 Prefill 均值(tok/s)</th><th>测点数</th></tr>";
     const cols = entries.map(e => {
       const ok = e.pts.filter(p => p.all_ok);
@@ -3120,19 +3152,21 @@ function cmpScenSummaryHTML(sc, entries){
     });
     const bM = bestIdx(cols.map(c => c.m), kind === "ocr");   // ocr 单张时延取小，asr/tts 倍速取大
     const bT = bestIdx(cols.map(c => c.t), false);
-    head = `<tr><th>运行</th><th>模型</th><th>${kind === "ocr" ? "单张时延均值(ms)" : "倍速均值(×)"}</th>`
+    head = `<tr><th>运行</th>${modelTh}<th>${kind === "ocr" ? "单张时延均值(ms)" : "倍速均值(×)"}</th>`
       + `<th>${kind === "ocr" ? "吞吐均值(张/秒)" : "吞吐均值(音频分钟/分钟)"}</th><th>测点数</th></tr>`;
     rows = entries.map((e, i) => `<tr>${tagCell(e)}${modelCell(e)}`
       + td(cols[i].m, round1, bM, i) + td(cols[i].t, round1, bT, i)
       + `<td>${okN(e)}</td></tr>`).join("");
   } else {
-    head = "<tr><th>运行</th><th>模型</th><th>Prefill 均值(tok/s)</th><th>Prefill 峰值</th>"
+    // 总吞吐列仅在任一运行有多并发点时出现（全单并发矩阵该列恒空，摆着突兀）
+    const showTot = entries.some(e => e.pts.some(p => p.concurrency > 1));
+    head = `<tr><th>运行</th>${modelTh}<th>Prefill 均值(tok/s)</th><th>Prefill 峰值</th>`
       + "<th>Decode 净速范围(tok/s)</th><th>Decode 均速范围(tok/s)</th>"
-      + "<th>Decode 均值(tok/s)</th><th>总吞吐均值(tok/s)</th><th>测点数</th></tr>";
+      + `<th>Decode 均值(tok/s)</th>${showTot ? "<th>总吞吐均值(tok/s)</th>" : ""}<th>测点数</th></tr>`;
     const cols = entries.map(e => scenarioStats(e.pts));
     const bPre = bestIdx(cols.map(s => s.preAvg), false);
     const bDec = bestIdx(cols.map(s => s.baseDecAvg), false);
-    const bTot = bestIdx(cols.map(s => s.hiTotal), false);
+    const bTot = showTot ? bestIdx(cols.map(s => s.hiTotal), false) : -1;
     rows = entries.map((e, i) => { const s = cols[i];
       return `<tr>${tagCell(e)}${modelCell(e)}`
         + td(s.preAvg, fmtNum, bPre, i)
@@ -3140,7 +3174,7 @@ function cmpScenSummaryHTML(sc, entries){
         + `<td>${s.decRange ? `${fmtNum(s.decRange[0])}–${fmtNum(s.decRange[1])}` : "-"}</td>`
         + `<td>${s.decAvgRange ? `${fmtNum(s.decAvgRange[0])}–${fmtNum(s.decAvgRange[1])}` : "-"}</td>`
         + td(s.baseDecAvg, fmtNum, bDec, i)
-        + `<td${bTot === i ? ` class="sc-best"` : ""}>${s.hiTotal != null ? fmtNum(s.hiTotal) + (s.hiConc ? ` <small>(并发${s.hiConc})</small>` : "") : "-"}</td>`
+        + (showTot ? `<td${bTot === i ? ` class="sc-best"` : ""}>${s.hiTotal != null ? fmtNum(s.hiTotal) + (s.hiConc ? ` <small>(并发${s.hiConc})</small>` : "") : "-"}</td>` : "")
         + `<td>${okN(e)}</td></tr>`; }).join("");
   }
   return `<div class="sc-cmp-sum"><table class="sc-tt"><thead>${head}</thead><tbody>${rows}</tbody></table></div>`;
@@ -3259,6 +3293,21 @@ function cmpCardHTML(){
           </div>`}
     </div>`;
   }).join("");
+  // 底部注释按需装配（与单次卡片同原则：只解释图上真实出现的口径）；
+  // 总吞吐括注仅在有多并发点时出现；出处附 GitHub 地址
+  const footNotes = [];
+  if(allLlm){
+    const anyConc = runs.some(r => r.pts.some(p => p.concurrency > 1));
+    footNotes.push(`对比图聚焦主指标：Decode 仅净速/净耗时${anyConc ? "（多并发叠加总吞吐）" : ""}，均速/总耗时口径回单次卡片`);
+    footNotes.push("Prefill 速度 = 实际 prompt tokens ÷（TTFT − 网络往返基线）");
+    footNotes.push("净 Decode = 生成 tokens ÷ 校正窗口（>1s 空窗封顶）");
+    const nPhys = runs.flatMap(r => r.pts)
+      .filter(p => preOf(p) != null && preOf(p) > PRE_PHYS_GATE).length;
+    if(nPhys) footNotes.push(`${nPhys} 点 Prefill 读数超物理界（> ${fmtNum(PRE_PHYS_GATE)} tok/s）已从统计剔除`);
+  } else {
+    footNotes.push("对比图：主指标与并发吞吐按运行分色叠加");
+  }
+  const footHtml = `<div class="sc-foot">${footNotes.join(" · ")} · 由 <a href="https://${REPO_URL}" target="_blank" rel="noopener">LLM-SPEED</a> 生成 · ${REPO_URL}</div>`;
   return `<div class="speed-card sc-cmp-card" data-cmp="1">
     <div class="sc-head">
       <div class="sc-brand">
@@ -3279,9 +3328,7 @@ function cmpCardHTML(){
     ${cmpRunsStripHTML(runs)}
     ${scenHtml}
     ${cmpDetailHTML(runs)}
-    <div class="sc-foot">${allLlm
-      ? "对比图聚焦主指标：Decode 仅净速/净耗时（多并发叠加总吞吐），均速/总耗时口径回单次卡片 · Prefill 速度 = 实际 prompt tokens ÷（TTFT − 网络往返基线）· 净 Decode = 生成 tokens ÷ 校正窗口（>1s 空窗封顶）· Prefill 读数超物理界（> " + fmtNum(PRE_PHYS_GATE) + " tok/s）的点已从统计剔除 · 由 LLM-SPEED 生成"
-      : "对比图：主指标与并发吞吐按运行分色叠加 · 由 LLM-SPEED 生成"}</div>
+    ${footHtml}
   </div>`;
 }
 /* 对比卡片的明细区：按场景分组、逐运行标注（颜色点+标签+时间+备注）平铺各次
