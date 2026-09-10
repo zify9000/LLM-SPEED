@@ -52,20 +52,45 @@ def turn_segments(row) -> list[str]:
 
 
 def blocks_from(segs: list[str]):
-    """段序列 → 轨迹块：按段边界聚合到 ≥MIN_BLOCK；单段超 MAX_BLOCK 硬切。"""
-    buf, size = [], 0
+    """段序列 → 轨迹块：按段边界聚合，任何输出块都满足
+    MIN_BLOCK ≤ 块长 ≤ MAX_BLOCK（块长按 "\\n\\n".join 后的实际长度计）；
+    单段超 MAX_BLOCK 硬切。buf 不足 MIN_BLOCK 时不单独吐碎块：
+    遇超长段/放不下时用段前缀补满到 MAX_BLOCK 一并吐出，剩余部分继续
+    参与后续聚合。结尾仍不足 MIN_BLOCK 的残段按既有约定丢弃
+    （下游 bench._load_agent_pool 对 <MIN_BLOCK 的文件本就静默不采纳）。"""
+    buf, size = [], 0  # size = "\n\n".join(buf) 的实际长度（含分隔符）
     for seg in segs:
         while len(seg) > MAX_BLOCK:
-            if buf:
+            if buf and size >= MIN_BLOCK:
                 yield "\n\n".join(buf)
                 buf, size = [], 0
-            yield seg[:MAX_BLOCK]
-            seg = seg[MAX_BLOCK:]
-        if size + len(seg) > MAX_BLOCK and size >= MIN_BLOCK:
-            yield "\n\n".join(buf)
-            buf, size = [], 0
-        buf.append(seg)
-        size += len(seg)
+            if buf:
+                take = MAX_BLOCK - size - 2
+                yield "\n\n".join(buf + [seg[:take]])
+                seg = seg[take:]
+                buf, size = [], 0
+            else:
+                yield seg[:MAX_BLOCK]
+                seg = seg[MAX_BLOCK:]
+        if buf and size + len(seg) + 2 > MAX_BLOCK:
+            if size >= MIN_BLOCK:
+                yield "\n\n".join(buf)
+                buf, size = [], 0
+                buf.append(seg)
+                size = len(seg)
+            else:
+                take = MAX_BLOCK - size - 2
+                yield "\n\n".join(buf + [seg[:take]])
+                seg = seg[take:]
+                buf, size = [], 0
+                buf.append(seg)
+                size = len(seg)
+        elif buf:
+            buf.append(seg)
+            size += len(seg) + 2
+        else:
+            buf.append(seg)
+            size = len(seg)
     if buf and size >= MIN_BLOCK:
         yield "\n\n".join(buf)
 

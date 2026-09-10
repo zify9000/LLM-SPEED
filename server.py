@@ -7,17 +7,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
 import stat
+import tempfile
 import time
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 
-from bench import (AGENT_TURNS_DEFAULT, BenchRun, DEFAULT_CONCURRENCIES,
-                   DEFAULT_CTX_LIST, SCENARIOS)
+from bench import (AGENT_COLD_CTX_DEFAULT, AGENT_COLD_CTX_RANGE,
+                   AGENT_PHASE2_BASE, AGENT_TURNS_DEFAULT, AGENT_TURNS_RANGE,
+                   AGENT_TURN_DELTA_DEFAULT, AGENT_TURN_DELTA_RANGE, BenchRun,
+                   CTX_HEADROOM, DEFAULT_CONCURRENCIES, DEFAULT_CTX_LIST,
+                   SCENARIOS)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(BASE, "results")
@@ -72,6 +77,13 @@ def load_config_file() -> tuple[dict, str | None]:
     try:
         with open(CONFIG_PATH, encoding="utf-8") as f:
             d = json.load(f)
+        # 合法 JSON 不代表结构合法：顶层非对象 / providers 非数组会让
+        # load_providers 抛未捕获异常，与解析失败同走 config_error 降级
+        if not isinstance(d, dict):
+            return {}, f"config.json 结构非法: 顶层必须是对象（当前为 {type(d).__name__}）"
+        if "providers" in d and not isinstance(d["providers"], list):
+            return {}, (f"config.json 结构非法: providers 必须是数组"
+                        f"（当前为 {type(d['providers']).__name__}）")
         d.pop("api_key", None)   # 兼容旧配置：忽略其中的 key
         return d, None
     except Exception as e:  # noqa: BLE001
@@ -160,6 +172,9 @@ def match_deployments(provider: dict, models: list[str]) -> dict[str, dict]:
                 "hardware": dep.get("hardware") or "",
                 "framework": dep.get("framework") or "",
                 "params": dep.get("params") or "",
+                # 部署的模型类型（llm/asr/ocr/tts，缺省 llm）：场景按 kind 匹配
+                # （ADR-0020），随结果存档、供前端分组与引擎校验
+                "kind": dep.get("kind") or "llm",
             }
     return out
 
@@ -215,7 +230,9 @@ async def get_config():
     return {
         "providers": [{k: v for k, v in p.items()} for p in providers],
         "api_key_configured": any(p["has_key"] for p in providers),
-        "scenarios": [{"key": k, "label": v["label"]} for k, v in SCENARIOS.items()],
+        "scenarios": [{"key": k, "label": v["label"], "kind": v.get("kind", "llm"),
+                       "ladder": v.get("ladder"), "unit": v.get("unit")}
+                      for k, v in SCENARIOS.items()],
         "ctx_list": DEFAULT_CTX_LIST,
         "concurrencies": DEFAULT_CONCURRENCIES,
         "config_error": config_error,   # config.json 坏了不静默：前端显式告警
@@ -231,17 +248,20 @@ _PROVIDER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def _atomic_write(path: str, text: str, private: bool = False):
-    tmp = path + ".tmp"
+    # 临时文件在目标同目录以 mkstemp 创建（进程 id + 随机唯一名）：固定 .tmp
+    # 路径在多进程部署下会并发互踩；mkstemp 本身 0o600，凭据类新建即收紧
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
+                               prefix=os.path.basename(path) + ".", suffix=".tmp")
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        if private:   # 凭据类文件（.env）：沿用原文件权限，新建收紧为 0o600
+        if private:   # 凭据类文件（.env）：沿用原文件权限（新建已 0o600）
             os.chmod(tmp, stat.S_IMODE(os.stat(path).st_mode)
                      if os.path.exists(path) else 0o600)
         os.replace(tmp, path)   # 原子替换，写坏一半不会毁掉旧配置
     except BaseException:
         try:
-            os.unlink(tmp)      # 失败路径清理 .tmp 残渣
+            os.unlink(tmp)      # 失败路径清理临时文件残渣
         except OSError:
             pass
         raise
@@ -252,6 +272,7 @@ def _validate_providers(providers) -> list[dict]:
     if not isinstance(providers, list) or not providers:
         raise HTTPException(400, "providers 不能为空")
     out, seen = [], set()
+    env_owners: dict[str, str] = {}
     for p in providers:
         if not isinstance(p, dict):
             raise HTTPException(400, "provider 条目必须是对象")
@@ -262,6 +283,16 @@ def _validate_providers(providers) -> list[dict]:
         if name in seen:
             raise HTTPException(400, f"provider 名称重复: {name}")
         seen.add(name)
+        # env 键名冲突检查：非 A-Z0-9 字符统一映射为 _（编码规则不动，兼容既有
+        # .env 条目），但 gpt-4o 与 gpt_4o 会落到同一个 API_KEY_GPT_4O——两个
+        # provider 静默共用/互清同一 Key，可能把 key 发给错误网关，拒绝写入
+        env_name = _env_key_name(name)
+        owner = env_owners.get(env_name)
+        if owner:
+            raise HTTPException(
+                400, f"provider「{owner}」与「{name}」的 API Key 存储名冲突"
+                     f"（同映射到 {env_name}），会共用同一把 Key——请重命名其中一个")
+        env_owners[env_name] = name
         # 网关地址：gateway_urls（多地址，本地场景内网+隧道择优）优先，
         # 兼容旧单地址字段 gateway_url；至少一个，全部必须 http(s)://
         urls_in = p.get("gateway_urls")
@@ -296,11 +327,18 @@ def _validate_providers(providers) -> list[dict]:
                 "framework": str(d.get("framework") or "").strip()[:100],
                 "params": str(d.get("params") or "").strip()[:300],
             }
+            # 非有限值（NaN/Infinity，json.loads 会接受）同非正数口径：视为未配置
             if isinstance(max_ctx, (int, float)) and not isinstance(max_ctx, bool) \
-                    and int(max_ctx) > 0:
-                dep["max_ctx"] = int(max_ctx)   # 超窗钳制来源（ADR-0005），非正数视为未配置
+                    and math.isfinite(max_ctx) and int(max_ctx) > 0:
+                dep["max_ctx"] = int(max_ctx)   # 超窗钳制来源（ADR-0005）
             if d.get("active"):
                 dep["active"] = True   # 激活标记仅在置位时落盘，旧配置保持零字段
+            kind = str(d.get("kind") or "llm").lower()
+            if kind not in ("llm", "asr", "ocr", "tts"):
+                raise HTTPException(400, f"{name} 的部署 {dep['label'] or '未命名部署'} "
+                                         f"kind 必须是 llm/asr/ocr/tts: {kind!r}")
+            if kind != "llm":
+                dep["kind"] = kind   # 缺省 llm 不落盘，旧配置保持零字段
             deps.append(dep)
         # 一个模型允许映射多套部署，但激活只能有一套：重叠激活拒绝写入，
         # 否则生效口径（_resolve_deployment）出现二义
@@ -393,8 +431,22 @@ async def list_models(provider: str | None = None):
             data = r.json()
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"无法连接网关 {base_url}: {e}") from e
+    # 网关返回非预期结构不 500：顶层须为对象、data/models 须为数组，按本端点
+    # 既有口径转 502 并说明；单条缺 id 跳过（不因个别畸形条目丢整个列表）
+    if not isinstance(data, dict):
+        raise HTTPException(502, f"网关 {base_url} 返回了非预期的数据结构"
+                                 f"（顶层不是对象），无法解析模型列表")
     items = data.get("data") or data.get("models") or []
-    ids = [m["id"] if isinstance(m, dict) else str(m) for m in items]
+    if not isinstance(items, list):
+        raise HTTPException(502, f"网关 {base_url} 返回了非预期的数据结构"
+                                 f"（data/models 不是数组），无法解析模型列表")
+    ids = []
+    for m in items:
+        if isinstance(m, dict):
+            if m.get("id"):
+                ids.append(str(m["id"]))
+        else:
+            ids.append(str(m))
     return {"models": ids}
 
 
@@ -418,6 +470,11 @@ def _validate_bench_cfg(cfg: dict):
             not isinstance(c, int) or isinstance(c, bool)
             or not 1 <= c <= 64 for c in concs):
         raise HTTPException(400, "concurrencies 须为 ≤8 个、逐值 1~64 的整数")
+    # 回复模式（ADR-0021）：free 自由回答（默认）/ echo 模板续写（创意/代码
+    # 场景换用改写指令 + assistant 预填，decode 对齐高复用真实场景）
+    rm = cfg.get("reply_mode")
+    if rm is not None and rm not in ("free", "echo"):
+        raise HTTPException(400, "reply_mode 须为 free 或 echo")
     # Agent 连续任务链参数（可选，缺省引擎用默认值）：轮 1 冷启动独立配置
     # agent_cold_ctx（默认 10K）；两阶段暖轮数 agent_turns_p1（短文本）/
     # agent_turns_p2（长文本 ladder）显式配置；旧配置 agent_turns 单值由
@@ -453,6 +510,56 @@ def _validate_bench_cfg(cfg: dict):
             raise HTTPException(400, "agent_turn_delta 须为 256~32768 的整数或 [min, max] 区间")
         if len(vals) == 2 and vals[0] > vals[1]:
             raise HTTPException(400, "agent_turn_delta 区间须 min ≤ max")
+    # 复测/超时/输出上限/思考模式：bench_start 直接透传引擎，这里一并白名单化
+    # （repeats 上限对齐引擎钳制 1~5；thinking 枚举 = 引擎三值 auto/enabled/disabled）
+    rv = cfg.get("repeats")
+    if rv is not None and (not isinstance(rv, int) or isinstance(rv, bool)
+                           or not 1 <= rv <= 5):
+        raise HTTPException(400, "repeats 须为 1~5 的整数")
+    tv = cfg.get("timeout_s")
+    if tv is not None and (not isinstance(tv, (int, float)) or isinstance(tv, bool)
+                           or not 0 < tv <= 3600):
+        raise HTTPException(400, "timeout_s 须为 1~3600 的数值（秒）")
+    mt = cfg.get("max_tokens")
+    if mt is not None and (not isinstance(mt, int) or isinstance(mt, bool)
+                           or not 1 <= mt <= 32768):
+        raise HTTPException(400, "max_tokens 须为 1~32768 的整数")
+    th = cfg.get("thinking")
+    if th is not None and th not in ("auto", "enabled", "disabled"):
+        raise HTTPException(400, "thinking 须为 auto/enabled/disabled")
+
+
+# 与测速引擎（bench.py 阶段二 ladder）同口径的单轮增量钳制：引擎对每轮
+# 目标 min(增量, 262144)，这里估算上界同样钳制，告警才不虚报引擎已不会构造的超大轮
+AGENT_TURN_TARGET_CLAMP = 262144
+
+
+def _agent_chain_max_target(cfg: dict) -> int:
+    """agent 链最大轮目标的保守上界（tokens）：冷启动 + 阶段一暖轮增量上限 ×
+    轮数 + 阶段二 ladder（p2_base 起逐轮翻倍）之和。构成口径与引擎
+    _gen_agent_turns 一致，增量取钳制区间上界（N(1K) 采样的最坏值）。"""
+    p1, p2 = cfg.get("agent_turns_p1"), cfg.get("agent_turns_p2")
+    if p1 is not None and p2 is not None:
+        n1, n2 = int(p1), int(p2)
+    else:
+        turns = int(cfg.get("agent_turns") or AGENT_TURNS_DEFAULT)
+        n2 = turns // 2
+        n1 = turns - n2
+    dv = cfg.get("agent_turn_delta")
+    if isinstance(dv, (list, tuple)) and len(dv) == 2:
+        dmax = int(dv[1])
+    elif dv:
+        dmax = int(dv)
+    else:
+        dmax = AGENT_TURN_DELTA_DEFAULT[1]
+    dmax = max(AGENT_TURN_DELTA_RANGE[0], min(AGENT_TURN_DELTA_RANGE[1], dmax))
+    p2_base = max(1024, min(65536,
+                  int(cfg.get("agent_phase2_base") or AGENT_PHASE2_BASE)))
+    cold = max(AGENT_COLD_CTX_RANGE[0], min(AGENT_COLD_CTX_RANGE[1],
+               int(cfg.get("agent_cold_ctx") or AGENT_COLD_CTX_DEFAULT)))
+    # 阶段二逐轮翻倍可远超引擎的单轮钳制上限，按引擎同口径钳到 262144 再求和
+    return cold + n1 * dmax + sum(min(p2_base << i, AGENT_TURN_TARGET_CLAMP)
+                                  for i in range(n2))
 
 
 @app.post("/api/bench/start")
@@ -461,11 +568,14 @@ async def bench_start(cfg: dict):
     for field in ("models", "scenarios", "concurrencies"):
         if not cfg.get(field):
             raise HTTPException(400, f"缺少配置项: {field}")
-    # 纯 Agent 场景按任务轮次出点，不以上下文档位为变量——ctx_list 可缺省
-    if any(s != "agent" for s in cfg["scenarios"]) and not cfg.get("ctx_list"):
+    # 纯文本场景按上下文档位出点；agent 场景按任务轮次；媒体场景（asr/ocr/tts）
+    # 按场景自带阶梯（时长/张数/字符）出点——后两类 ctx_list 均可缺省
+    if any(SCENARIOS[s].get("kind", "llm") == "llm" and s != "agent"
+           for s in cfg["scenarios"]) and not cfg.get("ctx_list"):
         raise HTTPException(400, "缺少配置项: ctx_list")
     cfg.setdefault("ctx_list", [])
     _validate_bench_cfg(cfg)
+    warnings: list[str] = []   # 启动前的显式告警：随 status 事件下发（见 run 装配处）
     # 任务备注：可选短文本，随 cfg 存档、展示在历史标题最前；非字符串/空白丢弃
     note = cfg.get("note")
     if isinstance(note, str) and note.strip():
@@ -487,6 +597,22 @@ async def bench_start(cfg: dict):
         cfg["api_key"] = provider_key(p)
         # 部署环境（硬件/框架/参数）跟随被测模型，由服务端按映射注入并随结果存档
         cfg["model_info"] = match_deployments(p, cfg.get("models") or [])
+        # 模型类型映射（ADR-0020）：按部署的 kind 下发（未映射到部署的模型按
+        # llm），引擎据此把模型分发到对应 kind 的场景，mismatch 在这里 400
+        cfg["model_kind"] = {
+            m: (cfg["model_info"].get(m) or {}).get("kind", "llm")
+            for m in (cfg.get("models") or [])
+        }
+        bad = sorted({(m, s) for s in cfg["scenarios"] for m in cfg["models"]
+                      if cfg["model_kind"].get(m, "llm")
+                      != SCENARIOS[s].get("kind", "llm")})
+        if bad:
+            hint = "; ".join(f"{m}（{cfg['model_kind'].get(m, 'llm')}）× 场景「"
+                             f"{SCENARIOS[s]['label']}」（{SCENARIOS[s].get('kind', 'llm')}）"
+                             for m, s in bad[:3])
+            raise HTTPException(400, f"模型类型与场景不匹配：{hint}"
+                                     f"{' 等' if len(bad) > 3 else ''}"
+                                     "——模型选择器只列出同类型场景")
         # 部署的实际上下文上限（deployments[].max_ctx）：超限档位由测速引擎跳过，
         # 避免构造出必然 400 的超窗 prompt（ADR-0005）。同一模型多套部署时
         # 取激活的那套（与 match_deployments 同口径）
@@ -495,6 +621,31 @@ async def bench_start(cfg: dict):
             for m in (cfg.get("models") or [])
             if (dep := _resolve_deployment(p, m)) and dep.get("max_ctx")
         }
+        # 未命中显式告警（不静默）：provider 配了 deployments 但被测模型一个都
+        # 没命中时，model_info/model_max_ctx 为空、引擎失去 max_ctx 钳制保护，
+        # 超窗 prompt 会直接打爆模型上限（事故：部署映射模型名与网关实际 id
+        # 不一致，静默丢保护）——这里显式提示用户去补映射
+        if p.get("deployments"):
+            for m in (cfg.get("models") or []):
+                if not _resolve_deployment(p, m):
+                    warnings.append(
+                        f"⚠ {m}：模型未映射部署环境，max_ctx 钳制不可用"
+                        "（请在「部署环境」中核对模型名后补映射）")
+        # agent 链总目标校验（不阻断）：最大轮目标超出部署预算
+        # （max_ctx − max_tokens − 余量）时引擎会逐轮跳过（point_skipped），
+        # 预先告知用户会有轮次被跳过
+        if "agent" in (cfg.get("scenarios") or []):
+            max_target = _agent_chain_max_target(cfg)
+            max_tokens = int(cfg.get("max_tokens")
+                             or SCENARIOS["agent"]["max_tokens_default"])
+            for m in (cfg.get("models") or []):
+                budget = (cfg["model_max_ctx"].get(m) or 0) \
+                    - max_tokens - CTX_HEADROOM
+                if budget > 0 and max_target > budget:
+                    warnings.append(
+                        f"⚠ {m}：agent 链最大轮目标 ~{max_target} tokens 超出"
+                        f"部署预算 {budget}（max_ctx − max_tokens − 余量），"
+                        "超出上限的轮次将被跳过")
         if not p["local"]:
             # 云端不做并发/吞吐测试：响应不受控、可能调度到不同推理设备，
             # 服务端强制单发，不信任前端传参（ADR-0003）
@@ -508,6 +659,10 @@ async def bench_start(cfg: dict):
         # 旧 gateway_url 自定义地址分支已删除（ADR-0001）：它把全局 key 发往任意提交地址
         raise HTTPException(400, "缺少 provider")
     run = BenchRun(cfg, results_dir=RESULTS_DIR)
+    # 告警先入 run.history 再起测：订阅连接（含中途进入的标签页）回放即得，
+    # 复用现有 status 事件协议，不新造事件类型
+    for msg in warnings:
+        await run.emit({"type": "status", "msg": msg})
     RUNS[run.run_id] = run
     t = asyncio.create_task(_drive(run, cfg.get("provider")))
     _BG_TASKS.add(t)                        # 持强引用防 GC 提前回收任务
@@ -592,6 +747,8 @@ async def bench_active():
                    and cfg.get("agent_turns_p2") is not None
                    else 1 + int(cfg.get("agent_turns") or AGENT_TURNS_DEFAULT))
         n_scen = sum(n_turns if s == "agent"
+                     else len(SCENARIOS[s].get("ladder") or [])   # 媒体场景：场景阶梯
+                     if "ladder" in SCENARIOS[s]
                      else len(cfg.get("ctx_list") or [])
                      for s in cfg.get("scenarios") or [])
         total = len(cfg.get("models") or []) * n_scen * len(cfg.get("concurrencies") or [])
@@ -636,8 +793,12 @@ async def bench_history_detail(run_id: str):
     path = os.path.join(RESULTS_DIR, f"{run_id}.json")
     if not os.path.exists(path):
         raise HTTPException(404, "not found")
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        # 与「不存在」区分：文件在但内容损坏，提示用户手工修复/删除
+        raise HTTPException(404, "存档文件已损坏（JSON 无法解析），无法读取") from None
 
 
 @app.post("/api/bench/history/{run_id}/note")
@@ -651,15 +812,18 @@ async def bench_history_note(run_id: str, body: dict):
     note = body.get("note")
     if not isinstance(note, str):
         raise HTTPException(400, "note 须为字符串")
-    with open(path, encoding="utf-8") as f:
-        d = json.load(f)
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+    except json.JSONDecodeError:
+        raise HTTPException(404, "存档文件已损坏（JSON 无法解析），无法修改备注") from None
     note = note.strip()[:80]
     if note:
         d.setdefault("cfg", {})["note"] = note
     else:
         d.get("cfg", {}).pop("note", None)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(d, f, ensure_ascii=False, indent=1)
+    # 原子替换写回：直接覆写会因进程被杀留下写了一半的存档，永久损坏既有测速记录
+    _atomic_write(path, json.dumps(d, ensure_ascii=False, indent=1) + "\n")
     return {"ok": True, "note": note}
 
 

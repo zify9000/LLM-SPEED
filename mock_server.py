@@ -9,6 +9,7 @@
 DeepSeek 风格（chat 端点不带 /v1 前缀）：MOCK_NO_V1=1 python mock_server.py
 模拟分词偏差（验证输入系数校准）：MOCK_CPT=3.9；模拟严格校验网关：MOCK_REJECT_THINKING=1
 模拟 decode 起步突发（首批 token 一次性吐出）：MOCK_BURST=15
+模拟投机解码周期性交付（每事件 k token、间隔 k/tg）：MOCK_ACCEPT=4
 模拟 prefill 期 SSE 注释心跳（秒间隔，如 0.3）：MOCK_KEEPALIVE=0.3
 模拟响应头延迟到首个内容 token（prefill 期间无任何字节，LiteLLM→vLLM 链路行为）：MOCK_DELAY_HEADERS=1
 模拟 decode 中段一次停滞（秒，验证空窗诊断）：MOCK_STALL=4
@@ -18,13 +19,24 @@ DeepSeek 风格（chat 端点不带 /v1 前缀）：MOCK_NO_V1=1 python mock_ser
 模拟 /models 慢响应（秒，验证 RTT 基线期停止）：MOCK_MODELS_DELAY=5
 模拟模型上下文窗口上限（tokens，prompt+max_tokens 超限返回 400 context exceeded）：MOCK_MAX_CTX=4096
 模拟 fastllm 系「软超窗」（超限不报错，200 + 正文 "prompt too long"）：MOCK_SOFT_MAX_CTX=4096
+  占位串返回通道（content=正文，reasoning=走 reasoning_content，复现思考模型形态）：MOCK_SOFT_MAX_CTX_FIELD=reasoning
+  占位串自定义（默认 "prompt too long"；自定义串用于验证测速端输出塌缩守卫）：MOCK_SOFT_TEXT="..."
+模拟逐请求交替 decode 速度（tok/s 逗号分隔循环，双峰复现）：MOCK_TG_PATTERN="60,120"
 模拟服务端前缀缓存（append-only 增长的 prompt 只增量 prefill，usage 回传命中）：MOCK_CACHE=1
 模拟忽略 max_tokens（只认 max_completion_tokens，opencode zen 行为；旧名请求输出跑飞 4× 上限）：MOCK_IGNORE_MAX_TOKENS=1
 模拟严格校验网关拒收 max_completion_tokens（400 Unrecognized request argument）：MOCK_REJECT_MCT=1
+模拟首测提前停止（一次性脚本钩子：下一发 chat 请求 finish=stop、仅 N tokens、带真 usage，之后恢复正常满预算输出；验证测速端弃测重测全链路 ADR-0032）：MOCK_EARLY_STOP=4
+模拟 ASR 处理速度（音频秒/秒，50=50 倍实时）：MOCK_ASR_PP=50
+模拟 TTS 合成语速（字/秒，决定音频时长）：MOCK_TTS_RATE=4.5
+模拟 TTS 合成速度（相对实时的倍速）：MOCK_TTS_XR=20
 """
 import asyncio
+import io
 import json
+import math
 import os
+import wave
+from array import array
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -39,6 +51,7 @@ NO_CONTENT = os.environ.get("MOCK_NO_CONTENT", "")  # 置 1 则只输出思考�
 REJECT_THINKING = os.environ.get("MOCK_REJECT_THINKING", "")  # 置 1 则带 thinking 参数的请求 400
 REJECT_TEMPERATURE = os.environ.get("MOCK_REJECT_TEMPERATURE", "")  # 置 1 则带 temperature 参数的请求 400
 BURST = int(os.environ.get("MOCK_BURST", "0"))  # 首个内容事件一次性携带的 token 数（模拟服务端缓冲/投机采样突发）
+ACCEPT = max(1, int(os.environ.get("MOCK_ACCEPT", "1")))  # 每个 decode 事件携带的 token 数（>1 模拟投机解码 draft+verify 周期交付，间隔 k/tg）
 KA = float(os.environ.get("MOCK_KEEPALIVE", "0"))  # prefill 期间 SSE 注释心跳间隔秒（0=关闭；模拟 vLLM/代理类网关的高频 keepalive）
 DELAY_HDR = os.environ.get("MOCK_DELAY_HEADERS", "")  # 置 1 则响应头延迟到首个内容 token（prefill 期间无任何字节）
 STALL = float(os.environ.get("MOCK_STALL", "0"))  # decode 中段插入一次停滞秒数（模拟传输/调度空窗）
@@ -48,10 +61,62 @@ SERIALIZE = os.environ.get("MOCK_SERIALIZE", "")  # 置 1 则 prefill 全局串�
 MODELS_DELAY = float(os.environ.get("MOCK_MODELS_DELAY", "0"))  # /models 响应前 sleep 秒数（模拟 RTT 基线期慢网关）
 MAX_CTX = int(os.environ.get("MOCK_MAX_CTX", "0"))  # 置 N 则 prompt+max_tokens 超 N 返回 400 超窗（验证删减上下文重试）
 SOFT_MAX_CTX = int(os.environ.get("MOCK_SOFT_MAX_CTX", "0"))  # 置 N 则 prompt+max_tokens 超 N 时 200 + 正文 "prompt too long"（fastllm 系软超窗，验证测速端识别兜底）
+SOFT_FIELD = os.environ.get("MOCK_SOFT_MAX_CTX_FIELD", "content")  # 软超窗占位串通道：content（默认）/reasoning（走 reasoning_content，复现思考模型形态）
+SOFT_TEXT = os.environ.get("MOCK_SOFT_TEXT", "prompt too long")  # 软超窗占位串自定义（默认已知文案；自定义串验证测速端输出塌缩守卫的通用兜底）
+TG_PATTERN = [float(x) for x in os.environ.get("MOCK_TG_PATTERN", "").split(",") if x.strip()]  # 逐请求交替 decode 速度 tok/s（循环取值，双峰复现）
 CACHE = os.environ.get("MOCK_CACHE", "")  # 置 1 模拟前缀缓存：与已见 prompt 的公共前缀部分不计 prefill 耗时（验证 agent 连续任务链）
 CACHE_NOREPORT = os.environ.get("MOCK_CACHE_NOREPORT", "")  # 置 1 则缓存生效但 usage 不回传命中字段（验证缓存迹象判别：TTFT 走平 → ≈差分估算）
 IGNORE_MT = os.environ.get("MOCK_IGNORE_MAX_TOKENS", "")  # 置 1 则忽略 max_tokens（只认 max_completion_tokens，opencode zen 行为；旧名请求输出跑飞 4× 上限）
 REJECT_MCT = os.environ.get("MOCK_REJECT_MCT", "")  # 置 1 则带 max_completion_tokens 参数的请求 400（严格校验的老规范网关）
+EARLY_STOP = int(os.environ.get("MOCK_EARLY_STOP", "0"))  # 置 N 则下一发 chat 请求一次性 early-stop（finish=stop、仅 N tokens、带真 usage，用后归零恢复正常；脚本化「首测异常、重测正常」，验证弃测重测全链路）
+ASR_PP = float(os.environ.get("MOCK_ASR_PP", "50"))   # 模拟 ASR 处理速度（音频秒/秒）
+TTS_RATE = float(os.environ.get("MOCK_TTS_RATE", "4.5"))  # 模拟 TTS 合成语速（字/秒 → 音频时长）
+TTS_XR = float(os.environ.get("MOCK_TTS_XR", "20"))   # 模拟 TTS 合成速度（×实时，chunk 流出节奏）
+_SR = 16000   # 合成/解析音频的采样率
+LAST_CHAT_ROLES: list | None = None   # 最近一次 chat 请求的消息角色序列（e2e 断言回复模式用）
+_REQ_SEQ = 0   # chat 请求计数（TG_PATTERN 轮转取值用）
+
+
+def _wav_seconds(data: bytes) -> float | None:
+    """stdlib wave 读 wav 时长（秒）；非 wav/损坏返回 None。"""
+    try:
+        with wave.open(io.BytesIO(data), "rb") as w:
+            return w.getnframes() / w.getframerate()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _pcm_sine(seconds: float) -> bytes:
+    """生成正弦 PCM16（220Hz + 谐波，16kHz 单声道）：1s 段循环拼接——TTS mock
+    只需要合法音频载荷，段重复不影响客户端的时长解析。"""
+    n = int(_SR * seconds)
+    seg = array("h", bytes(2 * _SR))
+    for k in range(_SR):
+        ph = 2 * math.pi * 220 * k / _SR
+        seg[k] = int(9000 * (0.7 * math.sin(ph) + 0.3 * math.sin(2 * ph)))
+    return (seg.tobytes() * (n // _SR + 1))[: n * 2]
+
+
+def _wav_bytes(seconds: float) -> bytes:
+    """完整合法 wav（头 + PCM），时长精确到帧。"""
+    pcm = _pcm_sine(seconds)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(_SR)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+def _multipart_first_file(body: bytes, boundary: bytes) -> bytes:
+    """极简 multipart 解析：取第一个带 filename 的字段内容（自测 mock 专用，
+    不引 python-multipart 依赖；生产服务端有自己的 multipart 实现）。"""
+    for part in body.split(b"--" + boundary):
+        head, _, payload = part.partition(b"\r\n\r\n")
+        if b"filename=" in head:
+            return payload.rstrip(b"\r\n-")
+    return b""
 
 _SEEN: list[str] = []   # 已见 prompt 全文（前缀缓存匹配源），容量 cap 32
 
@@ -104,7 +169,15 @@ async def _prefill_sleep(prompt_tokens: int):
 
 
 async def _chat_impl(req: Request):
+    global LAST_CHAT_ROLES, _REQ_SEQ, EARLY_STOP
     body = await req.json()
+    tg = TG   # 本请求 decode 速度（TG_PATTERN 置位时逐请求轮转交替）
+    if TG_PATTERN:
+        tg = TG_PATTERN[_REQ_SEQ % len(TG_PATTERN)]
+        _REQ_SEQ += 1
+    # 记录最近一次 chat 请求的消息角色序列：e2e 断言回复模式（自由回答
+    # =[system,user] / 模板续写末尾带 assistant 预填）用，不影响响应行为
+    LAST_CHAT_ROLES = [m.get("role") for m in body.get("messages", [])]
     if REJECT_THINKING and "thinking" in body:
         return JSONResponse({"error": {"message": "unknown parameter: thinking"}},
                             status_code=400)
@@ -116,7 +189,16 @@ async def _chat_impl(req: Request):
         return JSONResponse({"error": {"message":
             "Unrecognized request argument supplied: max_completion_tokens"}},
             status_code=400)
-    text = "".join(m.get("content", "") for m in body.get("messages", []))
+    def _text_of(content) -> str:
+        """消息 content 兼容字符串与多模态 parts 列表（VLM 读图，ADR-0020）：
+        只计 text 部分；image_url 部分由服务端按分辨率计入，mock 不计。"""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(p.get("text", "") for p in content
+                           if isinstance(p, dict) and p.get("type") == "text")
+        return ""
+    text = "".join(_text_of(m.get("content", "")) for m in body.get("messages", []))
     prompt_tokens = max(1, int(len(text) / CPT))
     max_tokens = int(body.get("max_tokens") or 256)
     if IGNORE_MT:
@@ -135,10 +217,15 @@ async def _chat_impl(req: Request):
             "code": "context_length_exceeded"}}, status_code=400)
     if SOFT_MAX_CTX and prompt_tokens + max_tokens > SOFT_MAX_CTX:
         # fastllm 系软超窗：不报 4xx，HTTP 200 流式返回、正文替换为占位串
-        # "prompt too long"、finish=stop、带 usage（与真实 fastllm 行为一致）
+        # "prompt too long"、finish=stop、带 usage（与真实 fastllm 行为一致）；
+        # 占位串通道/文案可配（reasoning 通道复现思考模型形态，自定义文案
+        # 验证测速端输出塌缩守卫的通用兜底）
+        soft_delta = ({"reasoning_content": SOFT_TEXT} if SOFT_FIELD == "reasoning"
+                      else {"content": SOFT_TEXT})
+
         async def gen_soft():
             yield "data: " + json.dumps({"choices":
-                [{"delta": {"content": "prompt too long"}, "finish_reason": None}]}) + "\n\n"
+                [{"delta": soft_delta, "finish_reason": None}]}) + "\n\n"
             yield "data: " + json.dumps({"choices":
                 [{"delta": {}, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": prompt_tokens,
@@ -154,6 +241,31 @@ async def _chat_impl(req: Request):
         _SEEN.append(text)
         del _SEEN[:-32]
     prefill_tokens = max(prompt_tokens - hit_tokens, 1)
+    if EARLY_STOP > 0:
+        # 一次性脚本钩子（ADR-0032 弃测重测 e2e 专项）：本请求照常 prefill，
+        # 正文只吐 N 个 token 即 finish=stop、usage 回传真值 completion_tokens=N
+        # ——脚本化「首测提前停止、后续正常」的异常形态（echo 续写口径下
+        # 的 early_stop 实测案例：4K 档仅输出 4/512 tokens）。用后归零：
+        # 后续请求（弃测重测批）恢复正常满预算输出，默认 0 时此分支死代码，
+        # 不影响任何既有用例
+        n_early = EARLY_STOP
+        EARLY_STOP = 0
+
+        async def gen_early():
+            await _prefill_sleep(prefill_tokens)
+            left = n_early
+            while left > 0:
+                k = min(ACCEPT, left)   # 交付形态与正常流同构（逐事件 k token）
+                await asyncio.sleep(k / tg)
+                yield "data: " + json.dumps({"choices":
+                    [{"delta": {"content": "测" * (k * CH)}}]}) + "\n\n"
+                left -= k
+            final = {"choices": [{"delta": {}, "finish_reason": "stop"}],
+                     "usage": {"prompt_tokens": prompt_tokens,
+                               "completion_tokens": n_early}}
+            yield "data: " + json.dumps(final) + "\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(gen_early(), media_type="text/event-stream")
 
     async def gen():
         if DELAY_HDR:
@@ -168,16 +280,22 @@ async def _chat_impl(req: Request):
             await _prefill_sleep(prefill_tokens)         # prefill 耗时（缓存命中部分不计）
         n_content = 0 if NO_CONTENT else max_tokens
         for _ in range(REASON):
-            await asyncio.sleep(1.0 / TG)
+            await asyncio.sleep(1.0 / tg)
             yield "data: " + json.dumps({"choices": [{"delta": {"reasoning_content": "思"}}]}) + "\n\n"
         burst = min(BURST, n_content)
         if burst:   # 首批 token 一次性吐出（不占 decode 时间轴上的间隔）
             yield "data: " + json.dumps({"choices": [{"delta": {"content": "测" * (burst * CH)}}]}) + "\n\n"
-        for i in range(n_content - burst):
-            await asyncio.sleep(1.0 / TG)                # decode 逐 token
-            if STALL and i == (n_content - burst) // 2:
+        left = n_content - burst
+        mid = left // 2   # 停滞定位：以剩余 token 计数的中点为准（事件步进下落在某事件的 token 跨度内）
+        i = 0
+        while left > 0:
+            k = min(ACCEPT, left)                        # 每事件 k 个 token（末事件携带余数），间隔 k/tg → 有效速率仍 ≈ tg
+            await asyncio.sleep(k / tg)
+            if STALL and i <= mid < i + k:
                 await asyncio.sleep(STALL)               # 中段一次停滞（空窗诊断）
-            yield "data: " + json.dumps({"choices": [{"delta": {"content": "测" * CH}}]}) + "\n\n"
+            yield "data: " + json.dumps({"choices": [{"delta": {"content": "测" * (k * CH)}}]}) + "\n\n"
+            i += k
+            left -= k
         final = {"choices": [{"delta": {}, "finish_reason": "stop"}]}
         if not NO_USAGE:
             final["usage"] = {"prompt_tokens": prompt_tokens,
@@ -207,6 +325,60 @@ async def chat_v1(req: Request):
 @app.post("/chat/completions")
 async def chat_noprefix(req: Request):
     return await _chat_impl(req)
+
+
+@app.post("/audio/transcriptions")
+@app.post("/v1/audio/transcriptions")
+async def transcriptions(req: Request):
+    """OpenAI 兼容语音转写：按音频时长/MOCK_ASR_PP 模拟处理耗时。
+    MOCK_MAX_CTX 置位时按 ~50 tokens/音频秒 判超窗（验证引擎的媒体超窗保护）。"""
+    ctype = req.headers.get("content-type", "")
+    body = await req.body()
+    wav = b""
+    if "boundary=" in ctype:
+        wav = _multipart_first_file(body, ctype.split("boundary=")[-1].encode())
+    seconds = _wav_seconds(wav)
+    if seconds is None:
+        if wav:
+            seconds = len(wav) / 32000   # 非 wav 按 16k 16bit 粗估
+        else:
+            return JSONResponse({"error": {"message":
+                "missing audio file (multipart field 'file')"}}, status_code=400)
+    prompt_tokens = int(seconds * 50)
+    if MAX_CTX and prompt_tokens > MAX_CTX:
+        return JSONResponse({"error": {"message":
+            f"This model's maximum context length is {MAX_CTX} tokens. "
+            f"However, you requested {prompt_tokens} tokens in the audio.",
+            "code": "context_length_exceeded"}}, status_code=400)
+    await asyncio.sleep(seconds / ASR_PP)
+    return {"text": "模拟识别结果。" * max(1, min(60, int(seconds)))}
+
+
+@app.post("/audio/speech")
+@app.post("/v1/audio/speech")
+async def speech(req: Request):
+    """OpenAI 兼容语音合成：音频时长 = 文本字符/MOCK_TTS_RATE，按 MOCK_TTS_XR
+    倍实时节奏流式吐 wav chunk（首 chunk 即刻到达，TTFA ≈ 0）。"""
+    body = await req.json()
+    text = body.get("input", "")
+    seconds = max(0.05, len(text) / TTS_RATE)
+    data = _wav_bytes(seconds)
+    hdr_end = data.find(b"data") + 8   # RIFF 头与 PCM 分界（头内长度已知且正确）
+    hdr, pcm = data[:hdr_end], data[hdr_end:]
+    chunk_bytes = _SR // 2             # 0.5s 音频一块
+
+    async def gen():
+        first = True
+        for off in range(0, len(pcm), chunk_bytes):
+            piece = pcm[off:off + chunk_bytes]
+            if first:
+                yield hdr + piece   # 首个 chunk 携带完整 RIFF 头
+                first = False
+            else:
+                yield piece
+            await asyncio.sleep(0.5 / TTS_XR)
+
+    return StreamingResponse(gen(), media_type="audio/wav")
 
 
 if __name__ == "__main__":

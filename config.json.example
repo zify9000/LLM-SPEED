@@ -1,5 +1,5 @@
 {
-  "_comment": "gateway_url 为单地址旧写法（仍兼容）；gateway_urls 为多地址——本地部署可把内网/隧道地址都配上，测速时按配置顺序取第一个可达地址（顺序即优先级，优选排前）。deployments 允许一个模型映射多套部署环境，但同一模型激活（active=true）的只能一套，激活者生效；都不标 active 时回退首个命中",
+  "_comment": "gateway_url 为单地址旧写法（仍兼容）；gateway_urls 为多地址——本地部署可把内网/隧道地址都配上，测速时按配置顺序取第一个可达地址（顺序即优先级，优选排前）。deployments 允许一个模型映射多套部署环境，但同一模型激活（active=true）的只能一套，激活者生效；都不标 active 时回退首个命中。deployments 的 kind 标记模型类型（llm 缺省/asr 语音转写/ocr 图像识别/tts 语音合成）：前端按 kind 分组模型、场景只列同类型；ASR 走 /v1/audio/transcriptions（faster-whisper/whisper.cpp/FunASR 等 OpenAI 兼容端点），OCR 走 chat/completions 的 VLM 读图（image_url），TTS 走 /v1/audio/speech（Kokoro/GPT-SoVITS/CosyVoice 等）；媒体场景档位固定（音频 5s~900s / 图片 1~16 张 / 文本 50~3200 字），语料优先用 corpus/asr|ocr/ 下的用户文件（wav/png/jpg），缺省内置合成",
   "providers": [
     {
       "name": "deepseek",
@@ -49,6 +49,35 @@
           "framework": "llama.cpp",
           "params": "-c 131072",
           "max_ctx": 131072
+        },
+        {
+          "label": "示例 ASR 部署（faster-whisper-server 等 OpenAI 兼容转写端点）",
+          "models": ["whisper-large-v3"],
+          "kind": "asr",
+          "active": true,
+          "hardware": "示例：RTX 4090",
+          "framework": "faster-whisper-server",
+          "params": "CT2 int8",
+          "max_ctx": 131072
+        },
+        {
+          "label": "示例 VLM 部署（OCR 走 chat/completions 读图）",
+          "models": ["Qwen2.5-VL-7B"],
+          "kind": "ocr",
+          "active": true,
+          "hardware": "示例：RTX 4090",
+          "framework": "vLLM",
+          "params": "--max-model-len 32768",
+          "max_ctx": 32768
+        },
+        {
+          "label": "示例 TTS 部署（Kokoro-FastAPI 等 OpenAI 兼容合成端点）",
+          "models": ["kokoro"],
+          "kind": "tts",
+          "active": true,
+          "hardware": "示例：RTX 3060",
+          "framework": "Kokoro-FastAPI",
+          "params": "default voice"
         }
       ]
     }

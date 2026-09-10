@@ -18,7 +18,21 @@
 
 | 🧮 口径透明 | 📡 逐帧实测 | 🎭 多场景模拟 |
 | --- | --- | --- |
-| prefill 扣除实测网络往返、decode 按 2 秒滑窗差分、缓存命中逐轮测算、服务端回写校准、异常卡顿显式标记 | prefill 等待期逐秒给出估值、decode 逐帧刷新；跑完自动生成折线图和测速卡片 PNG，一键分享 | 创意写作读公版《红楼梦》、代码生成读 llama.cpp 真实源码；Agent 调用跑 SWE 多轮连续任务链 |
+| prefill 扣除实测网络往返、decode 按 3 秒滑窗差分、缓存命中逐轮测算、服务端回写校准、异常卡顿显式标记、decode 可选「模板续写」回复模式（高复用改写口径，对齐真实编辑场景的投机采样命中率） | prefill 等待期逐秒给出估值、decode 逐帧刷新；跑完自动生成折线图和测速卡片 PNG，一键分享 | 创意写作读公版《红楼梦》、代码生成读 llama.cpp 真实源码；Agent 调用跑 SWE 多轮连续任务链 |
+
+## 🎙️ 多模态测速（ASR / OCR / TTS）
+
+不止文本生成：同一套测速台覆盖三类媒体模型，全部走 OpenAI 兼容端点、只测速度不测精度——
+
+| 类型 | 端点 | 阶梯 | 核心指标 |
+| --- | --- | --- | --- |
+| 🎙️ 语音转写（faster-whisper / whisper.cpp / FunASR） | `POST /v1/audio/transcriptions` | 5s ~ 900s 音频 | RTF、倍速、并发吞吐（音频分钟/分钟） |
+| 🖼️ 图像识别（Qwen-VL 等 VLM 读图） | chat/completions `image_url` | 1 ~ 16 张/请求 | 单张时延、张/秒、TTFT/decode |
+| 🔊 语音合成（Kokoro / GPT-SoVITS / CosyVoice） | `POST /v1/audio/speech` | 50 ~ 3200 字文本 | 首音频字节延迟、RTF、倍速 |
+
+- 在「Provider 管理」给部署加 `"kind": "asr" / "ocr" / "tts"`（缺省 `llm`），模型选择器自动分组、场景只列同类型
+- 语料优先用 `corpus/asr/`（wav）、`corpus/ocr/`（png/jpg）下的自有文件，缺省时内置确定性合成语料（零依赖、零体积）
+- 测速卡片、并发吞吐、超窗跳档保护对媒体场景同样生效
 
 ## 🖼️ 测速卡片示例
 
