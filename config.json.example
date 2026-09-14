@@ -1,5 +1,5 @@
 {
-  "_comment": "gateway_url 为单地址旧写法（仍兼容）；gateway_urls 为多地址——本地部署可把内网/隧道地址都配上，测速时按配置顺序取第一个可达地址（顺序即优先级，优选排前）。deployments 允许一个模型映射多套部署环境，但同一模型激活（active=true）的只能一套，激活者生效；都不标 active 时回退首个命中。deployments 的 kind 标记模型类型（llm 缺省/asr 语音转写/ocr 图像识别/tts 语音合成）：前端按 kind 分组模型、场景只列同类型；ASR 走 /v1/audio/transcriptions（faster-whisper/whisper.cpp/FunASR 等 OpenAI 兼容端点），OCR 走 chat/completions 的 VLM 读图（image_url），TTS 走 /v1/audio/speech（Kokoro/GPT-SoVITS/CosyVoice 等）；媒体场景档位固定（音频 5s~900s / 图片 1~16 张 / 文本 50~3200 字），语料优先用 corpus/asr|ocr/ 下的用户文件（wav/png/jpg），缺省内置合成",
+  "_comment": "gateway_url 为单地址旧写法（仍兼容）；gateway_urls 为多地址——本地部署可把内网/隧道地址都配上，测速时按配置顺序取第一个可达地址（顺序即优先级，优选排前）。deployments 允许一个模型映射多套部署环境，但同一模型激活（active=true）的只能一套，激活者生效；都不标 active 时回退首个命中。deployments 的 quants 为模型量化多选数组、kv_quants 为 KV 缓存量化多选数组（如 [\"Q8_0\",\"Q4_K_M\"]；**首项为该次测速生效值**，测速下发单值 quant/kv_quant；旧单值 quant 字段仍兼容读取）。deployments 的 kinds 标记模型能力集（[\"llm\"] 文本生成默认不落盘/asr 语音转写/ocr 图像识别/tts 语音合成，可多选——支持视觉输入的文本模型配 [\"llm\",\"ocr\"]；旧单值 kind 字段仍兼容读取）：前端按能力集分组模型、场景只列匹配类型，一次运行限一种类型；ASR 走 /v1/audio/transcriptions（faster-whisper/whisper.cpp/FunASR 等 OpenAI 兼容端点），OCR 走 chat/completions 的 VLM 读图（image_url），TTS 走 /v1/audio/speech（Kokoro/GPT-SoVITS/CosyVoice 等）；媒体场景档位可在测速矩阵自定义覆盖（缺省回退默认阶梯：音频 5s~1800s / 图片 1~16 张 / 文本 50~3200 字），OCR 图片负载固定内置合成（3 种分辨率文档页，跨环境统一标准）；ASR 语料可用 corpus/asr/ 下的用户 wav（帧级截取到目标时长），缺省内置合成",
   "providers": [
     {
       "name": "deepseek",
@@ -35,7 +35,8 @@
           "label": "示例部署",
           "models": ["your-model-name"],
           "active": true,
-          "quant": "Q8_0",
+          "quants": ["Q8_0", "Q4_K_M"],
+          "kv_quants": ["Q8_0", "Q4_K_M"],
           "hardware": "示例：按实际填写",
           "framework": "llama.cpp",
           "params": "-c 196608 -b 16384 --cache-type-k/v q8_0",
@@ -44,7 +45,8 @@
         {
           "label": "示例部署·备用环境（映射同一模型，未激活不生效）",
           "models": ["your-model-name"],
-          "quant": "Q4_K_M",
+          "quants": ["Q4_K_M"],
+          "kv_quants": ["Q4_K_M"],
           "hardware": "示例：备用机",
           "framework": "llama.cpp",
           "params": "-c 131072",
@@ -53,7 +55,7 @@
         {
           "label": "示例 ASR 部署（faster-whisper-server 等 OpenAI 兼容转写端点）",
           "models": ["whisper-large-v3"],
-          "kind": "asr",
+          "kinds": ["asr"],
           "active": true,
           "hardware": "示例：RTX 4090",
           "framework": "faster-whisper-server",
@@ -61,9 +63,9 @@
           "max_ctx": 131072
         },
         {
-          "label": "示例 VLM 部署（OCR 走 chat/completions 读图）",
+          "label": "示例 VLM 部署（OCR 走 chat/completions 读图；支持视觉的文本模型可多选 llm+ocr）",
           "models": ["Qwen2.5-VL-7B"],
-          "kind": "ocr",
+          "kinds": ["llm", "ocr"],
           "active": true,
           "hardware": "示例：RTX 4090",
           "framework": "vLLM",
@@ -73,7 +75,7 @@
         {
           "label": "示例 TTS 部署（Kokoro-FastAPI 等 OpenAI 兼容合成端点）",
           "models": ["kokoro"],
-          "kind": "tts",
+          "kinds": ["tts"],
           "active": true,
           "hardware": "示例：RTX 3060",
           "framework": "Kokoro-FastAPI",

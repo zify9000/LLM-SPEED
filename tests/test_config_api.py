@@ -40,18 +40,90 @@ class TestConfigApi(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_roundtrip(self):
-        dep = {"label": "部署A", "models": ["m1", "m2"], "quant": "Q8_0",
+        dep = {"label": "部署A", "models": ["m1", "m2"], "quants": ["Q8_0"],
+               "kv_quants": ["Q8_0"],
                "hardware": "RTX", "framework": "llama.cpp", "params": "-c 4096",
                "max_ctx": 4096}
         r = self.client.put("/api/config", json={"providers": [_prov(local=True, deployments=[dep])]})
         self.assertEqual(r.status_code, 200)
         on_disk = json.load(open(server.CONFIG_PATH, encoding="utf-8"))
         self.assertEqual(on_disk["providers"][0]["deployments"][0]["max_ctx"], 4096)
+        self.assertEqual(on_disk["providers"][0]["deployments"][0]["quants"], ["Q8_0"])
+        self.assertEqual(on_disk["providers"][0]["deployments"][0]["kv_quants"], ["Q8_0"])
+        self.assertNotIn("quant", on_disk["providers"][0]["deployments"][0])
         got = self.client.get("/api/config").json()
         self.assertEqual(got["providers"][0]["name"], "p1")
         self.assertEqual(got["providers"][0]["local"], True)
-        self.assertEqual(got["providers"][0]["deployments"][0]["quant"], "Q8_0")
+        self.assertEqual(got["providers"][0]["deployments"][0]["quants"], ["Q8_0"])
         self.assertNotIn("api_key", json.dumps(on_disk))
+
+    def test_deployment_groups_roundtrip(self):
+        """部署环境分组：deployment_groups（组长顺序表）按序落盘；每条部署的
+        group 归属白名单化；空/空白 group 不落盘（未分组保持零字段）。分组纯
+        组织用，不影响解析字段。"""
+        deps = [
+            {"label": "在线", "models": ["m1"], "group": "生产"},
+            {"label": "离线", "models": ["m2"], "group": "测试"},
+            {"label": "无组", "models": ["m3"], "group": ""},
+        ]
+        r = self.client.put("/api/config", json={"providers": [
+            _prov(local=True, deployments=deps,
+                  deployment_groups=["生产", "测试"])]})
+        self.assertEqual(r.status_code, 200, r.text)
+        on_disk = json.load(open(server.CONFIG_PATH,
+                                 encoding="utf-8"))["providers"][0]
+        self.assertEqual(on_disk["deployment_groups"], ["生产", "测试"])
+        self.assertEqual(on_disk["deployments"][0]["group"], "生产")
+        self.assertEqual(on_disk["deployments"][1]["group"], "测试")
+        self.assertNotIn("group", on_disk["deployments"][2].keys())  # 空分组不落盘
+        # 组名去空白去重、超长拒绝；未登记组名不强制回填（前端保存时自愈）
+        self.assertEqual(self.client.put("/api/config", json={"providers": [
+            _prov(local=True, deployment_groups=[" 生产 ", "生产", ""])]}).status_code, 200)
+        got = self.client.get("/api/config").json()["providers"][0]
+        self.assertEqual(got["deployment_groups"], ["生产"])
+        bad = self.client.put("/api/config", json={"providers": [
+            _prov(local=True, deployment_groups=["x" * 41])]}).status_code
+        self.assertEqual(bad, 400)
+
+    def test_quants_normalize(self):
+        """量化多选（quants 数组落盘）：旧单值 quant 字符串（含逗号分隔多值）
+        PUT 后归一为 quants、不再写 quant（与 kinds/kind 先例同口径）；多值
+        原样保留；非法输入（非数组/单项超长/超 8 项）一律 400。kv_quants
+        校验口径与 quants 完全一致。"""
+        deps = [
+            {"label": "旧字段", "models": ["m1"], "quant": "Q8_0, Q4_K_M"},
+            {"label": "多值", "models": ["m2"], "quants": ["Q8_0", "Q4_K_M"]},
+        ]
+        r = self.client.put("/api/config",
+                            json={"providers": [_prov(local=True, deployments=deps)]})
+        self.assertEqual(r.status_code, 200, r.text)
+        on_disk = json.load(open(server.CONFIG_PATH,
+                                 encoding="utf-8"))["providers"][0]["deployments"]
+        self.assertEqual(on_disk[0]["quants"], ["Q8_0", "Q4_K_M"])   # 旧字段逗号拆分
+        self.assertNotIn("quant", on_disk[0])
+        self.assertEqual(on_disk[1]["quants"], ["Q8_0", "Q4_K_M"])   # 多值原样保留
+        # 非法输入
+        bad = [
+            {"quants": "Q8_0"},                              # 非数组
+            {"quants": ["x" * 65]},                          # 单项超 64 字符
+            {"quants": [f"Q{i}" for i in range(9)]},         # 超 8 项
+        ]
+        for q in bad:
+            dep = {"label": "x", "models": ["m3"], **q}
+            r = self.client.put("/api/config",
+                                json={"providers": [_prov(local=True, deployments=[dep])]})
+            self.assertEqual(r.status_code, 400, q)
+        # kv_quants：校验口径与 quants 完全一致
+        bad_kv = [
+            {"kv_quants": "Q8_0"},                           # 非数组
+            {"kv_quants": ["x" * 65]},                       # 单项超 64 字符
+            {"kv_quants": [f"Q{i}" for i in range(9)]},      # 超 8 项
+        ]
+        for q in bad_kv:
+            dep = {"label": "x", "models": ["m3"], **q}
+            r = self.client.put("/api/config",
+                                json={"providers": [_prov(local=True, deployments=[dep])]})
+            self.assertEqual(r.status_code, 400, q)
 
     def test_invalid_rejected(self):
         bad = [
@@ -192,61 +264,99 @@ class TestValidateBenchCfg(unittest.TestCase):
         server._validate_bench_cfg(self._cfg(reply_mode="echo"))
         server._validate_bench_cfg(self._cfg())   # 缺省放行（引擎按 free）
 
-    def test_agent_chain_params_validated(self):
-        """Agent 连续任务链参数钳制：agent_turns 1~32；agent_turn_delta 为
-        阶段一短轮的钳制区间——256~32768 的整数或 [min, max]（须 min ≤ max）。
-        越界或类型错 400；缺省放行由引擎取默认。纯 Agent 场景 ctx_list 可空。"""
-        bad = [self._cfg(agent_turns=0), self._cfg(agent_turns=33),
-               self._cfg(agent_turns=1.5), self._cfg(agent_turns=True),
-               self._cfg(agent_turn_delta=100), self._cfg(agent_turn_delta=40000),
-               self._cfg(agent_turn_delta=[100, 2048]),
-               self._cfg(agent_turn_delta=[2048, 256]),     # min > max
-               self._cfg(agent_turn_delta=[256, 2048, 4096]),
-               self._cfg(agent_turn_delta="2048")]
+    def test_translate_ladder_validated(self):
+        """翻译场景自定义阶梯（ADR-0034）：translate_ladder ≤16 档、逐值
+        1~65536 整数（字原文）；越界/类型错 400，缺省放行由引擎取场景默认。"""
+        bad = [self._cfg(translate_ladder=[0]),          # 0 字非法
+               self._cfg(translate_ladder=[-50]),        # 负档
+               self._cfg(translate_ladder=[65537]),      # 超上限
+               self._cfg(translate_ladder=[1.5]),        # 非整数
+               self._cfg(translate_ladder=[True]),       # bool 非整数
+               self._cfg(translate_ladder=[50] * 17),    # 超 16 档
+               self._cfg(translate_ladder="6400")]       # 非列表
         for cfg in bad:
             with self.assertRaises(HTTPException) as cm:
                 server._validate_bench_cfg(cfg)
             self.assertEqual(cm.exception.status_code, 400, cfg)
-        server._validate_bench_cfg(self._cfg(agent_turns=8, agent_turn_delta=2048))
-        server._validate_bench_cfg(self._cfg(agent_turn_delta=[256, 2048]))
+        server._validate_bench_cfg(self._cfg(translate_ladder=[50, 6400]))
+        server._validate_bench_cfg(self._cfg())   # 缺省放行
+
+    def test_agent_ladders_validated(self):
+        """Agent 缓存×指令矩阵双阶梯（ADR-0042）：agent_cache_ladder ≤16 档、
+        逐值 0~4M tokens（已缓存上下文）；agent_inst_ladder ≤16 档、逐值
+        16~65536 tokens（单步指令长度）。越界/类型错 400；缺省放行由引擎取
+        场景默认阶梯；旧连续任务链键（agent_turns / agent_turn_delta /
+        agent_turns_p1/p2 / agent_cold_ctx / agent_phase2_base）不再校验，
+        传入被忽略；纯 Agent 场景 ctx_list 可空。"""
+        M = 4 * 1048576
+        bad_cache = [self._cfg(agent_cache_ladder=[-1]),        # 负档
+                     self._cfg(agent_cache_ladder=[M + 1]),     # 超上限
+                     self._cfg(agent_cache_ladder=[True]),      # bool 非整数
+                     self._cfg(agent_cache_ladder=["4096"]),    # 字符串项
+                     self._cfg(agent_cache_ladder=[1.5]),       # 非整数
+                     self._cfg(agent_cache_ladder=[0] * 17),    # 超 16 档
+                     self._cfg(agent_cache_ladder="0,4096")]    # 非列表
+        for cfg in bad_cache:
+            with self.assertRaises(HTTPException) as cm:
+                server._validate_bench_cfg(cfg)
+            self.assertEqual(cm.exception.status_code, 400, cfg)
+        bad_inst = [self._cfg(agent_inst_ladder=[8]),           # 低于下界 16
+                    self._cfg(agent_inst_ladder=[0]),
+                    self._cfg(agent_inst_ladder=[65537]),       # 超上限
+                    self._cfg(agent_inst_ladder=[True]),
+                    self._cfg(agent_inst_ladder=[1.5]),
+                    self._cfg(agent_inst_ladder=[512] * 17),    # 超 16 档
+                    self._cfg(agent_inst_ladder=512)]           # 非列表
+        for cfg in bad_inst:
+            with self.assertRaises(HTTPException) as cm:
+                server._validate_bench_cfg(cfg)
+            self.assertEqual(cm.exception.status_code, 400, cfg)
+        # 边界值放行：cache 档含 0、上到 4M；inst 档 16~65536
+        server._validate_bench_cfg(self._cfg(agent_cache_ladder=[0, M],
+                                             agent_inst_ladder=[16, 65536]))
+        server._validate_bench_cfg(self._cfg())   # 缺省放行（引擎取场景默认）
+        # 旧连续任务链键不再校验：传入被忽略、不 400
+        server._validate_bench_cfg(self._cfg(
+            agent_turns=8, agent_turn_delta=[256, 2048], agent_turns_p1=4,
+            agent_turns_p2=4, agent_cold_ctx=10240, agent_phase2_base=8192))
         # 纯 Agent 场景不以上下文档位为变量：ctx_list 可为空
         server._validate_bench_cfg(self._cfg(scenarios=["agent"], ctx_list=[]))
 
-    def test_agent_phase_turns_validated(self):
-        """两阶段轮数配置：agent_turns_p1/p2 各 0~32、合计 1~32；给了一个就
-        必须两个都给；旧配置 agent_turns 单值仍放行（引擎对半切兼容）。"""
-        bad = [self._cfg(agent_turns_p1=-1, agent_turns_p2=4),
-               self._cfg(agent_turns_p1=33, agent_turns_p2=4),
-               self._cfg(agent_turns_p1=1.5, agent_turns_p2=4),
-               self._cfg(agent_turns_p1=0, agent_turns_p2=0),     # 合计为 0
-               self._cfg(agent_turns_p1=16, agent_turns_p2=17),   # 合计 33
-               self._cfg(agent_turns_p1=4),                       # 只给一个
-               self._cfg(agent_turns_p2=4)]
+    def test_media_ladders_validated(self):
+        """媒体场景自定义阶梯：asr_ladder/ocr_ladder/tts_ladder 各 ≤16 档、
+        逐值 int 且落在对应范围（asr 1~3600 秒 / ocr 1~64 张 / tts 1~65536 字）；
+        越界（0 与上限+1）/非 list/float/bool 值一律 400；空数组合法
+        （引擎回退场景默认阶梯）；缺省放行。"""
+        bad = [self._cfg(asr_ladder=[0]),              # 低于下界 1
+               self._cfg(asr_ladder=[3601]),           # 超上限
+               self._cfg(asr_ladder=[5.5]),            # 非整数
+               self._cfg(asr_ladder=[True]),           # bool 非整数
+               self._cfg(asr_ladder="5,15"),           # 非列表
+               self._cfg(ocr_ladder=[0]),
+               self._cfg(ocr_ladder=[65]),
+               self._cfg(ocr_ladder=[1.5]),
+               self._cfg(ocr_ladder=[False]),
+               self._cfg(tts_ladder=[0]),
+               self._cfg(tts_ladder=[65537]),
+               self._cfg(tts_ladder=[50.0]),
+               self._cfg(tts_ladder=["50"]),
+               self._cfg(asr_ladder=[5] * 17),         # 超 16 档
+               self._cfg(ocr_ladder=[1] * 17),
+               self._cfg(tts_ladder=[50] * 17)]
         for cfg in bad:
             with self.assertRaises(HTTPException) as cm:
                 server._validate_bench_cfg(cfg)
             self.assertEqual(cm.exception.status_code, 400, cfg)
-        server._validate_bench_cfg(self._cfg(agent_turns_p1=4, agent_turns_p2=4))
-        server._validate_bench_cfg(self._cfg(agent_turns_p1=0, agent_turns_p2=4))
-        # 阶段二 ladder 起始增量：1024~65536 的整数
-        for bad_base in (512, 131072, 1.5, "4096", True):
-            with self.assertRaises(HTTPException) as cm:
-                server._validate_bench_cfg(self._cfg(agent_phase2_base=bad_base))
-            self.assertEqual(cm.exception.status_code, 400, bad_base)
-        server._validate_bench_cfg(self._cfg(agent_phase2_base=8192))
-
-    def test_agent_cold_ctx_validated(self):
-        """冷启动轮上下文独立配置（ADR-0015）：agent_cold_ctx 为
-        1024~262144 的整数；越界/类型错 400，缺省放行（引擎取默认 10K）。"""
-        bad = [self._cfg(agent_cold_ctx=100), self._cfg(agent_cold_ctx=300000),
-               self._cfg(agent_cold_ctx=1.5), self._cfg(agent_cold_ctx=True),
-               self._cfg(agent_cold_ctx="10240")]
-        for cfg in bad:
-            with self.assertRaises(HTTPException) as cm:
-                server._validate_bench_cfg(cfg)
-            self.assertEqual(cm.exception.status_code, 400, cfg)
-        server._validate_bench_cfg(self._cfg(agent_cold_ctx=10240))
-        server._validate_bench_cfg(self._cfg())   # 缺省放行
+        # 合法放行：边界值 / 恰 16 档 / 空数组（回退默认）/ 缺省
+        server._validate_bench_cfg(self._cfg(asr_ladder=[1, 3600],
+                                             ocr_ladder=[1, 64],
+                                             tts_ladder=[1, 65536]))
+        server._validate_bench_cfg(self._cfg(asr_ladder=[5] * 16,
+                                             ocr_ladder=[1] * 16,
+                                             tts_ladder=[50] * 16))
+        server._validate_bench_cfg(self._cfg(asr_ladder=[], ocr_ladder=[],
+                                             tts_ladder=[]))
+        server._validate_bench_cfg(self._cfg())   # 缺省放行（引擎取场景默认）
 
     def test_repeats_timeout_max_tokens_thinking_validated(self):
         """repeats/timeout_s/max_tokens/thinking 白名单：bench_start 直接透传
@@ -343,7 +453,8 @@ class TestBenchStartAssembly(unittest.TestCase):
         self.assertNotIn("thinking_unsupported", cfg)   # 无能力记忆时不下发
 
     def test_deployments_inject_model_ctx_and_info(self):
-        dep = {"label": "部署A", "models": ["m1"], "quant": "Q8_0",
+        dep = {"label": "部署A", "models": ["m1"], "quants": ["Q8_0", "Q4_K_M"],
+               "kv_quants": ["Q4_K_M"],
                "hardware": "RTX 4090", "framework": "llama.cpp",
                "params": "-c 8192", "max_ctx": 8192}
         self.client.put("/api/config",
@@ -355,8 +466,20 @@ class TestBenchStartAssembly(unittest.TestCase):
         self.assertEqual(cfg["model_info"]["m1"]["hardware"], "RTX 4090")
         self.assertEqual(cfg["model_info"]["m1"]["deploy_label"], "部署A")
         self.assertEqual(cfg["model_info"]["m1"]["quant"], "Q8_0")
+        self.assertEqual(cfg["model_info"]["m1"]["kv_quant"], "Q4_K_M")   # kv_quants 首项
+        self.assertNotIn("quants", cfg["model_info"]["m1"])
+        self.assertNotIn("kv_quants", cfg["model_info"]["m1"])
         self.assertNotIn("m2", cfg["model_info"])
         self.assertEqual(cfg["concurrencies"], [1, 2])   # 本地保留前端并发档位
+
+    def test_match_deployments_legacy_quant_compat(self):
+        """旧存盘配置仅有 quant 单字段：match_deployments 兼容读取为单值
+        quant（不再发 quants 数组键）。"""
+        info = server.match_deployments(
+            {"deployments": [{"label": "旧", "models": ["m1"], "quant": "Q8_0"}]},
+            ["m1"])
+        self.assertEqual(info["m1"]["quant"], "Q8_0")
+        self.assertNotIn("quants", info["m1"])
 
     def test_deployment_miss_emits_status_warning(self):
         """未命中显式告警：provider 配了 deployments 但被测模型没命中任何映射
@@ -387,20 +510,22 @@ class TestBenchStartAssembly(unittest.TestCase):
         self.assertFalse([ev for ev in _FakeBenchRun.emitted
                           if ev.get("type") == "status"])
 
-    def test_agent_chain_over_budget_warns_not_blocks(self):
-        """agent 链总目标校验：最大轮目标超部署预算（max_ctx − max_tokens −
-        余量）时发 status 告警但不阻断（引擎逐轮跳过）；预算充足不告警。"""
+    def test_agent_matrix_over_budget_warns_not_blocks(self):
+        """agent 矩阵最大组合校验：max(缓存档)+max(指令档) 超部署预算（max_ctx
+        − max_tokens − 余量）时发 status 告警但不阻断（引擎对超预算组合整档
+        跳过）；预算充足或无 max_ctx 来源时不告警。"""
         dep = {"label": "部署A", "models": ["m1"], "max_ctx": 4096}
         self.client.put("/api/config",
                         json={"providers": [_prov(local=True, deployments=[dep])]})
-        # 默认链（1 冷 10K + 阶段一 6 轮短 + 阶段二 ladder 4K 起翻倍）远超预算
+        # 默认矩阵（缓存最大 256K + 指令最大 8K）远超 4K 部署预算
         r = self._start(models=["m1"], scenarios=["agent"], ctx_list=[])
         self.assertEqual(r.status_code, 200, r.text)   # 不阻断
         warns = [ev["msg"] for ev in _FakeBenchRun.emitted
                  if ev.get("type") == "status" and "agent" in ev.get("msg", "")]
         self.assertEqual(len(warns), 1)
         self.assertIn("m1", warns[0])
-        self.assertIn("轮次将被跳过", warns[0])
+        self.assertIn("agent 矩阵最大组合", warns[0])
+        self.assertIn("超出上限的组合将被跳过", warns[0])
         # 预算充足（max_ctx 抬高）：不告警
         dep = {"label": "部署A", "models": ["m1"], "max_ctx": 4194304}
         self.client.put("/api/config",
@@ -455,24 +580,71 @@ class TestBenchStartAssembly(unittest.TestCase):
         self.assertTrue(cfg["thinking_unsupported"])
         self.assertEqual(cfg["temperature_locked"], ["m1"])
 
-    def test_deployments_inject_model_kind(self):
-        """ADR-0020：部署的 kind 随 model_info/model_kind 下发；未映射部署的
-        模型按 llm。媒体测速场景按 kind 分发。"""
+    def test_deployments_inject_model_kinds(self):
+        """ADR-0020/多选扩展：部署的 kinds 随 model_info/model_kinds 下发；未映射
+        部署的模型按 [llm]。媒体测速场景按 kind 分发。旧单值 kind 字段兼容读取。"""
         dep = {"label": "whisper", "models": ["m1"], "hardware": "RTX 4090",
-               "framework": "faster-whisper", "kind": "asr"}
+               "framework": "faster-whisper", "kind": "asr"}   # 旧单值字段：兼容入口
         self.client.put("/api/config",
                         json={"providers": [_prov(local=True, deployments=[dep])]})
-        # 映射到 asr 部署的模型：kind 随 model_info/model_kind 下发
+        # 旧单值 kind 在写盘时已归一为 kinds 数组
+        on_disk = json.load(open(server.CONFIG_PATH, encoding="utf-8"))
+        self.assertEqual(on_disk["providers"][0]["deployments"][0]["kinds"], ["asr"])
+        self.assertNotIn("kind", on_disk["providers"][0]["deployments"][0])
+        # 映射到 asr 部署的模型：能力集随 model_info/model_kinds 下发
         r = self._start(models=["m1"], scenarios=["asr"], ctx_list=[])
         self.assertEqual(r.status_code, 200, r.text)
         cfg = _FakeBenchRun.captured[-1].cfg
-        self.assertEqual(cfg["model_info"]["m1"]["kind"], "asr")
-        self.assertEqual(cfg["model_kind"], {"m1": "asr"})
-        # 未映射部署的模型按 llm（与 LLM 场景匹配）
+        self.assertEqual(cfg["model_info"]["m1"]["kinds"], ["asr"])
+        self.assertEqual(cfg["model_kinds"], {"m1": ["asr"]})
+        # 未映射部署的模型按 [llm]（与 LLM 场景匹配）
         r = self._start(models=["m2"], scenarios=["creative"])
         self.assertEqual(r.status_code, 200, r.text)
         cfg = _FakeBenchRun.captured[-1].cfg
-        self.assertEqual(cfg["model_kind"], {"m2": "llm"})
+        self.assertEqual(cfg["model_kinds"], {"m2": ["llm"]})
+
+    def test_deployments_kinds_multi_select(self):
+        """kinds 多选（文本模型支持视觉输入 = llm+ocr）：校验白名单、去重、
+        缺省 [llm] 不落盘；空数组/非法元素/非数组一律 400。"""
+        dep = {"label": "vlm", "models": ["m1"], "kinds": ["ocr", "llm", "ocr"]}
+        r = self.client.put("/api/config",
+                            json={"providers": [_prov(local=True, deployments=[dep])]})
+        self.assertEqual(r.status_code, 200, r.text)
+        on_disk = json.load(open(server.CONFIG_PATH, encoding="utf-8"))
+        self.assertEqual(on_disk["providers"][0]["deployments"][0]["kinds"],
+                         ["ocr", "llm"])   # 去重、保序
+        # 多能力模型：两种 kind 的场景各自可启动（一次运行仍限一种）
+        r = self._start(models=["m1"], scenarios=["ocr"], ctx_list=[])
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(_FakeBenchRun.captured[-1].cfg["model_kinds"],
+                         {"m1": ["ocr", "llm"]})
+        r = self._start(models=["m1"], scenarios=["creative"])
+        self.assertEqual(r.status_code, 200, r.text)
+        # 显式 [llm] 与缺省同口径：不落盘
+        dep = {"label": "plain", "models": ["m2"], "kinds": ["llm"]}
+        r = self.client.put("/api/config",
+                            json={"providers": [_prov(local=True, deployments=[dep])]})
+        self.assertEqual(r.status_code, 200, r.text)
+        on_disk = json.load(open(server.CONFIG_PATH, encoding="utf-8"))
+        self.assertNotIn("kinds", on_disk["providers"][0]["deployments"][0])
+        # 非法输入
+        for bad in ({"kinds": []}, {"kinds": ["vlm"]}, {"kinds": "ocr"}):
+            dep = {"label": "x", "models": ["m3"], **bad}
+            r = self.client.put(
+                "/api/config",
+                json={"providers": [_prov(local=True, deployments=[dep])]})
+            self.assertEqual(r.status_code, 400, bad)
+
+    def test_mixed_scenario_kinds_400(self):
+        """一次运行一种 kind 的边界不因多能力模型打破：混选文本+图像识别场景
+        直接 400（此前单 kind 模型天然不可能混选，多选后需显式拦截）。"""
+        dep = {"label": "vlm", "models": ["m1"], "kinds": ["llm", "ocr"]}
+        self.client.put("/api/config",
+                        json={"providers": [_prov(local=True, deployments=[dep])]})
+        r = self._start(models=["m1"], scenarios=["creative", "ocr"],
+                        ctx_list=[4096])
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertIn("一种类型", r.text)
 
     def test_kind_mismatch_400(self):
         """模型 kind 与场景 kind 不匹配：400 明确提示（前端模型选择器按
@@ -493,6 +665,16 @@ class TestBenchStartAssembly(unittest.TestCase):
         r = self._start(scenarios=["asr", "creative"], models=["m1"], ctx_list=[])
         self.assertEqual(r.status_code, 400, r.text)   # creative 需要 ctx_list
 
+    def test_translate_needs_no_ctx_list(self):
+        """翻译场景（translate，llm kind）按固定原文字长阶梯出点：ctx_list 可
+        缺省；混合创意场景时仍要求 ctx_list（与媒体场景同口径）。"""
+        self.client.put("/api/config", json={"providers": [_prov(local=True)]})
+        r = self._start(scenarios=["translate"], models=["m1"], ctx_list=[])
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self._start(scenarios=["translate", "creative"], models=["m1"],
+                        ctx_list=[])
+        self.assertEqual(r.status_code, 400, r.text)   # creative 需要 ctx_list
+
     def test_config_scenarios_carry_kind_and_ladder(self):
         """/api/config 场景列表带 kind 与阶梯：前端按 kind 过滤/分组与展示档位。"""
         r = self.client.get("/api/config")
@@ -503,6 +685,10 @@ class TestBenchStartAssembly(unittest.TestCase):
         self.assertEqual(scens["asr"]["ladder"], SCENARIOS["asr"]["ladder"])
         self.assertEqual(scens["ocr"]["kind"], "ocr")
         self.assertIsNone(scens["creative"]["ladder"])
+        # 翻译场景：llm kind（同 chat 文本流路径）但带固定原文字长阶梯
+        self.assertEqual(scens["translate"]["kind"], "llm")
+        self.assertEqual(scens["translate"]["ladder"], SCENARIOS["translate"]["ladder"])
+        self.assertEqual(scens["translate"]["unit"], "字原文")
 
 
 class TestAtomicWrite(unittest.TestCase):
@@ -584,6 +770,78 @@ class TestHistoryApi(unittest.TestCase):
         r = self.client.delete("/api/bench/history")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(os.listdir(self.tmp.name), ["keep.txt"])   # json 全清、其他保留
+
+    def _write_rename_archive(self, rid="r-ren"):
+        """含全部模型名引用位的存档：cfg.models/model_info/model_kind(s)/
+        model_max_ctx/temperature_locked + 逐点 model 字段。"""
+        d = {"run_id": rid, "started_at": "2026-09-11 09:00:00",
+             "cfg": {"provider": "p1", "models": ["old-m", "other"],
+                     "model_info": {"old-m": {"hardware": "RTX"}},
+                     "model_kind": {"old-m": "llm", "other": "llm"},
+                     "model_kinds": {"old-m": ["llm"], "other": ["llm"]},
+                     "model_max_ctx": {"old-m": 8192},
+                     "temperature_locked": ["old-m"]},
+             "results": [{"model": "old-m", "scenario": "creative"},
+                         {"model": "other", "scenario": "creative"},
+                         {"model": "old-m", "scenario": "code"}]}
+        with open(os.path.join(self.tmp.name, f"{rid}.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(d, f)
+        return rid
+
+    def test_rename_rewrites_all_references(self):
+        """改名适配（本地部署改名后存档对不上号）：所有引用位改写为新名，
+        顶层追加 model_renames 审计留痕；重复改名留痕追加而非覆盖。"""
+        rid = self._write_rename_archive()
+        r = self.client.post(f"/api/bench/history/{rid}/rename",
+                             json={"old": "old-m", "new": "new-m"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["points"], 2)
+        with open(os.path.join(self.tmp.name, f"{rid}.json"),
+                  encoding="utf-8") as f:
+            d = json.load(f)
+        cfg = d["cfg"]
+        self.assertEqual(cfg["models"], ["new-m", "other"])
+        self.assertEqual(list(cfg["model_info"]), ["new-m"])
+        self.assertEqual(cfg["model_kind"]["new-m"], "llm")
+        self.assertEqual(cfg["model_kinds"]["new-m"], ["llm"])
+        self.assertEqual(cfg["model_max_ctx"], {"new-m": 8192})
+        self.assertEqual(cfg["temperature_locked"], ["new-m"])
+        self.assertEqual([p["model"] for p in d["results"]],
+                         ["new-m", "other", "new-m"])
+        self.assertEqual(d["model_renames"][0]["from"], "old-m")
+        self.assertEqual(d["model_renames"][0]["to"], "new-m")
+        self.assertTrue(d["model_renames"][0]["at"])
+        r = self.client.post(f"/api/bench/history/{rid}/rename",
+                             json={"old": "new-m", "new": "newer-m"})
+        self.assertEqual(r.status_code, 200, r.text)
+        with open(os.path.join(self.tmp.name, f"{rid}.json"),
+                  encoding="utf-8") as f:
+            d = json.load(f)
+        self.assertEqual([x["to"] for x in d["model_renames"]],
+                         ["new-m", "newer-m"])
+
+    def test_rename_rejected(self):
+        """改名入参防护：穿越/不存在 与 detail 对称；old 不在存档、new 撞名、
+        新旧同名、空值一律 400 且存档不动。"""
+        rid = self._write_rename_archive()
+        r = self.client.post("/api/bench/history/a..b/rename",
+                             json={"old": "a", "new": "b"})
+        self.assertEqual(r.status_code, 400, r.text)
+        r = self.client.post("/api/bench/history/ghost/rename",
+                             json={"old": "a", "new": "b"})
+        self.assertEqual(r.status_code, 404, r.text)
+        for body in ({"old": "ghost-m", "new": "x"},
+                     {"old": "old-m", "new": "other"},
+                     {"old": "old-m", "new": "old-m"},
+                     {"old": "", "new": "x"}, {"old": "old-m"}):
+            r = self.client.post(f"/api/bench/history/{rid}/rename", json=body)
+            self.assertEqual(r.status_code, 400, body)
+        with open(os.path.join(self.tmp.name, f"{rid}.json"),
+                  encoding="utf-8") as f:
+            d = json.load(f)
+        self.assertEqual(d["cfg"]["models"], ["old-m", "other"])
+        self.assertNotIn("model_renames", d)
 
 
 if __name__ == "__main__":

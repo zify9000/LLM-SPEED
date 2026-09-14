@@ -18,11 +18,11 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 
-from bench import (AGENT_COLD_CTX_DEFAULT, AGENT_COLD_CTX_RANGE,
-                   AGENT_PHASE2_BASE, AGENT_TURNS_DEFAULT, AGENT_TURNS_RANGE,
-                   AGENT_TURN_DELTA_DEFAULT, AGENT_TURN_DELTA_RANGE, BenchRun,
-                   CTX_HEADROOM, DEFAULT_CONCURRENCIES, DEFAULT_CTX_LIST,
-                   SCENARIOS)
+from bench import (AGENT_CACHE_RANGE, AGENT_INST_RANGE, AGENT_LADDER_MAX,
+                   ASR_LADDER_RANGE, BenchRun, CTX_HEADROOM,
+                   DEFAULT_CONCURRENCIES, DEFAULT_CTX_LIST,
+                   MEDIA_LADDER_MAX, OCR_LADDER_RANGE, SCENARIOS,
+                   TTS_LADDER_RANGE)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(BASE, "results")
@@ -124,6 +124,7 @@ def load_providers() -> list[dict]:
             "gateway_urls": urls,            # 多地址候选（本地场景内网+隧道，择优绕中继）
             "has_key": bool(key),
             "local": bool(p.get("local")),   # 本地 provider：跑并发测试；云端不跑
+            "deployment_groups": p.get("deployment_groups") or [],   # 部署环境分组（仅组织用）
             "deployments": p.get("deployments") or [],   # 模型→部署环境（硬件/框架/参数）映射
         })
     return providers
@@ -141,6 +142,36 @@ def resolve_provider(name: str | None) -> dict:
     return providers[0]
 
 
+# 模型类型白名单（ADR-0020）：部署的 kind/kinds 取值空间
+_KINDS = ("llm", "asr", "ocr", "tts")
+
+
+def _dep_kinds(dep: dict) -> list[str]:
+    """部署声明的模型能力集（多选，如文本模型支持视觉输入 = ["llm", "ocr"]）：
+    kinds 数组优先，兼容旧单值 kind 字段，缺省 ["llm"]。"""
+    kinds = dep.get("kinds")
+    if isinstance(kinds, list) and kinds:
+        return [str(k) for k in kinds]
+    return [str(dep["kind"])] if dep.get("kind") else ["llm"]
+
+
+def _dep_quants(dep: dict) -> list[str]:
+    """部署的量化多选（如 ["Q8_0", "Q4_K_M"]）。
+    quants 数组优先，兼容旧单值 quant 字段（按逗号拆分），缺省 []。"""
+    quants = dep.get("quants")
+    if isinstance(quants, list) and quants:
+        return [str(q) for q in quants]
+    return [q.strip() for q in str(dep.get("quant") or "").split(",") if q.strip()]
+
+
+def _dep_kv_quants(dep: dict) -> list[str]:
+    """部署的 KV 缓存量化多选（如 ["Q8_0"]），缺省 []。"""
+    kv = dep.get("kv_quants")
+    if isinstance(kv, list) and kv:
+        return [str(q) for q in kv]
+    return []
+
+
 def _resolve_deployment(provider: dict, model: str) -> dict | None:
     """模型的生效部署：一个模型允许映射多套部署环境（1 对多），但激活
     （active=true）的只有一套——激活者生效；无 active 标记回退首个命中
@@ -156,7 +187,8 @@ def _resolve_deployment(provider: dict, model: str) -> dict | None:
 
 
 def match_deployments(provider: dict, models: list[str]) -> dict[str, dict]:
-    """按被测模型匹配部署环境，返回 {model: {hardware, framework, params, deploy_label}}。
+    """按被测模型匹配部署环境，返回 {model: {deploy_label, quant, kv_quant,
+    max_ctx, hardware, framework, params, kinds}}。
 
     一个 provider 可挂多套部署（deployments），每套声明其适用的 models；
     同一模型命中多套时激活的那套生效（无 active 标记回退首个命中）；
@@ -168,13 +200,19 @@ def match_deployments(provider: dict, models: list[str]) -> dict[str, dict]:
         if dep:
             out[m] = {
                 "deploy_label": dep.get("label") or "",
-                "quant": dep.get("quant") or "",   # 模型量化（如 Q8_0），卡片首格展示
+                # 本次测速生效的模型量化（quants 首项，兼容旧 quant 单值回退）
+                # 与 KV 缓存量化（kv_quants 首项）：一次测速只有一个生效值
+                "quant": (_dep_quants(dep) or [""])[0],
+                "kv_quant": (_dep_kv_quants(dep) or [""])[0],
+                # 部署上下文上限（tokens）：测速卡片 meta「模型」格的上下文段
+                # 来源；未配置为 None（前端省略该段，与 model_max_ctx 同门槛）
+                "max_ctx": int(dep["max_ctx"]) if dep.get("max_ctx") else None,
                 "hardware": dep.get("hardware") or "",
                 "framework": dep.get("framework") or "",
                 "params": dep.get("params") or "",
-                # 部署的模型类型（llm/asr/ocr/tts，缺省 llm）：场景按 kind 匹配
-                # （ADR-0020），随结果存档、供前端分组与引擎校验
-                "kind": dep.get("kind") or "llm",
+                # 部署的模型能力集（llm/asr/ocr/tts 多选，缺省 [llm]）：场景按
+                # kind 匹配（ADR-0020），随结果存档、供前端分组与引擎校验
+                "kinds": _dep_kinds(dep),
             }
     return out
 
@@ -231,7 +269,10 @@ async def get_config():
         "providers": [{k: v for k, v in p.items()} for p in providers],
         "api_key_configured": any(p["has_key"] for p in providers),
         "scenarios": [{"key": k, "label": v["label"], "kind": v.get("kind", "llm"),
-                       "ladder": v.get("ladder"), "unit": v.get("unit")}
+                       "ladder": v.get("ladder"), "unit": v.get("unit"),
+                       # agent 缓存×指令矩阵默认阶梯（前端档位区默认值）
+                       "cache_ladder": v.get("cache_ladder"),
+                       "inst_ladder": v.get("inst_ladder")}
                       for k, v in SCENARIOS.items()],
         "ctx_list": DEFAULT_CTX_LIST,
         "concurrencies": DEFAULT_CONCURRENCIES,
@@ -265,6 +306,25 @@ def _atomic_write(path: str, text: str, private: bool = False):
         except OSError:
             pass
         raise
+
+
+def _provider_deploy_groups(provider: dict) -> list[str]:
+    """provider 的部署环境分组名（有序去重，仅组织用；≤40 字符，空值剔除）。"""
+    groups_in = provider.get("deployment_groups") or []
+    if not isinstance(groups_in, list):
+        raise HTTPException(400, f"{provider.get('name') or '?'} 的 deployment_groups "
+                                 f"必须是数组（分组名有序去重）")
+    groups = []
+    for g in groups_in:
+        g = str(g).strip()
+        if not g:
+            continue
+        if len(g) > 40:
+            raise HTTPException(400, f"{provider.get('name') or '?'} 的分组名 "
+                                     f"≤40 字符: {g!r}")
+        if g not in groups:
+            groups.append(g)
+    return groups
 
 
 def _validate_providers(providers) -> list[dict]:
@@ -322,23 +382,84 @@ def _validate_providers(providers) -> list[dict]:
             dep = {
                 "label": str(d.get("label") or "").strip()[:64],
                 "models": [str(m).strip() for m in (d.get("models") or []) if str(m).strip()],
-                "quant": str(d.get("quant") or "").strip()[:64],
                 "hardware": str(d.get("hardware") or "").strip()[:200],
                 "framework": str(d.get("framework") or "").strip()[:100],
                 "params": str(d.get("params") or "").strip()[:300],
             }
+            # 环境分组：仅组织/排序用（纯前端归类），不影响解析与 max_ctx 钳制；
+            # 空值 = 未分组，不落盘保持零字段
+            g = str(d.get("group") or "").strip()[:40]
+            if g:
+                dep["group"] = g
+            # 量化多选（如 ["Q8_0", "Q4_K_M"]）：quants 数组优先，兼容旧单值
+            # quant 字段（逗号分隔拆分，与前端解析口径一致）；非空才落盘，
+            # 不再写 quant（与 kinds/kind 先例同口径，旧配置读取见 _dep_quants）
+            quants_in = d.get("quants")
+            if quants_in is None:
+                quants_in = str(d.get("quant") or "").split(",")
+            if not isinstance(quants_in, list):
+                raise HTTPException(400, f"{name} 的部署 {dep['label'] or '未命名部署'} "
+                                         f"quants 须为数组（量化多选）")
+            quants = []
+            for q in quants_in:
+                q = str(q).strip()
+                if not q:
+                    continue
+                if len(q) > 64:
+                    raise HTTPException(400, f"{name} 的部署 {dep['label'] or '未命名部署'} "
+                                             f"quants 单项 ≤64 字符: {q!r}")
+                if q not in quants:
+                    quants.append(q)
+            if len(quants) > 8:
+                raise HTTPException(400, f"{name} 的部署 {dep['label'] or '未命名部署'} "
+                                         f"quants 最多 8 项")
+            if quants:
+                dep["quants"] = quants
+            # KV 缓存量化多选（如 ["Q8_0"]）：校验口径与 quants 完全一致；
+            # 非空才落盘（一次测速生效值取首项，见 match_deployments）
+            kv_in = d.get("kv_quants") or []
+            if not isinstance(kv_in, list):
+                raise HTTPException(400, f"{name} 的部署 {dep['label'] or '未命名部署'} "
+                                         f"kv_quants 须为数组（KV 量化多选）")
+            kv_quants = []
+            for q in kv_in:
+                q = str(q).strip()
+                if not q:
+                    continue
+                if len(q) > 64:
+                    raise HTTPException(400, f"{name} 的部署 {dep['label'] or '未命名部署'} "
+                                             f"kv_quants 单项 ≤64 字符: {q!r}")
+                if q not in kv_quants:
+                    kv_quants.append(q)
+            if len(kv_quants) > 8:
+                raise HTTPException(400, f"{name} 的部署 {dep['label'] or '未命名部署'} "
+                                         f"kv_quants 最多 8 项")
+            if kv_quants:
+                dep["kv_quants"] = kv_quants
             # 非有限值（NaN/Infinity，json.loads 会接受）同非正数口径：视为未配置
             if isinstance(max_ctx, (int, float)) and not isinstance(max_ctx, bool) \
                     and math.isfinite(max_ctx) and int(max_ctx) > 0:
                 dep["max_ctx"] = int(max_ctx)   # 超窗钳制来源（ADR-0005）
             if d.get("active"):
                 dep["active"] = True   # 激活标记仅在置位时落盘，旧配置保持零字段
-            kind = str(d.get("kind") or "llm").lower()
-            if kind not in ("llm", "asr", "ocr", "tts"):
+            # 模型能力集（多选：文本模型支持视觉输入时同时挂 ocr）：kinds 数组
+            # 优先，兼容旧单值 kind 字段；缺省 [llm] 不落盘，旧配置保持零字段
+            kinds_in = d.get("kinds")
+            if kinds_in is None:
+                kinds_in = [d["kind"]] if d.get("kind") else ["llm"]
+            if not isinstance(kinds_in, list) or not kinds_in:
                 raise HTTPException(400, f"{name} 的部署 {dep['label'] or '未命名部署'} "
-                                         f"kind 必须是 llm/asr/ocr/tts: {kind!r}")
-            if kind != "llm":
-                dep["kind"] = kind   # 缺省 llm 不落盘，旧配置保持零字段
+                                         f"kinds 须为非空数组（{'/'.join(_KINDS)} 多选）")
+            kinds = []
+            for k in kinds_in:
+                k = str(k).strip().lower()
+                if k not in _KINDS:
+                    raise HTTPException(400, f"{name} 的部署 {dep['label'] or '未命名部署'} "
+                                             f"kinds 元素须取自 {'/'.join(_KINDS)}: {k!r}")
+                if k not in kinds:
+                    kinds.append(k)
+            if kinds != ["llm"]:
+                dep["kinds"] = kinds
             deps.append(dep)
         # 一个模型允许映射多套部署，但激活只能有一套：重叠激活拒绝写入，
         # 否则生效口径（_resolve_deployment）出现二义
@@ -359,6 +480,7 @@ def _validate_providers(providers) -> list[dict]:
             "gateway_url": urls[0],      # 兼容字段=首选地址
             "gateway_urls": urls,
             "local": bool(p.get("local")),
+            "deployment_groups": _provider_deploy_groups(p),
             "deployments": deps,
         })
     return out
@@ -461,11 +583,17 @@ def _validate_bench_cfg(cfg: dict):
     if not isinstance(scens, list) or any(
             not isinstance(s, str) or s not in SCENARIOS for s in scens):
         raise HTTPException(400, f"scenarios 须取自白名单: {sorted(SCENARIOS)}")
-    # 纯 Agent 场景不以上下文档位为变量（按任务轮次出点），ctx_list 可为空
+    # 纯 Agent 场景不以上下文档位为变量（按缓存×指令矩阵出点），ctx_list 可为空
     if not isinstance(ctxs, list) or len(ctxs) > 16 or any(
             not isinstance(c, (int, float)) or isinstance(c, bool)
             or not 0 <= c <= 4 * 1048576 for c in ctxs):
         raise HTTPException(400, "ctx_list 须为 ≤16 档、逐值 0~4M（对齐前端自定义档位上限）")
+    # 翻译场景原文字长阶梯（可选，缺省用场景默认值）：逐值为正整数（字原文）
+    tl = cfg.get("translate_ladder")
+    if tl is not None and (not isinstance(tl, list) or len(tl) > 16 or any(
+            not isinstance(v, int) or isinstance(v, bool)
+            or not 1 <= v <= 65536 for v in tl)):
+        raise HTTPException(400, "translate_ladder 须为 ≤16 档、逐值 1~65536 字原文")
     if not isinstance(concs, list) or len(concs) > 8 or any(
             not isinstance(c, int) or isinstance(c, bool)
             or not 1 <= c <= 64 for c in concs):
@@ -475,41 +603,34 @@ def _validate_bench_cfg(cfg: dict):
     rm = cfg.get("reply_mode")
     if rm is not None and rm not in ("free", "echo"):
         raise HTTPException(400, "reply_mode 须为 free 或 echo")
-    # Agent 连续任务链参数（可选，缺省引擎用默认值）：轮 1 冷启动独立配置
-    # agent_cold_ctx（默认 10K）；两阶段暖轮数 agent_turns_p1（短文本）/
-    # agent_turns_p2（长文本 ladder）显式配置；旧配置 agent_turns 单值由
-    # 引擎对半切兼容。阶段一每轮新增上下文为正态采样（中心 1K）的钳制区间
-    # [min, max]；阶段二 ladder 默认 4K 起翻倍
-    vc = cfg.get("agent_cold_ctx")
-    if vc is not None and (not isinstance(vc, int) or isinstance(vc, bool)
-                           or not 1024 <= vc <= 262144):
-        raise HTTPException(400, "agent_cold_ctx 须为 1024~262144 的整数")
-    if cfg.get("agent_turns_p1") is not None or cfg.get("agent_turns_p2") is not None:
-        for name in ("agent_turns_p1", "agent_turns_p2"):
-            v = cfg.get(name)
-            if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= 32:
-                raise HTTPException(400, f"{name} 须为 0~32 的整数")
-        if not 1 <= cfg["agent_turns_p1"] + cfg["agent_turns_p2"] <= 32:
-            raise HTTPException(400, "agent_turns_p1 + agent_turns_p2 须在 1~32 之间")
-    else:
-        v = cfg.get("agent_turns")
-        if v is not None and (not isinstance(v, int) or isinstance(v, bool)
-                              or not 1 <= v <= 32):
-            raise HTTPException(400, "agent_turns 须为 1~32 的整数")
-    # 阶段二 ladder 起始增量（可选，默认 4K 逐轮翻倍）
-    vb = cfg.get("agent_phase2_base")
-    if vb is not None and (not isinstance(vb, int) or isinstance(vb, bool)
-                           or not 1024 <= vb <= 65536):
-        raise HTTPException(400, "agent_phase2_base 须为 1024~65536 的整数")
-    dv = cfg.get("agent_turn_delta")
-    if dv is not None:
-        vals = dv if isinstance(dv, list) else [dv]
-        if (len(vals) not in (1, 2) or any(
-                not isinstance(x, int) or isinstance(x, bool)
-                or not 256 <= x <= 32768 for x in vals)):
-            raise HTTPException(400, "agent_turn_delta 须为 256~32768 的整数或 [min, max] 区间")
-        if len(vals) == 2 and vals[0] > vals[1]:
-            raise HTTPException(400, "agent_turn_delta 区间须 min ≤ max")
+    # Agent 缓存×指令矩阵阶梯（可选，缺省用场景默认值）：缓存档 = 已写入前缀
+    # 缓存的上下文 tokens（0 起，与 ctx_list 同界）；指令档 = 缓存基础上的
+    # 单步新输入 tokens（16~65536）；各 ≤16 档
+    cl = cfg.get("agent_cache_ladder")
+    if cl is not None and (not isinstance(cl, list) or len(cl) > AGENT_LADDER_MAX
+            or any(not isinstance(v, int) or isinstance(v, bool)
+                   or not AGENT_CACHE_RANGE[0] <= v <= AGENT_CACHE_RANGE[1]
+                   for v in cl)):
+        raise HTTPException(400, f"agent_cache_ladder 须为 ≤{AGENT_LADDER_MAX} 档、"
+                                 f"逐值 {AGENT_CACHE_RANGE[0]}~{AGENT_CACHE_RANGE[1]} tokens")
+    il = cfg.get("agent_inst_ladder")
+    if il is not None and (not isinstance(il, list) or len(il) > AGENT_LADDER_MAX
+            or any(not isinstance(v, int) or isinstance(v, bool)
+                   or not AGENT_INST_RANGE[0] <= v <= AGENT_INST_RANGE[1]
+                   for v in il)):
+        raise HTTPException(400, f"agent_inst_ladder 须为 ≤{AGENT_LADDER_MAX} 档、"
+                                 f"逐值 {AGENT_INST_RANGE[0]}~{AGENT_INST_RANGE[1]} tokens")
+    # 媒体场景阶梯（可选，缺省用场景默认值）：asr=时长（秒）/ ocr=张数 /
+    # tts=字符（字数）；各 ≤MEDIA_LADDER_MAX 档，范围随单位而定
+    for field, rng, unit in (("asr_ladder", ASR_LADDER_RANGE, "秒"),
+                             ("ocr_ladder", OCR_LADDER_RANGE, "张"),
+                             ("tts_ladder", TTS_LADDER_RANGE, "字")):
+        ml = cfg.get(field)
+        if ml is not None and (not isinstance(ml, list) or len(ml) > MEDIA_LADDER_MAX
+                or any(not isinstance(v, int) or isinstance(v, bool)
+                       or not rng[0] <= v <= rng[1] for v in ml)):
+            raise HTTPException(400, f"{field} 须为 ≤{MEDIA_LADDER_MAX} 档、"
+                                     f"逐值 {rng[0]}~{rng[1]} {unit}")
     # 复测/超时/输出上限/思考模式：bench_start 直接透传引擎，这里一并白名单化
     # （repeats 上限对齐引擎钳制 1~5；thinking 枚举 = 引擎三值 auto/enabled/disabled）
     rv = cfg.get("repeats")
@@ -529,37 +650,13 @@ def _validate_bench_cfg(cfg: dict):
         raise HTTPException(400, "thinking 须为 auto/enabled/disabled")
 
 
-# 与测速引擎（bench.py 阶段二 ladder）同口径的单轮增量钳制：引擎对每轮
-# 目标 min(增量, 262144)，这里估算上界同样钳制，告警才不虚报引擎已不会构造的超大轮
-AGENT_TURN_TARGET_CLAMP = 262144
-
-
-def _agent_chain_max_target(cfg: dict) -> int:
-    """agent 链最大轮目标的保守上界（tokens）：冷启动 + 阶段一暖轮增量上限 ×
-    轮数 + 阶段二 ladder（p2_base 起逐轮翻倍）之和。构成口径与引擎
-    _gen_agent_turns 一致，增量取钳制区间上界（N(1K) 采样的最坏值）。"""
-    p1, p2 = cfg.get("agent_turns_p1"), cfg.get("agent_turns_p2")
-    if p1 is not None and p2 is not None:
-        n1, n2 = int(p1), int(p2)
-    else:
-        turns = int(cfg.get("agent_turns") or AGENT_TURNS_DEFAULT)
-        n2 = turns // 2
-        n1 = turns - n2
-    dv = cfg.get("agent_turn_delta")
-    if isinstance(dv, (list, tuple)) and len(dv) == 2:
-        dmax = int(dv[1])
-    elif dv:
-        dmax = int(dv)
-    else:
-        dmax = AGENT_TURN_DELTA_DEFAULT[1]
-    dmax = max(AGENT_TURN_DELTA_RANGE[0], min(AGENT_TURN_DELTA_RANGE[1], dmax))
-    p2_base = max(1024, min(65536,
-                  int(cfg.get("agent_phase2_base") or AGENT_PHASE2_BASE)))
-    cold = max(AGENT_COLD_CTX_RANGE[0], min(AGENT_COLD_CTX_RANGE[1],
-               int(cfg.get("agent_cold_ctx") or AGENT_COLD_CTX_DEFAULT)))
-    # 阶段二逐轮翻倍可远超引擎的单轮钳制上限，按引擎同口径钳到 262144 再求和
-    return cold + n1 * dmax + sum(min(p2_base << i, AGENT_TURN_TARGET_CLAMP)
-                                  for i in range(n2))
+def _agent_matrix_max_total(cfg: dict) -> int:
+    """agent 矩阵最大组合目标的保守上界（tokens）：最大缓存档 + 最大指令档
+    （部署预算告警用；引擎对超预算组合整档跳过）。"""
+    sc = SCENARIOS["agent"]
+    cache = [int(v) for v in (cfg.get("agent_cache_ladder") or sc["cache_ladder"])]
+    inst = [int(v) for v in (cfg.get("agent_inst_ladder") or sc["inst_ladder"])]
+    return (max(cache) if cache else 0) + (max(inst) if inst else 0)
 
 
 @app.post("/api/bench/start")
@@ -568,9 +665,11 @@ async def bench_start(cfg: dict):
     for field in ("models", "scenarios", "concurrencies"):
         if not cfg.get(field):
             raise HTTPException(400, f"缺少配置项: {field}")
-    # 纯文本场景按上下文档位出点；agent 场景按任务轮次；媒体场景（asr/ocr/tts）
-    # 按场景自带阶梯（时长/张数/字符）出点——后两类 ctx_list 均可缺省
+    # 纯文本场景按上下文档位出点；agent 场景按缓存×指令矩阵；媒体场景（asr/ocr/tts）
+    # 与翻译场景（translate）按阶梯出点（时长/张数/字符/原文字数），默认阶梯可被
+    # cfg 的 <场景>_ladder 覆盖 ——后三类 ctx_list 均可缺省
     if any(SCENARIOS[s].get("kind", "llm") == "llm" and s != "agent"
+           and "ladder" not in SCENARIOS[s]
            for s in cfg["scenarios"]) and not cfg.get("ctx_list"):
         raise HTTPException(400, "缺少配置项: ctx_list")
     cfg.setdefault("ctx_list", [])
@@ -597,19 +696,25 @@ async def bench_start(cfg: dict):
         cfg["api_key"] = provider_key(p)
         # 部署环境（硬件/框架/参数）跟随被测模型，由服务端按映射注入并随结果存档
         cfg["model_info"] = match_deployments(p, cfg.get("models") or [])
-        # 模型类型映射（ADR-0020）：按部署的 kind 下发（未映射到部署的模型按
-        # llm），引擎据此把模型分发到对应 kind 的场景，mismatch 在这里 400
-        cfg["model_kind"] = {
-            m: (cfg["model_info"].get(m) or {}).get("kind", "llm")
+        # 模型类型能力集映射（ADR-0020 多选扩展）：按部署的 kinds 下发（未映射
+        # 部署的模型按 [llm]），引擎据此把模型分发到对应 kind 的场景
+        cfg["model_kinds"] = {
+            m: list((cfg["model_info"].get(m) or {}).get("kinds") or ["llm"])
             for m in (cfg.get("models") or [])
         }
+        # 一次运行一种 kind 的边界不因多能力模型打破：所选场景须同属一种类型
+        scen_kinds = {SCENARIOS[s].get("kind", "llm") for s in cfg["scenarios"]}
+        if len(scen_kinds) > 1:
+            raise HTTPException(400, "一次运行只允许一种类型的场景"
+                                     "（文本生成/语音转写/图像识别/语音合成不可混选）")
         bad = sorted({(m, s) for s in cfg["scenarios"] for m in cfg["models"]
-                      if cfg["model_kind"].get(m, "llm")
-                      != SCENARIOS[s].get("kind", "llm")})
+                      if SCENARIOS[s].get("kind", "llm")
+                      not in cfg["model_kinds"].get(m, ["llm"])})
         if bad:
-            hint = "; ".join(f"{m}（{cfg['model_kind'].get(m, 'llm')}）× 场景「"
-                             f"{SCENARIOS[s]['label']}」（{SCENARIOS[s].get('kind', 'llm')}）"
-                             for m, s in bad[:3])
+            hint = "; ".join(
+                f"{m}（{'/'.join(cfg['model_kinds'].get(m, ['llm']))}）× 场景「"
+                f"{SCENARIOS[s]['label']}」（{SCENARIOS[s].get('kind', 'llm')}）"
+                for m, s in bad[:3])
             raise HTTPException(400, f"模型类型与场景不匹配：{hint}"
                                      f"{' 等' if len(bad) > 3 else ''}"
                                      "——模型选择器只列出同类型场景")
@@ -631,21 +736,21 @@ async def bench_start(cfg: dict):
                     warnings.append(
                         f"⚠ {m}：模型未映射部署环境，max_ctx 钳制不可用"
                         "（请在「部署环境」中核对模型名后补映射）")
-        # agent 链总目标校验（不阻断）：最大轮目标超出部署预算
-        # （max_ctx − max_tokens − 余量）时引擎会逐轮跳过（point_skipped），
-        # 预先告知用户会有轮次被跳过
+        # agent 矩阵最大组合校验（不阻断）：最大缓存档 + 最大指令档超出部署
+        # 预算（max_ctx − max_tokens − 余量）时引擎会整档跳过（point_skipped），
+        # 预先告知用户会有组合被跳过
         if "agent" in (cfg.get("scenarios") or []):
-            max_target = _agent_chain_max_target(cfg)
+            max_total = _agent_matrix_max_total(cfg)
             max_tokens = int(cfg.get("max_tokens")
                              or SCENARIOS["agent"]["max_tokens_default"])
             for m in (cfg.get("models") or []):
                 budget = (cfg["model_max_ctx"].get(m) or 0) \
                     - max_tokens - CTX_HEADROOM
-                if budget > 0 and max_target > budget:
+                if budget > 0 and max_total > budget:
                     warnings.append(
-                        f"⚠ {m}：agent 链最大轮目标 ~{max_target} tokens 超出"
+                        f"⚠ {m}：agent 矩阵最大组合（缓存+指令）~{max_total} tokens 超出"
                         f"部署预算 {budget}（max_ctx − max_tokens − 余量），"
-                        "超出上限的轮次将被跳过")
+                        "超出上限的组合将被跳过")
         if not p["local"]:
             # 云端不做并发/吞吐测试：响应不受控、可能调度到不同推理设备，
             # 服务端强制单发，不信任前端传参（ADR-0003）
@@ -740,15 +845,15 @@ async def bench_active():
         if r.finished_at is not None:
             continue
         cfg = r.cfg
-        # agent 场景按任务轮次出点（不以下文档位为变量）：1 轮冷启动 + 两阶段
-        # 暖轮数之和，再 × 并发链数
-        n_turns = (1 + (cfg["agent_turns_p1"] + cfg["agent_turns_p2"])
-                   if cfg.get("agent_turns_p1") is not None
-                   and cfg.get("agent_turns_p2") is not None
-                   else 1 + int(cfg.get("agent_turns") or AGENT_TURNS_DEFAULT))
-        n_scen = sum(n_turns if s == "agent"
-                     else len(SCENARIOS[s].get("ladder") or [])   # 媒体场景：场景阶梯
-                     if "ladder" in SCENARIOS[s]
+        # agent 场景按缓存×指令矩阵出点（不以下文档位为变量）：组合数 =
+        # 缓存档数 × 指令档数，再 × 并行会话数
+        n_agent = (len(cfg.get("agent_cache_ladder") or SCENARIOS["agent"]["cache_ladder"])
+                   * len(cfg.get("agent_inst_ladder") or SCENARIOS["agent"]["inst_ladder"]))
+        n_scen = sum(n_agent if s == "agent"
+                     else len(cfg.get("translate_ladder") or SCENARIOS[s]["ladder"])
+                     if s == "translate"   # 翻译场景：矩阵自定义阶梯优先于场景默认
+                     else len(cfg.get(f"{s}_ladder") or SCENARIOS[s]["ladder"])
+                     if "ladder" in SCENARIOS[s]   # 媒体场景：cfg 覆盖优先于场景默认
                      else len(cfg.get("ctx_list") or [])
                      for s in cfg.get("scenarios") or [])
         total = len(cfg.get("models") or []) * n_scen * len(cfg.get("concurrencies") or [])
@@ -775,6 +880,9 @@ async def bench_history():
                         "scenarios": cfg.get("scenarios", []),
                         "ctx_list": cfg.get("ctx_list", []),
                         "concurrencies": cfg.get("concurrencies", []),
+                        "agent_cache_ladder": cfg.get("agent_cache_ladder"),
+                        "agent_inst_ladder": cfg.get("agent_inst_ladder"),
+                        # 旧存档（连续任务链口径）标题展示回退用
                         "agent_turns": cfg.get("agent_turns"),
                         "agent_turns_p1": cfg.get("agent_turns_p1"),
                         "agent_turns_p2": cfg.get("agent_turns_p2"),
@@ -825,6 +933,275 @@ async def bench_history_note(run_id: str, body: dict):
     # 原子替换写回：直接覆写会因进程被杀留下写了一半的存档，永久损坏既有测速记录
     _atomic_write(path, json.dumps(d, ensure_ascii=False, indent=1) + "\n")
     return {"ok": True, "note": note}
+
+
+@app.post("/api/bench/history/{run_id}/rename")
+async def bench_history_rename(run_id: str, body: dict):
+    """存档模型改名适配：本地部署模型改名后，把历史存档里的旧模型名改写为新名。
+
+    变更所有引用位——cfg.models、model_info/model_kind(s)/model_max_ctx 的键、
+    temperature_locked 名单、逐测速点 model 字段；并在存档顶层追加
+    model_renames 审计留痕（from/to/at），原子写回（与 note 端点同口径）。
+    """
+    if any(c in run_id for c in "/\\") or ".." in run_id:
+        raise HTTPException(400, "非法 run_id")
+    old = str(body.get("old") or "").strip()
+    new = str(body.get("new") or "").strip()
+    if not old or not new:
+        raise HTTPException(400, "old/new 均须为非空字符串")
+    if len(old) > 200 or len(new) > 200:
+        raise HTTPException(400, "模型名过长（≤200 字符）")
+    if old == new:
+        raise HTTPException(400, "新旧模型名相同，无需改名")
+    path = os.path.join(RESULTS_DIR, f"{run_id}.json")
+    if not os.path.exists(path):
+        raise HTTPException(404, "not found")
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+    except json.JSONDecodeError:
+        raise HTTPException(404, "存档文件已损坏（JSON 无法解析），无法改名") from None
+    cfg = d.get("cfg")
+    if not isinstance(cfg, dict):
+        raise HTTPException(404, "存档缺少 cfg 段（结构不完整），无法改名")
+    models = cfg.get("models") or []
+    if old not in models:
+        raise HTTPException(400, f"存档中不存在模型 {old!r}（本次测速模型：{models}）")
+    if new in models:
+        raise HTTPException(400, f"存档中已存在模型 {new!r}，改名会让两个模型同名混淆")
+    cfg["models"] = [new if m == old else m for m in models]
+    for key in ("model_info", "model_kind", "model_kinds", "model_max_ctx"):
+        mp = cfg.get(key)
+        if isinstance(mp, dict) and old in mp:
+            mp[new] = mp.pop(old)
+    tl = cfg.get("temperature_locked")
+    if isinstance(tl, list):   # 温度受限名单按模型名记录（bench 侧 set[str]）
+        cfg["temperature_locked"] = [new if m == old else m for m in tl]
+    n = 0
+    for p in d.get("results") or []:
+        if isinstance(p, dict) and p.get("model") == old:
+            p["model"] = new
+            n += 1
+    d.setdefault("model_renames", []).append(
+        {"from": old, "to": new, "at": time.strftime("%Y-%m-%d %H:%M:%S")})
+    _atomic_write(path, json.dumps(d, ensure_ascii=False, indent=1) + "\n")
+    return {"ok": True, "old": old, "new": new, "points": n}
+
+
+@app.post("/api/bench/history/{run_id}/env")
+async def bench_history_env(run_id: str, body: dict):
+    """事后修改历史存档的部署环境快照（写回 cfg.model_info[model] 的字段）。
+
+    在原条目基础上更新 deploy_label/quant/kv_quant/max_ctx/hardware/framework/
+    params（量化存单值 = 该次测速实际生效值；max_ctx 为上下文上限 tokens，
+    省略键保留原值 / null 清空 / 正整数落盘），未提交的 kinds 等字段保留不
+    抹；旧 quants 数组键只读兼容，重写时移除。
+    """
+    if any(c in run_id for c in "/\\") or ".." in run_id:
+        raise HTTPException(400, "非法 run_id")
+    path = os.path.join(RESULTS_DIR, f"{run_id}.json")
+    if not os.path.exists(path):
+        raise HTTPException(404, "not found")
+    model = body.get("model")
+    info = body.get("info")
+    if not isinstance(model, str) or not model.strip():
+        raise HTTPException(400, "model 须为非空字符串")
+    if not isinstance(info, dict):
+        raise HTTPException(400, "info 须为对象")
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+    except json.JSONDecodeError:
+        raise HTTPException(404, "存档文件已损坏（JSON 无法解析），无法修改环境") from None
+    cfg = d.get("cfg")
+    if not isinstance(cfg, dict):
+        raise HTTPException(404, "存档缺少 cfg 段（结构不完整），无法修改环境")
+    model = model.strip()
+    models = cfg.get("models") or []
+    if model not in models:
+        raise HTTPException(400, f"存档中不存在模型 {model!r}（本次测速模型：{models}）")
+    def _q(key):
+        v = info.get(key)
+        if v is None:
+            return ""
+        if not isinstance(v, str):
+            raise HTTPException(400, f"{key} 须为字符串")
+        v = v.strip()
+        if len(v) > 64:
+            raise HTTPException(400, f"{key} 过长（≤64 字符）")
+        return v
+
+    def _s(key, limit):
+        v = info.get(key)
+        if v is None:
+            return ""
+        if not isinstance(v, str):
+            raise HTTPException(400, f"{key} 须为字符串")
+        return v.strip()[:limit]   # 长度上限镜像 _validate_providers 的部署校验
+
+    mi = cfg.setdefault("model_info", {})
+    if not isinstance(mi, dict):
+        raise HTTPException(404, "存档 model_info 段结构异常，无法修改环境")
+    entry = mi.get(model)
+    if entry is None:
+        entry = {}
+    elif not isinstance(entry, dict):
+        raise HTTPException(400, f"模型 {model!r} 的 model_info 条目结构异常，无法修改环境")
+    entry.update({
+        "deploy_label": _s("deploy_label", 64),
+        "quant": _q("quant"),
+        "kv_quant": _q("kv_quant"),
+        "hardware": _s("hardware", 200),
+        "framework": _s("framework", 100),
+        "params": _s("params", 300),
+    })
+    # max_ctx：上下文上限（tokens，正整数）。省略键保留原条目值（旧客户端不
+    # 回写时不误抹），null 显式清空，正整数落盘；数值校验口径与
+    # _validate_providers 的部署 max_ctx 校验一致（bool/0/负/非数值一律拒
+    # 绝）。只改存档显示快照，超窗钳制由部署配置单独承担（ADR-0005）
+    if "max_ctx" in info:
+        mv = info.get("max_ctx")
+        ok = mv is None or (
+            not isinstance(mv, bool) and isinstance(mv, (int, float))
+            and math.isfinite(mv) and int(mv) > 0)
+        if not ok:
+            raise HTTPException(400, "max_ctx 须为正整数或 null（清空）")
+        entry["max_ctx"] = int(mv) if mv is not None else None
+    entry.pop("quants", None)   # 旧数组键不再写出（镜像 kinds/kind 先例）
+    # 原子替换写回：与 note 端点同口径
+    _atomic_write(path, json.dumps(d, ensure_ascii=False, indent=1) + "\n")
+    return {"ok": True, "model_info": entry}
+
+
+def _point_identity(p: dict) -> tuple:
+    """测速点身份五元组（单点复测的请求/存档/复测产出三方匹配口径）。"""
+    return (p.get("model"), p.get("scenario"), p.get("ctx_target"),
+            p.get("inst_tokens"), p.get("concurrency"))
+
+
+@app.post("/api/bench/history/{run_id}/retest")
+async def bench_history_retest(run_id: str, body: dict):
+    """历史存档单点复测：按存档 cfg 窄化到被复测点（同模型/场景/档位/并发，
+    agent 矩阵点含指令档）重跑一次完整测速（含 repeats 复测轮次），完成后
+    由 _merge_retest 守望任务把新点合并替换回原存档——缓解「个别点失败
+    整轮结果不可用」：失败点事后单独补测，无需重跑全矩阵。
+
+    合并留痕：点级 retested_at + 存档顶层 retests 审计数组；复测运行自身
+    的存档文件合并成功后删除，未产出可合并点（停止/跳档/identity 漂移）时
+    保留为独立记录。旧版 agent 连续任务链测点（turn 字段）的链上下文无法
+    独立重建，不支持复测。
+    """
+    if any(c in run_id for c in "/\\") or ".." in run_id:
+        raise HTTPException(400, "非法 run_id")
+    path = os.path.join(RESULTS_DIR, f"{run_id}.json")
+    if not os.path.exists(path):
+        raise HTTPException(404, "not found")
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+    except json.JSONDecodeError:
+        raise HTTPException(404, "存档文件已损坏（JSON 无法解析），无法复测") from None
+    cfg0 = d.get("cfg")
+    if not isinstance(cfg0, dict):
+        raise HTTPException(404, "存档缺少 cfg 段（结构不完整），无法复测")
+    model = body.get("model")
+    scenario = body.get("scenario")
+    ctx_target = body.get("ctx_target")
+    conc = body.get("concurrency")
+    inst = body.get("inst_tokens")
+    if not isinstance(model, str) or not model.strip():
+        raise HTTPException(400, "model 须为非空字符串")
+    if not isinstance(scenario, str) or scenario not in SCENARIOS:
+        raise HTTPException(400, f"scenario 须取自白名单: {sorted(SCENARIOS)}")
+    if (not isinstance(ctx_target, (int, float)) or isinstance(ctx_target, bool)
+            or not 0 <= ctx_target <= 4 * 1048576):
+        raise HTTPException(400, "ctx_target 须为 0~4M 的数值")
+    if not isinstance(conc, int) or isinstance(conc, bool) or not 1 <= conc <= 64:
+        raise HTTPException(400, "concurrency 须为 1~64 的整数")
+    ctx_target = int(ctx_target)
+    ident = (model, scenario, ctx_target, inst, conc)
+    target = next((p for p in d.get("results") or []
+                   if isinstance(p, dict) and _point_identity(p) == ident), None)
+    if target is None:
+        raise HTTPException(404, "存档中找不到该测试点（模型/场景/档位/并发不匹配）")
+    if target.get("turn") is not None:
+        raise HTTPException(400, "旧版 agent 连续任务链测点不支持单点复测"
+                                 "（链上下文无法独立重建）")
+    # 窄化 cfg：沿用原运行全部参数（repeats/max_tokens/thinking/reply_mode/
+    # 部署快照等），只收敛到被复测点本身；贴边裁减档（ctx_edge）按裁前原
+    # 档位下发，引擎重新走贴边逻辑（max_ctx 以当前部署配置为准重新解析）
+    cfg = dict(cfg0)
+    cfg.pop("note", None)   # 复测运行不继承任务备注（其存档合并后即删除）
+    cfg["models"] = [model]
+    cfg["scenarios"] = [scenario]
+    cfg["concurrencies"] = [conc]
+    sc = SCENARIOS[scenario]
+    rung = int(target["ctx_edge"]) if target.get("ctx_edge") else ctx_target
+    if scenario == "agent":
+        if not isinstance(inst, int) or isinstance(inst, bool) or inst < 1:
+            raise HTTPException(400, "agent 矩阵点复测需要合法的 inst_tokens")
+        cfg["agent_cache_ladder"] = [ctx_target]
+        cfg["agent_inst_ladder"] = [inst]
+        cfg["ctx_list"] = []
+    elif "ladder" in sc:   # 翻译/媒体固定阶梯场景：档位值回对应阶梯字段
+        cfg["translate_ladder" if scenario == "translate"
+            else f"{scenario}_ladder"] = [rung]
+        cfg["ctx_list"] = []
+    else:
+        cfg["ctx_list"] = [rung]
+    res = await bench_start(cfg)   # 复用启动链路：provider 解析/校验/告警/登记
+    t = asyncio.create_task(_merge_retest(run_id, res["run_id"], ident))
+    _BG_TASKS.add(t)
+    t.add_done_callback(_BG_TASKS.discard)
+    return {"ok": True, "run_id": res["run_id"], "archive": run_id}
+
+
+async def _merge_retest(archive_id: str, new_run_id: str, ident: tuple):
+    """复测运行收尾守望：运行结束（含停止/异常）后把产出的对应测点合并
+    替换回原存档（原子写回 + retests 审计留痕），并删除复测运行自身的
+    存档文件；未产出可合并点或原存档失踪/损坏时不合并，复测存档保留为
+    独立记录（数据不丢）。mock 网关运行不落档也不合并。"""
+    run = RUNS.get(new_run_id)
+    while run is not None and run.finished_at is None:
+        await asyncio.sleep(0.5)
+    if run is None or run.mock_seen:
+        return
+    new_point = next((p for p in run.results
+                      if isinstance(p, dict) and _point_identity(p) == ident),
+                     None)
+    if new_point is None:
+        return   # 未产出对应点（停止/超窗跳档等）：复测存档保留为独立记录
+    apath = os.path.join(RESULTS_DIR, f"{archive_id}.json")
+    try:
+        with open(apath, encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return   # 原存档失踪/损坏：不动它，复测存档保留
+    results = d.get("results")
+    if not isinstance(results, list):
+        return
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    for i, p in enumerate(results):
+        if isinstance(p, dict) and _point_identity(p) == ident:
+            new_point["retested_at"] = now
+            d.setdefault("retests", []).append({
+                "model": ident[0], "scenario": ident[1], "ctx_target": ident[2],
+                "inst_tokens": ident[3], "concurrency": ident[4],
+                "at": now, "prev_all_ok": p.get("all_ok"),
+                "new_all_ok": new_point.get("all_ok"),
+                "retest_run_id": new_run_id})
+            results[i] = new_point
+            _atomic_write(apath, json.dumps(d, ensure_ascii=False, indent=1) + "\n")
+            # 合并成功才删复测运行的独立存档；finished_at 先于 _save 置位，
+            # 文件可能尚未落盘，短轮询重试
+            rpath = os.path.join(RESULTS_DIR, f"{new_run_id}.json")
+            for _ in range(10):
+                try:
+                    os.remove(rpath)
+                    break
+                except OSError:
+                    await asyncio.sleep(0.3)
+            return
 
 
 @app.delete("/api/bench/history/{run_id}")
