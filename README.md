@@ -80,9 +80,13 @@ Agent的调用形态和普通聊天不一样，**长对话历史早已躺在服�
 
 ## 🖼️ 测速卡片示例
 
-| OpenCode Go 云端 · 0K~256K | 本地部署（LiteLLM 网关）· 0K~64K |
+| 官方云端 · DeepSeek-V4-Flash | 本地 · DeepSeek-V4-Flash |
 | --- | --- |
-| ![opencode-go deepseek-v4-flash 测速卡片](case/2-opencode-go-deepseek-v4-flash.png) | ![本地部署 deepseek-v4-flash 测速卡片](case/3-%E6%9C%AC%E5%9C%B0%E9%83%A8%E7%BD%B2-deepseek-v4-flash.png) |
+| ![官方 DeepSeek-V4-Flash 测速卡片](case/1-%E5%AE%98%E6%96%B9-DeepSeek-V4-Flash.jpg) | ![本地 DeepSeek-V4-Flash 测速卡片](case/2-%E6%9C%AC%E5%9C%B0-DeepSeek-V4-Flash.png) |
+
+| 本地 · Qwen3.8-27B | 本地 · Qwen3.8-27B 对比测试 |
+| --- | --- |
+| ![本地 Qwen3.8-27B 测速卡片](case/3-%E6%9C%AC%E5%9C%B0-Qwen3.8-27B.png) | ![本地 Qwen3.8-27B 对比测试测速卡片](case/4-%E6%9C%AC%E5%9C%B0-Qwen3.8-27B-%E5%AF%B9%E6%AF%94%E6%B5%8B%E8%AF%95.png) |
 
 ## 🚀 三分钟上手
 
