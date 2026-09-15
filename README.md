@@ -80,13 +80,24 @@ Agent的调用形态和普通聊天不一样，**长对话历史早已躺在服�
 
 ## 🖼️ 测速卡片示例
 
-| 官方云端 · DeepSeek-V4-Flash | 本地 · DeepSeek-V4-Flash |
-| --- | --- |
-| ![官方 DeepSeek-V4-Flash 测速卡片](case/1-%E5%AE%98%E6%96%B9-DeepSeek-V4-Flash.jpg) | ![本地 DeepSeek-V4-Flash 测速卡片](case/2-%E6%9C%AC%E5%9C%B0-DeepSeek-V4-Flash.png) |
-
-| 本地 · Qwen3.8-27B | 本地 · Qwen3.8-27B 对比测试 |
-| --- | --- |
-| ![本地 Qwen3.8-27B 测速卡片](case/3-%E6%9C%AC%E5%9C%B0-Qwen3.8-27B.png) | ![本地 Qwen3.8-27B 对比测试测速卡片](case/4-%E6%9C%AC%E5%9C%B0-Qwen3.8-27B-%E5%AF%B9%E6%AF%94%E6%B5%8B%E8%AF%95.png) |
+<table>
+  <tr>
+    <th>官方云端 · DeepSeek-V4-Flash</th>
+    <th>本地 · DeepSeek-V4-Flash</th>
+  </tr>
+  <tr>
+    <td><img src="case/1-%E5%AE%98%E6%96%B9-DeepSeek-V4-Flash.jpg" width="480" alt="官方 DeepSeek-V4-Flash 测速卡片"></td>
+    <td><img src="case/2-%E6%9C%AC%E5%9C%B0-DeepSeek-V4-Flash.png" width="480" alt="本地 DeepSeek-V4-Flash 测速卡片"></td>
+  </tr>
+  <tr>
+    <th>本地 · Qwen3.8-27B</th>
+    <th>本地 · Qwen3.8-27B 对比测试</th>
+  </tr>
+  <tr>
+    <td><img src="case/3-%E6%9C%AC%E5%9C%B0-Qwen3.8-27B.png" width="480" alt="本地 Qwen3.8-27B 测速卡片"></td>
+    <td><img src="case/4-%E6%9C%AC%E5%9C%B0-Qwen3.8-27B-%E5%AF%B9%E6%AF%94%E6%B5%8B%E8%AF%95.png" width="480" alt="本地 Qwen3.8-27B 对比测试测速卡片"></td>
+  </tr>
+</table>
 
 ## 🚀 三分钟上手
 
