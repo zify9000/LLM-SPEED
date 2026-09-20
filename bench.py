@@ -31,8 +31,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import bisect
+import hashlib
 import io
 import json
+import logging
 import math
 import os
 import random
@@ -45,6 +47,9 @@ from collections import deque
 from typing import Any
 
 import httpx
+
+# 侧车外置失败只记日志、绝不冒泡（_save 不能因瘦身特性失败）
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 场景定义：创意写作 / 代码生成
@@ -735,6 +740,64 @@ ANOMALY_RETEST_MAX = 1
 # （真实模型行为不无限重试洗掉）。两条路径同口径：_run_rep_guarded 与
 # agent 矩阵
 FLOOR_RETEST_MAX = 2
+
+# 异常输入全文外置（ADR-0053 要求异常日志能让人精确复跑，但实测 11MB 级存档里
+# in_text 占 99%）：短文本内联保可读性，超长文本落 <run_id>.anomaly.txt 侧车，
+# 存档只留头尾摘要 + in_text_ref 字节切片引用（off/len/chars/sha1 → 精确复原）。
+IN_TEXT_INLINE_MAX_CHARS = 4096        # 短文本留档内（可读性优先）
+IN_TEXT_TRUNC_HEAD = 2000              # 超预算后的保留头
+IN_TEXT_TRUNC_TAIL = 500               # 保留尾
+# 侧车预算 = **安全阀，不是常规限流**（2026-09-20 定）：需要保持小的是存档 JSON
+# ——它会被 json.load 全量解析（历史列表、明细、前端）；侧车只被流式下载、从不
+# 解析，因此"把全文留在侧车"的代价只是磁盘（与改造前同一份数据，且不再被解析）。
+# 实测最坏存档（results/20260916-182059-c658.json）in_text 共 10.8MB：32MB 阀门
+# 下可全部留存、零截断，而存档 JSON 从 11.3MB 降到 ~0.25MB。真撞上阀门（异常轮
+# 特别多）时按"该点无需精确复跑"降级并显式标注，宁缺不假。
+ANOMALY_TEXT_BUDGET_BYTES = 32 * 1024 * 1024
+ANOMALY_TEXT_SUFFIX = ".anomaly.txt"
+ANOMALY_TEXT_BUDGET_WARNING = (
+    f"异常文本存档超出单档预算 {ANOMALY_TEXT_BUDGET_BYTES} 字节：超预算条目的 "
+    f"in_text 已截断且未留存全文（带 in_text_truncated 标），这些异常轮无法按"
+    f"原文精确复跑")
+
+
+def iter_in_text_holders(point: dict):
+    """遍历一个测点里所有可能携带 in_text 的字典。
+
+    落档只有三处：reqs[i].in_text、reps_discarded[j].in_text、
+    reps[k].reqs[i].in_text（最后一条是 69% 体积的来源，不能漏）。容器/元素
+    类型异常（非 list 的 reqs、非 dict 的条目）一律跳过，防御旧档/拼接混入的
+    脏数据。
+    服务端 splice/复测迁移引用时复用同一遍历，避免两侧漂移。
+    """
+    def _dicts(v):
+        if not isinstance(v, (list, tuple)):
+            return []
+        return [x for x in v if isinstance(x, dict)]
+
+    for key in ("reqs", "reps_discarded"):
+        for h in _dicts(point.get(key)):
+            yield h
+    for rep in _dicts(point.get("reps")):
+        for h in _dicts(rep.get("reqs")):
+            yield h
+
+
+def _truncate_in_text(text: str, has_ref: bool) -> str:
+    """超长 in_text 的截断形态：保留头尾 + 省略标记。
+
+    has_ref=False（预算耗尽未留存全文）时标记不得指向不存在的 in_text_ref——
+    否则存档会谎称"全文可查"。
+    """
+    head = text[:IN_TEXT_TRUNC_HEAD]
+    tail = text[-IN_TEXT_TRUNC_TAIL:] if IN_TEXT_TRUNC_TAIL else ""
+    n = len(text) - len(head) - len(tail)
+    if has_ref:
+        marker = (f"\n……（中间省略 {n} 字符，全文见异常文本存档 in_text_ref；"
+                  f"下载异常日志可导出）……\n")
+    else:
+        marker = f"\n……（中间省略 {n} 字符，超出异常文本存档预算未留存全文）……\n"
+    return head + marker + tail
 
 
 def _decode_burst(n_chunks: int, decode_time: float | None,
@@ -2388,6 +2451,70 @@ class BenchRun:
         except asyncio.CancelledError:
             return None
 
+    def _externalize_in_texts(self, sidecar_path: str) -> str | None:
+        """把超长 in_text 外置到侧车文件（原地改写 self.results）。
+
+        返回顶层告警串（侧车预算耗尽）或 None。**本方法绝不因侧车 IO 失败而
+        抛出**：OSError 只记日志、涉事 in_text 保持全文内联——_save 的成败不能
+        由一个可选的瘦身特性决定（写不进去顶多存档大回去，不能丢存档）。
+        """
+        holders: list[dict] = []
+        for p in self.results:
+            if isinstance(p, dict):
+                holders.extend(iter_in_text_holders(p))
+        holders = [h for h in holders
+                   if isinstance(h.get("in_text"), str)
+                   and len(h["in_text"]) > IN_TEXT_INLINE_MAX_CHARS]
+        if not holders:
+            return None
+        warning = None
+        exhausted = False
+        f = None
+        try:
+            # 预算按"整档侧车已写字节"算（append 到既有侧车时从现有大小起算）
+            written = (os.path.getsize(sidecar_path)
+                       if os.path.exists(sidecar_path) else 0)
+        except OSError:
+            written = 0
+        try:
+            for h in holders:
+                text = h["in_text"]
+                data = text.encode("utf-8")
+                if exhausted or written + len(data) > ANOMALY_TEXT_BUDGET_BYTES:
+                    # 预算耗尽：不再写全文、也不给 in_text_ref（避免存档暗示
+                    # "全文已留存"）；截断 + in_text_truncated 标 + 顶层告警，
+                    # 剩余条目一律同待遇（全局停写，不是逐条见缝插针）
+                    exhausted = True
+                    h["in_text"] = _truncate_in_text(text, has_ref=False)
+                    h["in_text_truncated"] = True
+                    warning = ANOMALY_TEXT_BUDGET_WARNING
+                    continue
+                if f is None:
+                    # 惰性创建：一条都没真正写入时不留下空侧车文件
+                    f = open(sidecar_path, "ab")
+                off = f.tell()   # 二进制 append 模式的 tell 即文件末尾字节偏移
+                f.write(data)
+                written += len(data)
+                h["in_text_ref"] = {
+                    "file": os.path.basename(sidecar_path),
+                    "off": off, "len": len(data), "chars": len(text),
+                    "sha1": hashlib.sha1(data).hexdigest(),
+                }
+                h["in_text"] = _truncate_in_text(text, has_ref=True)
+        except OSError as e:
+            # 失败点之前的条目已写侧车并改 ref（那些切片是完整可用的），失败点
+            # 及之后的条目保持原样——全文仍内联，最坏只是存档大回去
+            log.warning("异常输入全文外置失败（涉事 in_text 保持内联）：%s", e)
+        finally:
+            if f is not None:
+                try:
+                    f.flush()
+                    os.fsync(f.fileno())   # 侧车落盘先于存档替换，防掉电断链
+                    f.close()
+                except OSError:
+                    pass
+        return warning
+
     def _save(self):
         if self.mock_seen:   # 模拟数据不进历史记录
             return
@@ -2396,21 +2523,30 @@ class BenchRun:
         os.makedirs(self.results_dir, exist_ok=True)
         cfg_safe = {k: v for k, v in self.cfg.items() if k not in ("api_key",)}
         path = os.path.join(self.results_dir, f"{self.run_id}.json")
+        sidecar = os.path.join(self.results_dir,
+                               f"{self.run_id}{ANOMALY_TEXT_SUFFIX}")
         # 原子落盘：同目录临时文件 + os.replace。直接 open(path,"w") 写整档，
         # 进程在中途被杀会留下截断 JSON，服务端只能报「corrupted」；os.replace
         # 在同一文件系统内是原子替换，读者要么看到旧档要么看到新档。
         # server.py 有同名 helper，但跨文件所有权不同，此处本地实现（不改 server）
         tmp = f"{path}.tmp"
         try:
+            # 先写侧车、再替换存档：读者看到新存档时，其 in_text_ref 指向的
+            # 切片必须已存在（顺序反了就会出现悬空引用 → 精确复跑断链）
+            warning = self._externalize_in_texts(sidecar)
+            archive = {
+                "run_id": self.run_id,
+                "started_at": self.started_at,
+                # 口径版本（顶层 = 本次运行；点级另有自己的版本，见其注释）
+                "metric_version": METRIC_VERSION,
+                "cfg": cfg_safe,
+                "results": self.results,
+            }
+            if warning:
+                # 预算耗尽时不静默：存档顶层留痕，说明有异常轮原文未存全
+                archive["anomaly_text_warning"] = warning
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({
-                    "run_id": self.run_id,
-                    "started_at": self.started_at,
-                    # 口径版本（顶层 = 本次运行；点级另有自己的版本，见其注释）
-                    "metric_version": METRIC_VERSION,
-                    "cfg": cfg_safe,
-                    "results": self.results,
-                }, f, ensure_ascii=False, indent=1)
+                json.dump(archive, f, ensure_ascii=False, indent=1)
             os.replace(tmp, path)
         except BaseException:
             # 失败清理临时档；异常不吞（调用方发 error 事件），保证路径上

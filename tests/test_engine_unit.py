@@ -629,6 +629,154 @@ class TestCorpusProvenance(unittest.TestCase):
         self.assertTrue(bench._load_code_pool(), "code 语料未被加载")
 
 
+class TestAnomalyTextExternalization(unittest.TestCase):
+    """异常输入全文外置（ADR-0053 可精确复跑 + ADR-0082 存档瘦身）：
+    超长 in_text 落 <run_id>.anomaly.txt 侧车，存档只留头尾摘要 + in_text_ref
+    字节切片；短文本内联；预算耗尽截断留痕；侧车写失败绝不拖垮 _save。"""
+
+    def _run(self, td, results):
+        run = BenchRun({}, results_dir=td)
+        run.results = results
+        run._save()   # 同步调用即可（真实调用点在 to_thread 内）
+        return run
+
+    @staticmethod
+    def _load(td, run):
+        with open(os.path.join(td, f"{run.run_id}.json"), encoding="utf-8") as f:
+            return json.load(f)
+
+    @staticmethod
+    def _side(td, run):
+        return os.path.join(td, f"{run.run_id}{bench.ANOMALY_TEXT_SUFFIX}")
+
+    def test_long_in_text_externalized_to_sidecar(self):
+        """100K 字 reqs.in_text + 120K 字 reps_discarded.in_text：存档远小于输入、
+        截断文本带省略标记、ref 的 len/chars/sha1 正确、侧车切片字节 == 原文。"""
+        a, b = "甲" * 100_000, "乙" * 120_000
+        da, db = a.encode("utf-8"), b.encode("utf-8")
+        with tempfile.TemporaryDirectory() as td:
+            run = self._run(td, [{"model": "m1",
+                                  "reqs": [{"req": 0, "in_text": a}],
+                                  "reps_discarded": [{"in_text": b}]}])
+            path = os.path.join(td, f"{run.run_id}.json")
+            side = self._side(td, run)
+            self.assertTrue(os.path.exists(side), "侧车应存在")
+            self.assertLess(os.path.getsize(path), 20000,
+                            "存档应远小于输入全文（截断后仅头尾摘要）")
+            d = self._load(td, run)
+            pt = d["results"][0]
+            raw = open(side, "rb").read()
+            for holder, full, data in ((pt["reqs"][0], a, da),
+                                       (pt["reps_discarded"][0], b, db)):
+                self.assertNotEqual(holder["in_text"], full)
+                self.assertIn("……", holder["in_text"], "应有省略标记")
+                ref = holder["in_text_ref"]
+                self.assertEqual(ref["file"],
+                                 f"{run.run_id}{bench.ANOMALY_TEXT_SUFFIX}")
+                self.assertEqual((ref["len"], ref["chars"]),
+                                 (len(data), len(full)))
+                self.assertEqual(ref["sha1"], hashlib.sha1(data).hexdigest())
+                sl = raw[ref["off"]:ref["off"] + ref["len"]]
+                self.assertEqual(sl, data, "侧车切片应等于原文")
+                self.assertEqual(hashlib.sha1(sl).hexdigest(), ref["sha1"])
+            trunc = pt["reqs"][0]["in_text"]
+            self.assertEqual(trunc[:bench.IN_TEXT_TRUNC_HEAD],
+                             a[:bench.IN_TEXT_TRUNC_HEAD])
+            self.assertEqual(trunc[-bench.IN_TEXT_TRUNC_TAIL:],
+                             a[-bench.IN_TEXT_TRUNC_TAIL:])
+            self.assertNotIn("anomaly_text_warning", d, "预算内不应告警")
+
+    def test_short_in_text_stays_inline_no_sidecar(self):
+        """短文本（含恰好等于阈值）保持内联原样，且不产生空侧车文件。"""
+        short = "S" * 50
+        edge = "T" * bench.IN_TEXT_INLINE_MAX_CHARS
+        with tempfile.TemporaryDirectory() as td:
+            run = self._run(td, [{"reqs": [{"in_text": short}],
+                                  "reps_discarded": [{"in_text": edge}]}])
+            d = self._load(td, run)
+            pt = d["results"][0]
+            self.assertEqual(pt["reqs"][0]["in_text"], short)
+            self.assertEqual(pt["reps_discarded"][0]["in_text"], edge)
+            self.assertNotIn("in_text_ref", pt["reqs"][0])
+            self.assertNotIn("in_text_ref", pt["reps_discarded"][0])
+            self.assertFalse(os.path.exists(self._side(td, run)),
+                             "无超长文本不得留下空侧车")
+
+    def test_reps_reqs_in_text_externalized(self):
+        """reps[].reqs[].in_text（69% 体积的来源）也必须走外置，否则静默回归。"""
+        big = "R" * 60000
+        with tempfile.TemporaryDirectory() as td:
+            run = self._run(td, [{"model": "m1",
+                                  "reps": [{"reqs": [{"in_text": big},
+                                                     {"in_text": "x"}]}]}])
+            d = self._load(td, run)
+            h = d["results"][0]["reps"][0]["reqs"][0]
+            self.assertIn("in_text_ref", h)
+            self.assertIn("……", h["in_text"])
+            ref = h["in_text_ref"]
+            raw = open(self._side(td, run), "rb").read()
+            self.assertEqual(raw[ref["off"]:ref["off"] + ref["len"]],
+                             big.encode("utf-8"))
+            self.assertEqual(d["results"][0]["reps"][0]["reqs"][1]["in_text"], "x",
+                             "未超阈值的兄弟字段不受影响")
+
+    def test_budget_exhausted_marks_truncated_and_warns(self):
+        """预算耗尽：条目不写侧车、不给 ref（不谎称全文留存），只截断 +
+        in_text_truncated 标 + 顶层 anomaly_text_warning；无空侧车。"""
+        with tempfile.TemporaryDirectory() as td:
+            with unittest.mock.patch.object(bench, "ANOMALY_TEXT_BUDGET_BYTES",
+                                            1000):
+                run = self._run(td, [{"reqs": [{"in_text": "A" * 5000}],
+                                      "reps_discarded": [{"in_text": "B" * 5000}]}])
+            d = self._load(td, run)
+            pt = d["results"][0]
+            for h in (pt["reqs"][0], pt["reps_discarded"][0]):
+                self.assertTrue(h["in_text_truncated"])
+                self.assertNotIn("in_text_ref", h)
+                self.assertIn("……", h["in_text"])
+            self.assertIn("anomaly_text_warning", d)
+            self.assertFalse(os.path.exists(self._side(td, run)),
+                             "预算内一条都没写时不得留空侧车")
+
+    def test_budget_stops_writing_after_first_overflow(self):
+        """预算只够第一条：第一条外置（有 ref），第二条起全局停写（截断+标），
+        不是逐条"见缝插针"继续塞更小的条目。"""
+        with tempfile.TemporaryDirectory() as td:
+            with unittest.mock.patch.object(bench, "ANOMALY_TEXT_BUDGET_BYTES",
+                                            6000):
+                run = self._run(td, [{"reqs": [{"in_text": "A" * 5000}],
+                                      "reps_discarded": [{"in_text": "B" * 5000}]}])
+            d = self._load(td, run)
+            pt = d["results"][0]
+            self.assertIn("in_text_ref", pt["reqs"][0])
+            self.assertNotIn("in_text_ref", pt["reps_discarded"][0])
+            self.assertTrue(pt["reps_discarded"][0]["in_text_truncated"])
+            self.assertIn("anomaly_text_warning", d)
+            self.assertEqual(len(open(self._side(td, run), "rb").read()), 5000,
+                             "侧车只应含预算内的第一条")
+
+    def test_save_survives_sidecar_write_failure(self):
+        """侧车写失败（OSError）：_save 仍成功、全文保持内联、无空侧车——
+        瘦身特性不得让存档本身丢失。"""
+        big = "X" * 100000
+        real_open = open
+
+        def flaky(path, *a, **k):
+            if str(path).endswith(bench.ANOMALY_TEXT_SUFFIX):
+                raise OSError("模拟侧车不可写")
+            return real_open(path, *a, **k)
+
+        with tempfile.TemporaryDirectory() as td:
+            run = BenchRun({}, results_dir=td)
+            run.results = [{"reqs": [{"in_text": big}]}]
+            with unittest.mock.patch("builtins.open", new=flaky):
+                run._save()   # 不得抛
+            d = self._load(td, run)
+            self.assertEqual(d["results"][0]["reqs"][0]["in_text"], big)
+            self.assertNotIn("in_text_ref", d["results"][0]["reqs"][0])
+            self.assertFalse(os.path.exists(self._side(td, run)))
+
+
 class TestEchoRegionAlign(unittest.TestCase):
     """echo 改写区起点对齐（_align_echo_region）：三层回退——块边界 →
     段/函数边界（"\\n\\n" 之后）→ 现状任意字符偏移。"""

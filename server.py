@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import math
@@ -19,15 +20,16 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (FileResponse, JSONResponse, Response,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from bench import (AGENT_CACHE_RANGE, AGENT_INST_RANGE, AGENT_LADDER_MAX,
-                   ASR_LADDER_RANGE, BenchRun, CTX_HEADROOM,
+                   ANOMALY_TEXT_SUFFIX, ASR_LADDER_RANGE, BenchRun, CTX_HEADROOM,
                    DEFAULT_CONCURRENCIES, DEFAULT_CTX_LIST,
                    MEDIA_LADDER_MAX, OCR_LADDER_RANGE, SCENARIOS,
-                   TTS_LADDER_RANGE)
+                   TTS_LADDER_RANGE, iter_in_text_holders)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(BASE, "results")
@@ -1166,6 +1168,30 @@ async def bench_history_detail(run_id: str):
     return await _read_json(path, "存档")
 
 
+@app.get("/api/bench/history/{run_id}/anomaly-text")
+async def bench_history_anomaly_text(run_id: str):
+    """异常输入全文侧车下载（ADR-0053：异常日志要能精确复跑）。
+
+    长 in_text 在存档里只留头尾摘要 + in_text_ref 字节切片，原文按切片落在
+    <run_id>.anomaly.txt。本端点回文件原文（text/plain; charset=utf-8），
+    Content-Disposition: inline——浏览器直接展示纯文本，前端 fetch 取文本即可，
+    不强制下载（避免打开历史面板时误触保存）。读取走线程池，与 _read_json
+    同口径（ADR-0082：侧车最大 2MB，同步读会占住事件循环）。"""
+    _valid_run_id(run_id)
+    path = os.path.join(RESULTS_DIR, f"{run_id}{ANOMALY_TEXT_SUFFIX}")
+    try:
+        data = await asyncio.to_thread(_read_sidecar, path)
+    except FileNotFoundError:
+        raise HTTPException(
+            404, "该存档没有异常文本存档（输入全文可能已内联在存档中，"
+                 "或超出预算未留存全文）") from None
+    except OSError as e:
+        raise HTTPException(500, f"异常文本存档读取失败：{e}") from None
+    return Response(content=data, media_type="text/plain; charset=utf-8",
+                    headers={"Content-Disposition":
+                             f'inline; filename="{run_id}.anomaly.txt"'})
+
+
 @app.post("/api/bench/history/{run_id}/note")
 async def bench_history_note(run_id: str, body: dict):
     """事后修改历史存档的任务备注（写回 cfg.note，与启动时填的同一字段）。"""
@@ -1432,6 +1458,16 @@ async def _merge_retest(archive_id: str, new_run_id: str, ident: tuple):
         await asyncio.sleep(0.5)
     if run is None or run.mock_seen:
         return
+    # run() 的收尾顺序是 finished_at 先置位、_save 后落盘；_save 里的 in_text
+    # 外置会**原地改写**这些测点 dict，提前读会拿到外置前的形态——那会把
+    # 尚未改写的 ref 复制漏掉，而下面又要删复测侧车/存档 → 悬空引用。
+    # os.replace 是 _save 的最后一步，复测存档文件出现即外置已完成；超时
+    # （_save 失败/未落盘）则退回按当前内存形态合并，数据仍不丢。
+    npath = os.path.join(RESULTS_DIR, f"{new_run_id}.json")
+    for _ in range(50):
+        if os.path.exists(npath):
+            break
+        await asyncio.sleep(0.1)
     new_point = next((p for p in run.results
                       if isinstance(p, dict) and _point_identity(p) == ident),
                      None)
@@ -1458,6 +1494,12 @@ async def _merge_retest(archive_id: str, new_run_id: str, ident: tuple):
                 "prev_metric_version": p.get("metric_version"),
                 "metric_version": new_point.get("metric_version"),
                 "retest_run_id": new_run_id})
+            # 复测运行存档随后即删：其侧车里的 in_text 切片必须先复制进目标档
+            # 侧车并改写 ref，否则合并后引用悬空（精确复跑断链）
+            reloc_warnings = await asyncio.to_thread(
+                _relocate_anomaly_refs, new_point, new_run_id, archive_id)
+            for w in reloc_warnings:
+                log.warning("复测合并 %s → %s：%s", new_run_id, archive_id, w)
             results[i] = new_point
             await _write_json(apath, d)
             # 合并成功才删复测运行的独立存档；finished_at 先于 _save 置位，
@@ -1469,6 +1511,13 @@ async def _merge_retest(archive_id: str, new_run_id: str, ident: tuple):
                     break
                 except OSError:
                     await asyncio.sleep(0.3)
+            # 切片已迁入目标档才删复测侧车；迁移告警时保留（ref 未能改写成功，
+            # 删掉侧车就真丢原文了）
+            if not reloc_warnings:
+                await asyncio.to_thread(
+                    _remove_if_exists,
+                    os.path.join(RESULTS_DIR,
+                                 f"{new_run_id}{ANOMALY_TEXT_SUFFIX}"))
             return
 
 
@@ -1488,6 +1537,93 @@ async def _load_archive(run_id: str) -> dict:
     if not os.path.exists(path):
         raise HTTPException(404, "not found")
     return await _read_json(path, "存档")
+
+
+def _anomaly_missing_warn(src_id: str) -> str:
+    """来源侧车缺失/切片不完整时的告警措辞（splice 与复测合并共用）。"""
+    return (f"异常输入全文缺失（来源 {src_id} 的异常文本存档不可读），"
+            f"该点的 in_text 仅为截断文本")
+
+
+def _read_sidecar(path: str) -> bytes:
+    """同步读异常文本侧车（调用方放线程池）。"""
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def _remove_if_exists(path: str) -> bool:
+    """删普通文件（不存在返回 False；目录/符号链接不动，防误删）。"""
+    try:
+        if os.path.isfile(path) and not os.path.islink(path):
+            os.remove(path)
+            return True
+    except OSError:
+        return False
+    return False
+
+
+def _relocate_anomaly_refs(point: dict, src_id: str, dst_id: str) -> list[str]:
+    """把测点里的 in_text_ref 从来源档侧车复制进目标档侧车并改写引用。
+
+    splice（来源档仍在，但目标档要自包含）与 _merge_retest（来源档马上删除，
+    不改写 ref 就会悬空）共用这一份逻辑。顺序：先把切片写进目标侧车，再改
+    ref——目标存档一旦可见（splice 随后 _write_json），其 ref 指向的字节必然
+    已在目标侧车中，精确复跑不断链。来源侧车/切片不可读时保持原 ref 不动并
+    返回告警（宁可不改，也不留指向空处的引用）。
+
+    同步实现（调用方负责 asyncio.to_thread）；只有确有切片要复制时才创建目标
+    侧车，一条都没有就不产生空文件。返回告警串列表（可为空）。
+    """
+    warnings: list[str] = []
+    src_path = os.path.join(RESULTS_DIR, f"{src_id}{ANOMALY_TEXT_SUFFIX}")
+    dst_path = os.path.join(RESULTS_DIR, f"{dst_id}{ANOMALY_TEXT_SUFFIX}")
+    dst_f = None
+    try:
+        for holder in iter_in_text_holders(point):
+            ref = holder.get("in_text_ref")
+            if not isinstance(ref, dict):
+                continue
+            try:
+                off, ln = int(ref.get("off")), int(ref.get("len"))
+            except (TypeError, ValueError):
+                warnings.append(_anomaly_missing_warn(src_id))
+                continue
+            try:
+                with open(src_path, "rb") as f:
+                    f.seek(off)
+                    data = f.read(ln)
+            except OSError:
+                data = b""
+            if len(data) != ln:
+                # 来源侧车缺失 / 偏移越界 / 被截短：切片不完整，保持原 ref
+                warnings.append(_anomaly_missing_warn(src_id))
+                continue
+            digest = hashlib.sha1(data).hexdigest()
+            if isinstance(ref.get("sha1"), str) and digest != ref["sha1"]:
+                warnings.append(
+                    f"异常输入全文校验不符（来源 {src_id} 侧车切片 sha1 与 "
+                    f"in_text_ref 不一致），已按切片内容改写引用，请人工复核")
+            try:
+                if dst_f is None:
+                    dst_f = open(dst_path, "ab")
+                new_off = dst_f.tell()
+                dst_f.write(data)
+            except OSError as e:
+                warnings.append(
+                    f"异常输入全文复制失败（目标侧车不可写：{e}），"
+                    f"该点的 in_text 仅为截断文本")
+                continue
+            holder["in_text_ref"] = {**ref, "file": os.path.basename(dst_path),
+                                     "off": new_off}
+    finally:
+        if dst_f is not None:
+            try:
+                dst_f.flush()
+                os.fsync(dst_f.fileno())   # 侧车先落盘，存档后替换
+                dst_f.close()
+            except OSError:
+                pass
+    return warnings
 
 
 def _ver_txt(v) -> str:
@@ -1549,6 +1685,9 @@ async def bench_history_delete_point(run_id: str, body: dict):
         "at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "prev_all_ok": old.get("all_ok")})
     path = os.path.join(RESULTS_DIR, f"{run_id}.json")
+    # 不回收该点引用的侧车切片：可能仍被同档其他点引用，逐段回收成本高且
+    # 收益小——孤儿文本是 append-only 的，总量被 ANOMALY_TEXT_BUDGET_BYTES
+    # 上限钳住（note/rename/env 同理，都不碰侧车）
     await _write_json(path, d)
     return {"ok": True, "removed": 1, "remaining": len(results)}
 
@@ -1584,10 +1723,13 @@ async def bench_history_splice(run_id: str, body: dict):
         if isinstance(p, dict):
             index[(_point_identity(p), p.get("turn"))] = i
     added, replaced = 0, []
+    warnings: list[str] = []
+    new_points: list[dict] = []   # 待迁移异常文本引用的拼接点
     for sp in sresults:
         if not isinstance(sp, dict):
             continue
         np = {**sp, "spliced_from": src, "spliced_at": now}
+        new_points.append(np)
         key = (_point_identity(sp), sp.get("turn"))
         if key in index:
             old = results[index[key]]
@@ -1604,6 +1746,12 @@ async def bench_history_splice(run_id: str, body: dict):
             index[key] = len(results)
             results.append(np)
             added += 1
+    # 拼接点的 in_text_ref 指向来源档侧车：复制进目标档侧车并改写 ref，让目标
+    # 存档自包含（来源档以后被删也不断链）。放线程池（ADR-0082 同口径）；
+    # 顺序：目标侧车先写 → ref 后改 → 下面 _write_json 最后替换目标存档
+    for np in new_points:
+        warnings.extend(await asyncio.to_thread(
+            _relocate_anomaly_refs, np, src, run_id))
     d.setdefault("splices", []).append({
         "source_run_id": src, "at": now, "added": added, "replaced": replaced})
     path = os.path.join(RESULTS_DIR, f"{run_id}.json")
@@ -1612,7 +1760,7 @@ async def bench_history_splice(run_id: str, body: dict):
     # provider / 部署快照 / 上下文上限必须一起比：把云端点拼进本地存档时，
     # 点身份五元组里没有 provider，"同模型同档位"看着能合并，但卡片头部的
     # 部署信息只来自目标存档，会把两套硬件的读数混在一台机器名下。
-    warnings = []
+    # warnings 已含上面的异常文本迁移告警，此处只追加不重置
     cfg, scfg = d.get("cfg") or {}, sd.get("cfg") or {}
     for k, label in (("max_tokens", "输出预算"), ("reply_mode", "回复模式"),
                      ("thinking", "思考模式"), ("temperature", "温度")):
@@ -1649,23 +1797,34 @@ async def bench_history_delete(run_id: str):
     if not os.path.exists(path):
         raise HTTPException(404, "not found")
     await asyncio.to_thread(os.remove, path)
-    return {"ok": True}
+    # 侧车随存档一并删除（有则删）：存档没了，in_text_ref 已无读者
+    side = os.path.join(RESULTS_DIR, f"{run_id}{ANOMALY_TEXT_SUFFIX}")
+    side_removed = await asyncio.to_thread(_remove_if_exists, side)
+    return {"ok": True, "anomaly_text_removed": side_removed}
 
 
 @app.delete("/api/bench/history")
 async def bench_history_clear():
     def _clear():
         os.makedirs(RESULTS_DIR, exist_ok=True)
-        removed = 0
+        removed = 0     # 语义不变：仍只计 JSON 存档条数（历史列表的口径）
+        sidecars = 0    # 侧车单独计数，不回填 removed（不悄悄改老键的含义）
         for f in os.listdir(RESULTS_DIR):
             p = os.path.join(RESULTS_DIR, f)
             # 只删普通文件：目录名恰好以 .json 结尾（或符号链接）时
             # os.remove 会抛 IsADirectoryError，让整个清空请求 500
-            if f.endswith(".json") and os.path.isfile(p) and not os.path.islink(p):
+            if not (os.path.isfile(p) and not os.path.islink(p)):
+                continue
+            if f.endswith(".json"):
                 os.remove(p)
                 removed += 1
-        return removed
-    return {"ok": True, "removed": await asyncio.to_thread(_clear)}
+            elif f.endswith(ANOMALY_TEXT_SUFFIX):
+                os.remove(p)
+                sidecars += 1
+        return removed, sidecars
+
+    removed, sidecars = await asyncio.to_thread(_clear)
+    return {"ok": True, "removed": removed, "anomaly_text_removed": sidecars}
 
 
 if __name__ == "__main__":
