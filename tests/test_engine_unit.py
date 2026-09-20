@@ -11,10 +11,12 @@ agent 未回传点缓存迹象三通道判别（走平/全量预期/运行级佐
 """
 import asyncio
 import httpx
+import hashlib
 import json
 import os
 import re
 import struct
+import sys
 import tempfile
 import time
 import unittest
@@ -499,6 +501,108 @@ class TestModuleStream(unittest.TestCase):
         """corpus 目录缺失时回退内置合成模块池（每条自成一个模块块）。"""
         with unittest.mock.patch.object(bench, "CORPUS_CODE_DIR", "/nonexistent-dir"):
             self.assertEqual(_load_code_pool(), [[s] for s in bench._CODE_POOL])
+
+
+# 语料内容清单（相对路径 + NUL + 内容，按路径排序流式 sha256）——与
+# scripts/build_agent_corpus.py 的 manifest_sha256 同算法：两条独立实现互为
+# 校验，任一侧被误改都会不一致。
+def _manifest_sha256(base: str, rels: list[str]) -> str:
+    h = hashlib.sha256()
+    for rel in sorted(rels):
+        h.update(rel.encode())
+        h.update(b"\0")
+        with open(os.path.join(base, rel), "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+    return h.hexdigest()
+
+
+class TestCorpusProvenance(unittest.TestCase):
+    """语料是测速的"刻度"：改语料会让历史存档失去可比性，必须显式发生。
+
+    本类把三份 vendored 语料的**内容清单哈希与统计区间**钉成契约（数字来源与
+    核对方式见各目录 PROVENANCE.md）。语料一旦被误改/误重建/静默降级到内置回退
+    池，这里立刻变红——而引擎侧的"目录缺失回退内置池"设计本身不会报错。
+    故意更新语料时：跑一次下面命令，把新哈希与区间同步到 PROVENANCE 与本节。
+        python -m pytest -q tests/test_engine_unit.py -k corpus -v
+    """
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _dir(self, *parts):
+        return os.path.join(self.ROOT, "corpus", *parts)
+
+    def test_agent_corpus_manifest_and_block_bounds(self):
+        base = self._dir("agent")
+        rels = sorted(f for f in os.listdir(base)
+                      if f.startswith("traj-") and f.endswith(".txt"))
+        self.assertEqual(len(rels), 100, "agent 语料块数变了（PROVENANCE.md 记载 100）")
+        self.assertEqual(
+            _manifest_sha256(base, rels),
+            "4c85ab95e43d58c782546cc7ec345a859283fdd9f540bb93a8890d1367627778",
+            "agent 语料内容变了——若是有意更新，请同步 corpus/agent/PROVENANCE.md")
+        chars = [len(open(os.path.join(base, r), encoding="utf-8").read()) for r in rels]
+        self.assertGreaterEqual(min(chars), 2000,
+                                "存在低于引擎采纳门限（_load_agent_pool ≥2000）的块")
+        # 上界用实测值（DOC_MAX_BLOCK=40200）：生成器判定 40000，仓内 3 个块
+        # 由早期修订脚本产出、略超——见 PROVENANCE.md 的"不同源"一节
+        self.assertLessEqual(max(chars), 40200,
+                             "agent 语料块超文档化上界（PROVENANCE.md 记载 40183）")
+
+    def test_agent_corpus_satisfies_documented_contract_via_verify(self):
+        """`--verify`（只读、不依赖 pyarrow）必须与测试判定一致。"""
+        import subprocess
+        r = subprocess.run([sys.executable,
+                            os.path.join(self.ROOT, "scripts", "build_agent_corpus.py"),
+                            "--verify"], capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("块长契约 OK", r.stdout)
+
+    def test_code_corpus_manifest(self):
+        base = self._dir("code")
+        rels = [os.path.relpath(os.path.join(dp, f), base)
+                for dp, _, fs in os.walk(base) for f in fs
+                if f not in ("LICENSE", "README.md", "PROVENANCE.md")]
+        self.assertEqual(len(rels), 15, "code 语料文件数变了（PROVENANCE.md 记载 15）")
+        self.assertEqual(
+            _manifest_sha256(base, rels),
+            "06b408c7b5d00a2c5d8bb0160f9705d500425ca5802086a06feba162dff8d887",
+            "code 语料内容变了——若是有意更新，请同步 corpus/code/PROVENANCE.md")
+
+    def test_creative_corpus_manifest_and_size(self):
+        base = self._dir("creative")
+        path = os.path.join(base, "hongloumeng.txt")
+        raw = open(path, encoding="utf-8").read()
+        with open(path, "rb") as f:
+            self.assertEqual(
+                hashlib.sha256(f.read()).hexdigest(),
+                "58e75b74f0c51e7863f8aa6871ec349f5c96ffdbecb5bdd5cf83ea016f553826",
+                "creative 语料变了——若是有意更新，请同步 corpus/creative/PROVENANCE.md")
+        # 去空白字符数 = 语料的"刻度"（设计文档记 83 万字符、循环点推到 512K 之后）
+        self.assertEqual(len("".join(raw.split())), 838587,
+                         "creative 语料字符尺度变了（PROVENANCE.md 记载 838,587）")
+
+    def test_creative_corpus_has_no_pg_header(self):
+        """PG 页眉已剥离（版权声明改存 LICENSE-PG.txt）——正文里不得再出现。"""
+        text = open(self._dir("creative", "hongloumeng.txt"), encoding="utf-8").read()
+        self.assertNotIn("Project Gutenberg", text)
+        self.assertNotIn("\ufffd", text, "残留 U+FFFD 替换字符")
+
+    def test_license_and_provenance_present(self):
+        """三份 vendored 语料各有一份溯源文档；creative 另需 PG 许可声明。"""
+        for d in ("agent", "code", "creative"):
+            self.assertTrue(os.path.isfile(self._dir(d, "PROVENANCE.md")),
+                            f"corpus/{d}/PROVENANCE.md 缺失")
+        pg = open(self._dir("creative", "LICENSE-PG.txt"), encoding="utf-8").read()
+        self.assertIn("Project Gutenberg", pg)
+        self.assertIn("24264", pg)
+        self.assertTrue(os.path.isfile(self._dir("code", "LICENSE")),
+                        "corpus/code/LICENSE（上游 MIT 许可）缺失")
+
+    def test_engine_actually_loads_vendored_corpora(self):
+        """回归"静默降级"：语料在盘时必须真被引擎加载（而非回退内置池）。"""
+        self.assertTrue(bench._load_agent_pool(), "agent 语料未被加载（回退内置池？）")
+        self.assertTrue(bench._load_creative_pool(), "creative 语料未被加载")
+        self.assertTrue(bench._load_code_pool(), "code 语料未被加载")
 
 
 class TestEchoRegionAlign(unittest.TestCase):

@@ -8,16 +8,20 @@ SWE-bench dev / SWE-bench-extra 任务上的真实执行轨迹。HuggingFace 不
 用法：
     .venv/bin/pip install pyarrow          # 仅构建期需要，非运行时依赖
     .venv/bin/python scripts/build_agent_corpus.py [parquet路径或URL]
+    .venv/bin/python scripts/build_agent_corpus.py --verify   # 只校验不写盘
 
 输出：corpus/agent/traj-<instance_id>-<seq>.txt，每个文件一个轨迹块
 （≥2000 字符，按 [role] 轮次边界聚合；超长单段硬切 ≤40000 字符）。
+
+--verify 只依赖标准库（懒加载 pyarrow），用于随时核对仓内语料是否仍满足块长
+契约并打印内容清单 sha256——改语料前后都该跑一次，见 corpus/agent/PROVENANCE.md。
 """
+import hashlib
 import io
 import os
+import statistics
 import sys
 import urllib.request
-
-import pyarrow.parquet as pq
 
 DEFAULT_URL = ("https://www.modelscope.cn/api/v1/datasets/AI-ModelScope/"
                "SWE-agent-trajectories/repo?Revision=master&FilePath="
@@ -27,6 +31,57 @@ OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 TARGET_CHARS = 3_000_000    # 覆盖 512K 档（×3.5 字符/token ≈1.8M）并留余量
 MIN_BLOCK = 2000            # 与 bench._load_agent_pool 的采纳门限一致
 MAX_BLOCK = 40000           # 单块上限：巨型 observation（整文件 dump）硬切
+# 文档化上界：仓内语料由**早期修订**的脚本产出，实测最大 40183（3 个块超
+# MAX_BLOCK）。按"把自述对准事实、不重建语料"处理（见 PROVENANCE.md），
+# 故 --verify 用实测上界判定，并把与生成器判定的偏差单独报出来。
+DOC_MAX_BLOCK = 40200
+
+
+def corpus_stats() -> tuple[list[str], list[int]]:
+    """仓内语料文件与各自字符数（只读）。"""
+    names = sorted(f for f in os.listdir(OUT_DIR)
+                   if f.startswith("traj-") and f.endswith(".txt"))
+    chars = [len(open(os.path.join(OUT_DIR, n), encoding="utf-8").read())
+             for n in names]
+    return names, chars
+
+
+def manifest_sha256(names: list[str]) -> str:
+    """内容清单哈希：按文件名排序，累积 相对路径 + NUL + 内容（与测试同算法）。"""
+    h = hashlib.sha256()
+    for n in names:
+        h.update(n.encode())
+        h.update(b"\0")
+        with open(os.path.join(OUT_DIR, n), "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+    return h.hexdigest()
+
+
+def verify() -> int:
+    if not os.path.isdir(OUT_DIR):
+        print(f"ERROR: 语料目录不存在: {OUT_DIR}", file=sys.stderr)
+        return 1
+    names, chars = corpus_stats()
+    if not names:
+        print(f"ERROR: 语料目录为空: {OUT_DIR}", file=sys.stderr)
+        return 1
+    over_gen = [n for n, c in zip(names, chars) if c > MAX_BLOCK]
+    under = [n for n, c in zip(names, chars) if c < MIN_BLOCK]
+    print(f"文件数 {len(names)}  字符 min/中位/max = "
+          f"{min(chars)}/{int(statistics.median(chars))}/{max(chars)}")
+    print(f"内容清单 sha256 = {manifest_sha256(names)}")
+    if over_gen:
+        print(f"提示: {len(over_gen)} 个块超生成器判定 MAX_BLOCK={MAX_BLOCK}"
+              f"（文档化上界 {DOC_MAX_BLOCK}）: {', '.join(over_gen[:5])}"
+              + (" …" if len(over_gen) > 5 else ""))
+    bad = under + [n for n, c in zip(names, chars) if c > DOC_MAX_BLOCK]
+    if bad:
+        print(f"ERROR: {len(bad)} 个块越界（应 {MIN_BLOCK}~{DOC_MAX_BLOCK}）: "
+              f"{', '.join(bad[:5])}", file=sys.stderr)
+        return 1
+    print("块长契约 OK（不写盘；改语料请同步 corpus/agent/PROVENANCE.md 与语料测试）")
+    return 0
 
 
 def fetch(src: str) -> bytes:
@@ -95,7 +150,10 @@ def blocks_from(segs: list[str]):
         yield "\n\n".join(buf)
 
 
-def main() -> None:
+def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "--verify":
+        return verify()
+    import pyarrow.parquet as pq   # 懒加载：--verify 路径不需要构建期依赖
     src = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_URL
     data = fetch(src)
     table = pq.read_table(io.BytesIO(data))
@@ -118,7 +176,8 @@ def main() -> None:
             n_blocks += 1
     print(f"写出 {n_blocks} 块 / {n_traj} 条轨迹，共 {total:,} 字符 → {OUT_DIR}",
           file=sys.stderr)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
