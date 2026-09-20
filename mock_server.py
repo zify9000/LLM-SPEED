@@ -22,15 +22,17 @@ DeepSeek 风格（chat 端点不带 /v1 前缀）：MOCK_NO_V1=1 python mock_ser
   占位串返回通道（content=正文，reasoning=走 reasoning_content，复现思考模型形态）：MOCK_SOFT_MAX_CTX_FIELD=reasoning
   占位串自定义（默认 "prompt too long"；自定义串用于验证测速端输出塌缩守卫）：MOCK_SOFT_TEXT="..."
 模拟逐请求交替 decode 速度（tok/s 逗号分隔循环，双峰复现）：MOCK_TG_PATTERN="60,120"
+模拟预热/基线请求流末不发 usage（末条为超短任务文案 "Reply with OK." 开头或 ≤64 字符的请求，agent 矩阵预热形态；网关间歇丢 usage 复现）：MOCK_PRIME_NO_USAGE=1
 模拟服务端前缀缓存（append-only 增长的 prompt 只增量 prefill，usage 回传命中）：MOCK_CACHE=1
 模拟缓存命中但读取慢（缓存生效、不回传命中字段，命中前缀 TTFT = 命中tokens/N；N≫PP 时走平判别失效，验证全量预期/佐证通道判别）：MOCK_CACHE_READ_TOK_S=10000
 模拟忽略 max_tokens（只认 max_completion_tokens，opencode zen 行为；旧名请求输出跑飞 4× 上限）：MOCK_IGNORE_MAX_TOKENS=1
 模拟严格校验网关拒收 max_completion_tokens（400 Unrecognized request argument）：MOCK_REJECT_MCT=1
 模拟首测提前停止（一次性脚本钩子：下一发 chat 请求 finish=stop、仅 N tokens、带真 usage，之后恢复正常满预算输出；验证测速端弃测重测全链路 ADR-0032）：MOCK_EARLY_STOP=4
-模拟 agent 测量批提前停止（接下来 N 发「带指令材料」的 chat 请求逐发提前停止、每次仅 4 tokens（实测 4/512 形态）、用后归零；只命中末条消息 >64 字符的请求，agent 预热/基线的超短任务不命中——脚本化 agent 矩阵首测异常/重测正常或持续异常）：MOCK_EARLY_STOP_LONG=1
+模拟 agent 测量批提前停止（接下来 N 发「带指令材料」的 chat 请求逐发提前停止、每次仅 4 tokens（实测 4/512 形态）、用后归零；预热/基线的超短任务按文案 "Reply with OK." 显式排除——指令末尾复述约束会把预热末条撑长，长度判据不可靠）：MOCK_EARLY_STOP_LONG=1
 模拟 ASR 处理速度（音频秒/秒，50=50 倍实时）：MOCK_ASR_PP=50
 模拟 TTS 合成语速（字/秒，决定音频时长）：MOCK_TTS_RATE=4.5
 模拟 TTS 合成速度（相对实时的倍速）：MOCK_TTS_XR=20
+模拟 TTS 单请求音频时长上限（秒，默认 600；防超大档位把 mock 拖成几小时）：MOCK_TTS_MAX_S=600
 模拟网关瞬时抖动（接下来 N 发 chat 请求直接 HTTP 500，用后归零恢复正常；验证测速端兜底重试）：MOCK_FLAKY_FAIL=1
 模拟未自报超窗的秒拒（prompt+max_tokens 超 N 返回 500，报文不含 context/exceed 超窗关键词——fastllm 显存/KV 不足形态；验证贴边档回退裁减）：MOCK_HARD_FAIL_CTX=4096
 """
@@ -39,6 +41,7 @@ import io
 import json
 import math
 import os
+import struct
 import wave
 from array import array
 
@@ -71,13 +74,15 @@ TG_PATTERN = [float(x) for x in os.environ.get("MOCK_TG_PATTERN", "").split(",")
 CACHE = os.environ.get("MOCK_CACHE", "")  # 置 1 模拟前缀缓存：与已见 prompt 的公共前缀部分不计 prefill 耗时（验证 agent 连续任务链）
 CACHE_NOREPORT = os.environ.get("MOCK_CACHE_NOREPORT", "")  # 置 1 则缓存生效但 usage 不回传命中字段（验证缓存迹象判别：TTFT 走平 → ≈差分估算）
 CACHE_READ_S = float(os.environ.get("MOCK_CACHE_READ_TOK_S", "0"))  # >0 则缓存生效（机制同 MOCK_CACHE）但不回传命中字段，且命中前缀的读取 TTFT = 命中tokens/N 秒（N ≫ PP 模拟「缓存命中但读取慢」，走平判别失效、验证全量预期/佐证通道判别）
+PRIME_NO_USAGE = os.environ.get("MOCK_PRIME_NO_USAGE", "")  # 置 1 则预热/基线请求（末条消息 ≤64 字符）流末不发 usage 帧——模拟网关间歇丢 usage（实测 2026-09-16 本地网关事故：agent 矩阵 32K/128K 缓存档预热 usage 全缺、命中估算基准缺失整档虚高留档）
 IGNORE_MT = os.environ.get("MOCK_IGNORE_MAX_TOKENS", "")  # 置 1 则忽略 max_tokens（只认 max_completion_tokens，opencode zen 行为；旧名请求输出跑飞 4× 上限）
 REJECT_MCT = os.environ.get("MOCK_REJECT_MCT", "")  # 置 1 则带 max_completion_tokens 参数的请求 400（严格校验的老规范网关）
 EARLY_STOP = int(os.environ.get("MOCK_EARLY_STOP", "0"))  # 置 N 则下一发 chat 请求一次性 early-stop（finish=stop、仅 N tokens、带真 usage，用后归零恢复正常；脚本化「首测异常、重测正常」，验证弃测重测全链路）
-EARLY_STOP_LONG = int(os.environ.get("MOCK_EARLY_STOP_LONG", "0"))  # 置 N 则接下来 N 发「带指令材料」的 chat 请求（末条消息 >64 字符，agent 预热/基线超短任务不命中）逐发 early-stop（每次仅 4 tokens，实测 4/512 形态）、用后归零（agent 矩阵弃测重测专项：N=1 首测异常重测正常，N 大 持续异常按实留档）
+EARLY_STOP_LONG = int(os.environ.get("MOCK_EARLY_STOP_LONG", "0"))  # 置 N 则接下来 N 发「带指令材料」的 chat 请求（末条消息 >64 字符，agent 预热/基线超短任务不命中）逐发 early-stop（每次仅 4 tokens，实测 4/512 形态）、用后归零（agent 矩阵弃测重测专项：N=1 首测异常重测正常，N 大 持续低于地板 → 重测 FLOOR_RETEST_MAX 次后按测量失败留档）
 ASR_PP = float(os.environ.get("MOCK_ASR_PP", "50"))   # 模拟 ASR 处理速度（音频秒/秒）
 TTS_RATE = float(os.environ.get("MOCK_TTS_RATE", "4.5"))  # 模拟 TTS 合成语速（字/秒 → 音频时长）
 TTS_XR = float(os.environ.get("MOCK_TTS_XR", "20"))   # 模拟 TTS 合成速度（×实时）
+TTS_MAX_S = float(os.environ.get("MOCK_TTS_MAX_S", "600"))  # 单请求合成音频时长上限（秒）
 FLAKY_FAIL = int(os.environ.get("MOCK_FLAKY_FAIL", "0"))  # 置 N 则接下来 N 发 chat 请求一次性 500（模拟网关瞬时抖动，验证测速端兜底重试；脚本化用后归零）
 HARD_FAIL_CTX = int(os.environ.get("MOCK_HARD_FAIL_CTX", "0"))  # 置 N 则 prompt+max_tokens 超 N 返回 500「CUDA out of memory」（未自报超窗的秒拒：报文不含超窗关键词，验证贴边档回退裁减）
 _SR = 16000   # 合成/解析音频的采样率
@@ -94,27 +99,37 @@ def _wav_seconds(data: bytes) -> float | None:
         return None
 
 
-def _pcm_sine(seconds: float) -> bytes:
-    """生成正弦 PCM16（220Hz + 谐波，16kHz 单声道）：1s 段循环拼接——TTS mock
-    只需要合法音频载荷，段重复不影响客户端的时长解析。"""
-    n = int(_SR * seconds)
-    seg = array("h", bytes(2 * _SR))
-    for k in range(_SR):
-        ph = 2 * math.pi * 220 * k / _SR
-        seg[k] = int(9000 * (0.7 * math.sin(ph) + 0.3 * math.sin(2 * ph)))
-    return (seg.tobytes() * (n // _SR + 1))[: n * 2]
+_PCM_SEG: bytes | None = None
+
+
+def _pcm_segment() -> bytes:
+    """1 秒正弦 PCM16（220Hz + 谐波，16kHz 单声道），首次调用生成后缓存。
+
+    只产出 1 秒素材，长音频由调用方**分块循环取用**：旧实现按目标时长一次
+    拼出整段 PCM（tts 档位 65536 字 → 14563s 音频 → 约 1.4GB 峰值），且在
+    事件循环上同步执行——单个请求就能打爆 mock 进程并拖垮整条 e2e 套件。"""
+    global _PCM_SEG
+    if _PCM_SEG is None:
+        seg = array("h", bytes(2 * _SR))
+        for k in range(_SR):
+            ph = 2 * math.pi * 220 * k / _SR
+            seg[k] = int(9000 * (0.7 * math.sin(ph) + 0.3 * math.sin(2 * ph)))
+        _PCM_SEG = seg.tobytes()
+    return _PCM_SEG
+
+
+def _wav_header(data_bytes: int) -> bytes:
+    """44 字节标准 RIFF 头；长度按已知总字节数直接写出，无需先造出 PCM。"""
+    return (b"RIFF" + struct.pack("<I", 36 + data_bytes) + b"WAVE"
+            + b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, _SR, _SR * 2, 2, 16)
+            + b"data" + struct.pack("<I", data_bytes))
 
 
 def _wav_bytes(seconds: float) -> bytes:
-    """完整合法 wav（头 + PCM），时长精确到帧。"""
-    pcm = _pcm_sine(seconds)
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(_SR)
-        w.writeframes(pcm)
-    return buf.getvalue()
+    """完整合法 wav（头 + PCM），时长精确到帧。仅供小样本/自测使用。"""
+    n = int(_SR * seconds) * 2
+    seg = _pcm_segment()
+    return _wav_header(n) + (seg * (n // len(seg) + 1))[:n]
 
 
 def _multipart_first_file(body: bytes, boundary: bytes) -> bytes:
@@ -278,9 +293,13 @@ async def _chat_impl(req: Request):
     if EARLY_STOP > 0:
         n_early = EARLY_STOP
         EARLY_STOP = 0
-    elif EARLY_STOP_LONG > 0 and len(last_text) > 64:
+    elif (EARLY_STOP_LONG > 0 and len(last_text) > 64
+            and not last_text.startswith("Reply with OK.")):
         # agent 测量批专用旋钮：逐发递减计数（N=1 首测异常重测正常，N 大
-        # 持续异常按实留档），预热/基线超短任务不命中照常满预算输出；
+        # 持续低于地板 → 重测预算耗尽按测量失败留档），预热/基线超短任务
+        # 不命中照常满预算输出——
+        # 判据除 >64 字符外显式排除预热任务文案：指令末尾复述约束
+        # （ADR-0076）会让预热末条消息也超过 64 字符；
         # 每次仅吐 4 tokens（实测「材料截断」短答 4/512 形态）
         n_early = 4
         EARLY_STOP_LONG -= 1
@@ -355,7 +374,11 @@ async def _chat_impl(req: Request):
         if pending:
             yield "".join(pending)
         final = {"choices": [{"delta": {}, "finish_reason": "stop"}]}
-        if not NO_USAGE:
+        if not NO_USAGE and not (PRIME_NO_USAGE and (
+                len(last_text) <= 64 or last_text.startswith("Reply with OK."))):
+            # PRIME_NO_USAGE：预热/基线（超短任务文案开头，或 ≤64 字符）丢
+            # usage 帧，测量请求（末条带指令材料）照常回传——指令末尾复述
+            # 约束（ADR-0076）会把预热末条撑过 64 字符，判据认文案不认长度
             final["usage"] = {"prompt_tokens": prompt_tokens,
                               "completion_tokens": REASON + n_content}
             if CACHE:
@@ -415,25 +438,33 @@ async def transcriptions(req: Request):
 @app.post("/audio/speech")
 @app.post("/v1/audio/speech")
 async def speech(req: Request):
-    """OpenAI 兼容语音合成：音频时长 = 文本字符/MOCK_TTS_RATE，按 MOCK_TTS_XR
-    倍实时节奏流式吐 wav chunk（首 chunk 即刻到达，TTFA ≈ 0）。"""
+    """OpenAI 兼容语音合成：音频时长 = 文本字符/MOCK_TTS_RATE（封顶
+    MOCK_TTS_MAX_S），按 MOCK_TTS_XR 倍实时节奏流式吐 wav chunk（首 chunk
+    即刻到达，TTFA ≈ 0）。
+
+    PCM 由 1 秒素材循环**惰性分块**产出：内存占用与目标时长无关（旧实现按
+    时长一次拼出整段，65536 字档 → 约 1.4GB 峰值 + 事件循环长时间同步阻塞）。
+    封顶是给 mock 留的安全阀：超大档位下 mock 会以近乎实时节奏吐几个小时的
+    音频，既烧时间也掩盖真实缺陷。"""
     body = await req.json()
     text = body.get("input", "")
-    seconds = max(0.05, len(text) / TTS_RATE)
-    data = _wav_bytes(seconds)
-    hdr_end = data.find(b"data") + 8   # RIFF 头与 PCM 分界（头内长度已知且正确）
-    hdr, pcm = data[:hdr_end], data[hdr_end:]
-    chunk_bytes = _SR // 2             # 0.5s 音频一块
+    seconds = min(max(0.05, len(text) / TTS_RATE), TTS_MAX_S)
+    total = int(_SR * seconds) * 2      # PCM 字节数（16bit 单声道，精确到帧）
+    seg = _pcm_segment()
+    chunk_bytes = _SR // 2              # 0.5s 音频一块（保持既有节奏）
 
     async def gen():
+        sent = 0
         first = True
-        for off in range(0, len(pcm), chunk_bytes):
-            piece = pcm[off:off + chunk_bytes]
-            if first:
-                yield hdr + piece   # 首个 chunk 携带完整 RIFF 头
-                first = False
-            else:
-                yield piece
+        while sent < total:
+            take = min(chunk_bytes, total - sent)
+            off = sent % len(seg)
+            piece = seg[off:off + take]
+            if len(piece) < take:       # 素材段尾回绕：循环取用，波形仍连续
+                piece += seg[:take - len(piece)]
+            sent += take
+            yield (_wav_header(total) + piece) if first else piece
+            first = False
             await asyncio.sleep(0.5 / TTS_XR)
 
     return StreamingResponse(gen(), media_type="audio/wav")
