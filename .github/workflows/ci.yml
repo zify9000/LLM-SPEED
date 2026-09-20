@@ -33,3 +33,6 @@ jobs:
 
       - name: Frontend syntax + injection gate
         run: bash tests/check_frontend_js.sh
+
+      - name: Frontend pure-function tests
+        run: bash tests/run_frontend_pure.sh

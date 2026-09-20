@@ -952,14 +952,8 @@ const fmtK = v => !v ? "0K"
   : v>=1024 ? (v/1024).toFixed(v%1024?1:0)+"K" : String(v);
 const esc = s => String(s).replace(/[&<>"']/g, c =>
   ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-/* provider 下拉的地址文本：多地址时显示「首选 +N」，全文在抽屉编辑器里维护 */
-const provUrlText = p => {
-  const urls = (p.gateway_urls && p.gateway_urls.length) ? p.gateway_urls : [p.gateway_url || ""];
-  const first = String(urls[0]).replace(/^https?:\/\//,"");
-  return urls.length > 1 ? `${first} +${urls.length - 1}` : first;
-};
-const fmtNum = v => v==null ? "-" : Math.round(v).toLocaleString("en-US");
-const round1 = v => Math.round(v*10)/10;
+/* 展示层格式化/口径纯函数统一收在下面的 §pure 区域（provUrlText/fmtNum/round1
+   等已移入，可被 tests/run_frontend_pure.sh 原样提取做 DOM-free 单测） */
 
 const state = {points:new Map(), es:null, runId:null, running:false, cfg:null, maxSeq:-1,
   activeReqs:new Set(), donePoints:0, totalPoints:0, providers:[], phase:"idle",
@@ -2624,6 +2618,36 @@ function markLiveDone(p){
 
 /* ---------------- 数据存储与全局渲染 ---------------- */
 const pointKey = p => `${p.model}|${p.scenario}|${p.ctx_target}|${p.inst_tokens ?? ""}|${p.concurrency}`;
+/* 口径访问器（preOf/decNetOf/decAvgOf/decOf/decTotalTimeOf/decColAvgOf/
+   calcSpanTimeOf/decTotalOf）与 CALC_SPAN_TIP 已移入下方 §pure 区域 */
+// 新口径点：title 注明批级口径并附 span 数值对照；旧存档（无 decode_conc_tok_s）
+// 维持校正口径与原始窗口口径的对照提示
+const decTotalTipOf = p => p.decode_conc_tok_s != null
+  ? ` title="${esc(`并发口径：Σ输出 tokens ÷ decode 有效时长（批总时长 ${p.total_span_s ?? "-"}s − prefill 总时长 ${p.prefill_span_s ?? "-"}s = decode ${p.decode_span_s ?? "-"}s），Decode 组均速列 = 本值 ÷ 并发数；可验算：Σ输出 ≈ 总吞吐 × decode_span_s${p.decode_span_s != null ? ` = ${fmtNum(p.decode_conc_tok_s * p.decode_span_s)}` : ""}（decode_conc_tok_s × decode_span_s 折算）；并发均 prefill 速度 ${p.prefill_conc_tok_s ?? "-"} tok/s`)}"`
+  : (p.decode_total_tok_s_adj != null && p.decode_total_tok_s != null
+  && p.decode_total_tok_s_adj !== p.decode_total_tok_s)
+  ? ` title="${esc(`总吞吐为空窗校正口径：输出 tokens ÷（总输出窗口 − 各请求停滞累计）；原窗口口径 ${p.decode_total_tok_s} tok/s（含调度停滞空窗）`)}"` : "";
+/* 结束原因映射：并发下各请求 finish_reason 可能不同，引擎产出 "length,stop"
+   等逗号组合值（bench.py uniq>1 时 join）——按段拆开逐段映射再拼接，
+   未知段原样转义（单值口径与旧版一致：只翻译截断/断流两类异常态） */
+const FINISH_LABEL = {length:"截断", client_cut:"断流"};
+const finishTxt = f => f == null ? "-" : String(f).split(",").map(s => {
+  s = s.trim();
+  return s ? (FINISH_LABEL[s] || esc(s)) : "-";
+}).join("、");
+/* ===== §pure:start ===== */
+/* 展示层纯函数区：不访问 DOM / state / 浏览器全局，整段可被
+   tests/run_frontend_pure.sh 原样提取为独立模块做单测。新增纯函数放这里；
+   碰 DOM/state 的代码留在区外（hitStateOf 的旧链分支除外，见其注释）。 */
+/* provider 下拉的地址文本：多地址时显示「首选 +N」，全文在抽屉编辑器里维护 */
+const provUrlText = p => {
+  const urls = (p.gateway_urls && p.gateway_urls.length) ? p.gateway_urls : [p.gateway_url || ""];
+  const first = String(urls[0]).replace(/^https?:\/\//,"");
+  return urls.length > 1 ? `${first} +${urls.length - 1}` : first;
+};
+const fmtNum = v => v==null ? "-" : Math.round(v).toLocaleString("en-US");
+const round1 = v => Math.round(v*10)/10;
+
 // Prefill 展示口径：优先扣 RTT 的净值（ADR-0006），旧存档无该字段时回退毛值
 const preOf = p => p.prefill_net_tok_s ?? p.prefill_tok_s;
 // Decode 双口径：
@@ -2665,21 +2689,14 @@ const CALC_SPAN_TIP = "计算总耗时 = 批开始→全部请求末 token（tot
 // prefill_span_s，即 decode_span_s），conc>1 无重叠守卫置空问题；旧存档无新字段
 // 时回退空窗校正口径（decode_total_tok_s_adj），再回退原始窗口口径
 const decTotalOf = p => p.decode_conc_tok_s ?? p.decode_total_tok_s_adj ?? p.decode_total_tok_s;
-// 新口径点：title 注明批级口径并附 span 数值对照；旧存档（无 decode_conc_tok_s）
-// 维持校正口径与原始窗口口径的对照提示
-const decTotalTipOf = p => p.decode_conc_tok_s != null
-  ? ` title="${esc(`并发口径：Σ输出 tokens ÷ decode 有效时长（批总时长 ${p.total_span_s ?? "-"}s − prefill 总时长 ${p.prefill_span_s ?? "-"}s = decode ${p.decode_span_s ?? "-"}s），Decode 组均速列 = 本值 ÷ 并发数；可验算：Σ输出 ≈ 总吞吐 × decode_span_s${p.decode_span_s != null ? ` = ${fmtNum(p.decode_conc_tok_s * p.decode_span_s)}` : ""}（decode_conc_tok_s × decode_span_s 折算）；并发均 prefill 速度 ${p.prefill_conc_tok_s ?? "-"} tok/s`)}"`
-  : (p.decode_total_tok_s_adj != null && p.decode_total_tok_s != null
-  && p.decode_total_tok_s_adj !== p.decode_total_tok_s)
-  ? ` title="${esc(`总吞吐为空窗校正口径：输出 tokens ÷（总输出窗口 − 各请求停滞累计）；原窗口口径 ${p.decode_total_tok_s} tok/s（含调度停滞空窗）`)}"` : "";
-/* 结束原因映射：并发下各请求 finish_reason 可能不同，引擎产出 "length,stop"
-   等逗号组合值（bench.py uniq>1 时 join）——按段拆开逐段映射再拼接，
-   未知段原样转义（单值口径与旧版一致：只翻译截断/断流两类异常态） */
-const FINISH_LABEL = {length:"截断", client_cut:"断流"};
-const finishTxt = f => f == null ? "-" : String(f).split(",").map(s => {
-  s = s.trim();
-  return s ? (FINISH_LABEL[s] || esc(s)) : "-";
-}).join("、");
+
+/* 单/多发闸统一判据（ADR-0074 追加六/七）：明细表 showTotal、速度曲线
+   concChart、卡片 scenarioStats hiConc 三处必须同口径分叉，统一从这里取。
+   hiConcOf 返回最高并发档（>1），单并发/空集返回 null；不变式：
+   hasMultiConc(pts) === (hiConcOf(pts) != null) */
+const hasMultiConc = pts => pts.some(p => p.concurrency > 1);
+const hiConcOf = pts => { const mx = pts.reduce((m,p)=>Math.max(m, p.concurrency||0), 0); return mx > 1 ? mx : null; };
+
 // Prefill 物理速率闸（tok/s）：常规硬件 prefill 上限远低于此，读数超出视为
 // 物理上不可能（多为网关吞掉请求后伪报成功/异常回传），从卡片均值/范围统计剔除
 const PRE_PHYS_GATE = 50000;
@@ -2713,6 +2730,75 @@ function tpcRunVote(pts){
   for(const [m, g] of byModel) if(g.tpc * 2 > g.voters) on.add(m);
   return on;
 }
+/* 缓存命中三态判别：reported=服务端回传真值；est=未回传但有缓存迹象
+   （走平/低于全量预期/本轮已证实，按预热实测估算）；unknown=未回传且
+   无迹象（不假设命中）；cold=无缓存基线点（旧链轮 0 冷启动 / 新矩阵
+   零缓存档，构造保证无命中）；非 agent 点返回 null。
+   本函数 DOM-free；仅旧连续任务链分支调用区外的 isColdTurn（其缺省回退
+   全局运行态 cfg），单测只走 inst_tokens 矩阵分支，不触发该分支 */
+function hitStateOf(p, cfg){
+  if(p.turn == null && p.inst_tokens == null) return null;
+  const reported = p.cache_reported ?? (p.reqs||[]).some(r => r.cache_reported);
+  if(reported) return "reported";
+  if(p.inst_tokens != null) return p.ctx_target === 0 ? "cold"
+    : (p.cache_hit_tokens == null ? "unknown" : "est");
+  if(isColdTurn(p, cfg)) return "cold";
+  return p.cache_hit_tokens == null ? "unknown" : "est";
+}
+/* 单场景卡片统计（全场景合并后按模型/场景调用）：均值/范围/Avg 基数、多发闸
+   hiConc（= hiConcOf(ok)）与最高并发档的总吞吐范围/峰值。空输入各字段为 null
+   （withCtx 的 -Infinity 初值只在有可信点时被读取），卡片不渲染 -Infinity */
+function scenarioStats(pts){
+  const ok = pts.filter(p=>p.all_ok);
+  const withCtx = (arr) => arr.reduce((m,p)=>p.v>m.v?{v:p.v,ctx:p.ctx,turn:p.turn}:m, {v:-Infinity,ctx:null,turn:null});
+  const rangeOf = arr => arr.length ? [Math.min(...arr), Math.max(...arr)] : null;
+  // Prefill 超物理界（>PRE_PHYS_GATE tok/s）的读数不可信：剔除出均值/范围统计，
+  // 计数随 preUntrusted 返回、卡片上单独标注（假成功点 prefill 常达数十万 tok/s）
+  const pre = ok.map(p=>({v:preOf(p), ctx:p.ctx_target, turn:p.turn}))
+    .filter(x=>x.v!=null && x.v<=PRE_PHYS_GATE);
+  const preUntrusted = ok.map(p=>preOf(p)).filter(v=>v!=null && v>PRE_PHYS_GATE).length;
+  const decNet = ok.map(p=>({v:decNetOf(p), ctx:p.ctx_target, turn:p.turn})).filter(x=>x.v!=null);
+  const decAvg = ok.map(p=>({v:decAvgOf(p), ctx:p.ctx_target, turn:p.turn})).filter(x=>x.v!=null);
+  const preRange = rangeOf(pre.map(x=>x.v));
+  const decRange = rangeOf(decNet.map(x=>x.v));
+  const decAvgRange = rangeOf(decAvg.map(x=>x.v));
+  const prePeak = pre.length ? withCtx(pre) : null;
+  const concs = [...new Set(ok.map(p=>p.concurrency))].sort((a,b)=>a-b);
+  const baseConc = concs[0];
+  const preAvg = pre.length ? pre.reduce((a,x)=>a+x.v,0)/pre.length : null;   // 全档上下文均值
+  const basePts = ok.filter(p=>p.concurrency===baseConc);
+  const baseDecNet = basePts.map(p=>decNetOf(p)).filter(v=>v!=null);
+  const baseDecAvg = basePts.map(p=>decAvgOf(p)).filter(v=>v!=null);
+  const baseDecNetAvg = baseDecNet.length ? baseDecNet.reduce((a,b)=>a+b,0)/baseDecNet.length : null;
+  const baseDecAvgRaw = baseDecAvg.length ? baseDecAvg.reduce((a,b)=>a+b,0)/baseDecAvg.length : null;
+  // 多发闸（ADR-0074 追加七）：统一走 hiConcOf——与明细表 hasMultiConc 等价
+  //（同一 ok 点集）。旧判 concs.length>1 会把「纯 conc=5 运行」（唯一档就是
+  // 多并发）误判成单发样式；scenarioStats 自身原判 concs 末位与 hiConcOf 等价
+  const hiConc = hiConcOf(ok);
+  const hiVals = hiConc ? ok.filter(p=>p.concurrency===hiConc)
+      .map(decTotalOf).filter(v=>v!=null) : [];
+  const hiTotal = hiVals.length ? hiVals.reduce((a,b)=>a+b,0)/hiVals.length : null;   // 均值而非峰值
+  // 最高并发档 1s 滑窗交付峰值最大值（带 ctx_target 供标注）；旧存档无
+  // decode_peak_tok_s 字段时为 null，卡片不渲染峰值格
+  const hiPeakPts = hiConc ? ok.filter(p=>p.concurrency===hiConc)
+      .map(p=>({v:p.decode_peak_tok_s, ctx:p.ctx_target})).filter(x=>x.v!=null) : [];
+  const hiPeak = hiPeakPts.length ? hiPeakPts.reduce((m,x)=>x.v>m.v?x:m) : null;
+  // 仪表盘「Decode 总吞吐范围/吞吐峰值」格：取最高并发档（单并发运行取唯一
+  // 档）的各上下文档位总吞吐 min–max 与 1s 滑窗交付峰值最大值；旧存档无
+  // 批级字段时 decTotalOf 回退旧口径、峰值格不出（peak 为 null）
+  const totConc = hiConc ?? baseConc;
+  const totPts = totConc != null ? ok.filter(p => p.concurrency === totConc) : [];
+  const totRange = rangeOf(totPts.map(decTotalOf).filter(v => v != null));
+  const peakPts = totPts.map(p => ({v: p.decode_peak_tok_s, ctx: p.ctx_target}))
+    .filter(x => x.v != null);
+  const peak = peakPts.length ? peakPts.reduce((m,x)=>x.v>m.v?x:m) : null;
+  return {preRange, decRange, decAvgRange, prePeak, preAvg, preUntrusted,
+          baseConc, baseDecNetAvg, baseDecAvg: baseDecAvgRaw, hiConc, hiTotal, hiPeak,
+          totConc, totRange, peak};
+}
+/* 对比卡跨模型合图，键不带模型；多并发档拆图后键带并发档后缀（单档保持原键） */
+const cmpLegendKey = (sc, metric, conc) => `cmp::${sc}::${metric}${conc != null ? `::${conc}` : ""}`;
+/* ===== §pure:end ===== */
 /* 会展示「均 x/批」的点（>=SPEC_MIN_TPC，<门槛本就不显示）；裁定判定用 */
 const tpcWouldShow = p => p.tok_per_chunk != null && p.tok_per_chunk >= SPEC_MIN_TPC;
 /* 被裁定压制的点计数：keyOf 返回与 tpcOn 同套的键（单次运行 = p.model，
@@ -2820,19 +2906,6 @@ function isColdTurn(p, cfg){
   if(c && c.agent_cold_ctx != null) return p.turn_phase === 0;
   return p.turn_phase === 0 || p.turn === 1;
 }
-/* 缓存命中三态判别：reported=服务端回传真值；est=未回传但有缓存迹象
-   （走平/低于全量预期/本轮已证实，按预热实测估算）；unknown=未回传且
-   无迹象（不假设命中）；cold=无缓存基线点（旧链轮 0 冷启动 / 新矩阵
-   零缓存档，构造保证无命中）；非 agent 点返回 null */
-function hitStateOf(p, cfg){
-  if(p.turn == null && p.inst_tokens == null) return null;
-  const reported = p.cache_reported ?? (p.reqs||[]).some(r => r.cache_reported);
-  if(reported) return "reported";
-  if(p.inst_tokens != null) return p.ctx_target === 0 ? "cold"
-    : (p.cache_hit_tokens == null ? "unknown" : "est");
-  if(isColdTurn(p, cfg)) return "cold";
-  return p.cache_hit_tokens == null ? "unknown" : "est";
-}
 /* 单场景明细表（页面明细区与卡片明细区共用渲染器）：LLM 通用/agent 列结构
    分叉；媒体场景转 renderMediaTable。opts.withReps=false 只出聚合行（卡片
    「聚合行明细」档）；opts.cfg 供对比卡片按各次存档自身 cfg 判别冷启动轮
@@ -2849,7 +2922,7 @@ function scenDetailTable(sc, scRows, {showTotal, withReps = true, cfg = null, ti
   const isAgent = scRows.some(p => p.turn != null || p.inst_tokens != null);
   const isAgentMx = scRows.some(p => p.inst_tokens != null);   // 缓存×指令矩阵（新口径）
   // 单/多发表格样式分叉（ADR-0074 追加六）：showTotal ⟺ 矩阵含多并发点
-  //（全部调用方同口径 rows.some(concurrency>1)）。多发表 = 批级样式：
+  //（全部调用方同口径 §pure hasMultiConc，与曲线 concChart、卡片 hiConcOf 一致）。多发表 = 批级样式：
   // Prefill 组 = 总耗时（批开始→全部首 token）+ 均速（毛口径批级）；
   // Decode 组 = 总耗时（decode_span_s 批级 max 口径）+ 均速（批吞吐 ÷
   // 并发数）+ 总吞吐 + 吞吐峰值；计算总耗时（total_span_s）独立列。
@@ -2917,7 +2990,7 @@ function renderResultTable(){
   const rows = allPoints();
   // 异常日志入口仅在确有异常点位（弃测/留档）时出现，随渲染逐次重判
   $("#btnAnomalyLog").hidden = !rows.some(p => p.anomaly || (p.reps_discarded || []).length);
-  const showTotal = rows.some(p => p.concurrency > 1);   // 单并发矩阵不展示总吞吐列
+  const showTotal = hasMultiConc(rows);   // 单并发矩阵不展示总吞吐列（闸统一：§pure hasMultiConc）
   // 「均 x/批」运行级裁定：对本次运行全部测点按模型多数决（实时运行中途点
   // 陆续到达时每次渲染重算，裁定可能翻转——首点孤立 artifact 会先显示后被
   // 压下，可接受瞬态，不做锁定）
@@ -3418,10 +3491,11 @@ function buildChartOpt(pts, metric, title, forExport){
     }),
   });
   // 单/多发图样式分叉（ADR-0074 追加七）：concChart ⟺ 本场景含多并发点
-  //（与明细表 showTotal 同口径）。多发 = 批级三系列（总吞吐/吞吐峰值/
-  // 总耗时；Prefill 图 = 均速/总耗时）；单发 = 经典样式（Prefill 速度
-  // 净口径 + TTFT；Decode 净/均双口径速度线 + 净/总双耗时线）
-  const concChart = concs.some(c => c > 1);
+  //（闸统一：§pure hasMultiConc(pts)，与明细表 showTotal、卡片 hiConcOf 同口径）。
+  // 多发 = 批级三系列（总吞吐/吞吐峰值/总耗时；Prefill 图 = 均速/总耗时）；
+  // 单发 = 经典样式（Prefill 速度净口径 + TTFT；Decode 净/均双口径速度线 +
+  // 净/总双耗时线）；concs 仍用于 x 轴档位与系列取色
+  const concChart = hasMultiConc(pts);
   // 单发轨左图恢复经典图题（调用方统一传「Prefill」，此处按轨改写）
   if(isPre && !concChart && title === "Prefill") title = "Prefill / TTFT";
   const series = concs.flatMap(c => {
@@ -3669,7 +3743,7 @@ function ctxTable(scPts){
   // 单/多发分叉（ADR-0074 追加七，与明细表/曲线同口径）：多发 = 批级四
   // 指标（Prefill 均速/Prefill 总耗时/Decode 总吞吐/Decode 总耗时）；
   // 单发 = 经典列（TTFT/Prefill 净口径/净Decode）
-  const concTbl = scPts.some(p => p.concurrency > 1);
+  const concTbl = hasMultiConc(scPts);
   const rows = scPts.map(p =>
     `<tr class="${p.all_ok ? "" : "err"}">`
       + `<td>${gearOf(p)}${multi ? ` · 并发${p.concurrency}` : ""}</td>`
@@ -3810,54 +3884,6 @@ function cardAgentMatrixTable(pts, metric){
    当前 provider 的 deployments 映射 */
 function modelInfo(model){
   return state.cfg?.model_info?.[model] || resolveDeployment(currentProvider()?.deployments, model) || null;
-}
-function scenarioStats(pts){
-  const ok = pts.filter(p=>p.all_ok);
-  const withCtx = (arr) => arr.reduce((m,p)=>p.v>m.v?{v:p.v,ctx:p.ctx,turn:p.turn}:m, {v:-Infinity,ctx:null,turn:null});
-  const rangeOf = arr => arr.length ? [Math.min(...arr), Math.max(...arr)] : null;
-  // Prefill 超物理界（>PRE_PHYS_GATE tok/s）的读数不可信：剔除出均值/范围统计，
-  // 计数随 preUntrusted 返回、卡片上单独标注（假成功点 prefill 常达数十万 tok/s）
-  const pre = ok.map(p=>({v:preOf(p), ctx:p.ctx_target, turn:p.turn}))
-    .filter(x=>x.v!=null && x.v<=PRE_PHYS_GATE);
-  const preUntrusted = ok.map(p=>preOf(p)).filter(v=>v!=null && v>PRE_PHYS_GATE).length;
-  const decNet = ok.map(p=>({v:decNetOf(p), ctx:p.ctx_target, turn:p.turn})).filter(x=>x.v!=null);
-  const decAvg = ok.map(p=>({v:decAvgOf(p), ctx:p.ctx_target, turn:p.turn})).filter(x=>x.v!=null);
-  const preRange = rangeOf(pre.map(x=>x.v));
-  const decRange = rangeOf(decNet.map(x=>x.v));
-  const decAvgRange = rangeOf(decAvg.map(x=>x.v));
-  const prePeak = pre.length ? withCtx(pre) : null;
-  const concs = [...new Set(ok.map(p=>p.concurrency))].sort((a,b)=>a-b);
-  const baseConc = concs[0];
-  const preAvg = pre.length ? pre.reduce((a,x)=>a+x.v,0)/pre.length : null;   // 全档上下文均值
-  const basePts = ok.filter(p=>p.concurrency===baseConc);
-  const baseDecNet = basePts.map(p=>decNetOf(p)).filter(v=>v!=null);
-  const baseDecAvg = basePts.map(p=>decAvgOf(p)).filter(v=>v!=null);
-  const baseDecNetAvg = baseDecNet.length ? baseDecNet.reduce((a,b)=>a+b,0)/baseDecNet.length : null;
-  const baseDecAvgRaw = baseDecAvg.length ? baseDecAvg.reduce((a,b)=>a+b,0)/baseDecAvg.length : null;
-  // 多发闸（ADR-0074 追加七）：最高并发档 >1 即多发样式——与明细表
-  // showTotal（矩阵含多并发点）同口径；旧判 concs.length>1 会把「纯
-  // conc=5 运行」（唯一档就是多并发）误判成单发样式
-  const hiConc = concs[concs.length-1] > 1 ? concs[concs.length-1] : null;
-  const hiVals = hiConc ? ok.filter(p=>p.concurrency===hiConc)
-      .map(decTotalOf).filter(v=>v!=null) : [];
-  const hiTotal = hiVals.length ? hiVals.reduce((a,b)=>a+b,0)/hiVals.length : null;   // 均值而非峰值
-  // 最高并发档 1s 滑窗交付峰值最大值（带 ctx_target 供标注）；旧存档无
-  // decode_peak_tok_s 字段时为 null，卡片不渲染峰值格
-  const hiPeakPts = hiConc ? ok.filter(p=>p.concurrency===hiConc)
-      .map(p=>({v:p.decode_peak_tok_s, ctx:p.ctx_target})).filter(x=>x.v!=null) : [];
-  const hiPeak = hiPeakPts.length ? hiPeakPts.reduce((m,x)=>x.v>m.v?x:m) : null;
-  // 仪表盘「Decode 总吞吐范围/吞吐峰值」格：取最高并发档（单并发运行取唯一
-  // 档）的各上下文档位总吞吐 min–max 与 1s 滑窗交付峰值最大值；旧存档无
-  // 批级字段时 decTotalOf 回退旧口径、峰值格不出（peak 为 null）
-  const totConc = hiConc ?? baseConc;
-  const totPts = totConc != null ? ok.filter(p => p.concurrency === totConc) : [];
-  const totRange = rangeOf(totPts.map(decTotalOf).filter(v => v != null));
-  const peakPts = totPts.map(p => ({v: p.decode_peak_tok_s, ctx: p.ctx_target}))
-    .filter(x => x.v != null);
-  const peak = peakPts.length ? peakPts.reduce((m,x)=>x.v>m.v?x:m) : null;
-  return {preRange, decRange, decAvgRange, prePeak, preAvg, preUntrusted,
-          baseConc, baseDecNetAvg, baseDecAvg: baseDecAvgRaw, hiConc, hiTotal, hiPeak,
-          totConc, totRange, peak};
 }
 /* 生成单个模型的卡片 HTML（全场景合并）；多模型时由 genCards 平铺多张 */
 function cardHTML(model){
@@ -4430,7 +4456,7 @@ function downloadAnomalyLog(){
 const RUN_COLORS = ["#4F46E5", "#EA580C", "#0D9488", "#DB2777", "#CA8A04",
   "#2563EB", "#7C3AED", "#16A34A", "#DC2626", "#0891B2"];
 const REPO_URL = "github.com/zify9000/LLM-SPEED";   // 卡片页脚出处链接
-const cmpLegendKey = (sc, metric, conc) => `cmp::${sc}::${metric}${conc != null ? `::${conc}` : ""}`;   // 对比卡跨模型合图，键不带模型；多并发档拆图后键带并发档后缀（单档保持原键）
+/* cmpLegendKey 已移入上方 §pure 区域 */
 
 /* 对比记录选择弹窗：勾选 ≥2 条历史（默认勾选最新两条），确认后逐条拉取存档 */
 let cmpCache = [];
@@ -4791,7 +4817,7 @@ function cmpScenSummaryHTML(sc, entries){
     // 任一运行含多并发点）：多列 = Prefill 均速范围 / Prefill 均速峰值 /
     // Decode 均速范围 / Decode 总吞吐 / Decode 吞吐峰值（与多发卡片仪表盘
     // 同词汇）；单发保持经典列（净速范围/均值口径）
-    const showTot = entries.some(e => e.pts.some(p => p.concurrency > 1));
+    const showTot = entries.some(e => hasMultiConc(e.pts));
     const cols = entries.map(e => scenarioStats(e.pts));
     if(showTot){
       head = `<tr><th>运行</th>${modelTh}<th>Prefill 均速范围(tok/s)</th>`
@@ -5030,7 +5056,7 @@ function cmpCardHTML(){
   // 总吞吐括注仅在有多并发点时出现；出处附 GitHub 地址
   const footNotes = [];
   if(allLlm){
-    const anyConc = runs.some(r => r.pts.some(p => p.concurrency > 1));
+    const anyConc = runs.some(r => hasMultiConc(r.pts));
     const anyMx = runs.some(r => r.pts.some(p => p.inst_tokens != null));
     footNotes.push(`对比图按并发档拆分、同场景同并发叠加${anyConc ? "：单并发档 Decode 为净速/净耗时，多并发档按多并发卡片图口径（总吞吐/吞吐峰值/总耗时）" : "：Decode 为净速/净耗时"}`);
     if(anyMx) footNotes.push("Agent 矩阵对比图：指令档为轴、运行×缓存档为系列，各次档位取并集、缺档出断点");
@@ -5085,7 +5111,7 @@ function cmpDetailHTML(runs){
       .map(([r, runIdx]) => {
       const rows = r.pts.filter(p => p.scenario === sc);
       return `<div class="sc-cmp-run-name"><span class="sc-run-dot" style="background:${r.color}"></span>${r.tag} ${esc(r.started_at || "")}${r.note ? " · " + esc(r.note) : ""}</div>`
-        + scenDetailTable(sc, rows, {showTotal: rows.some(p => p.concurrency > 1),
+        + scenDetailTable(sc, rows, {showTotal: hasMultiConc(rows),
             withReps, cfg: r.cfg, titled: false, tpcOn: tpcVotes[runIdx]});
     }).join("");
     return `<div class="sc-detail-scen"><div class="sc-detail-scen-name">${SCEN_LABEL[sc] || esc(sc)}</div>${runTables}</div>`;
@@ -5110,7 +5136,7 @@ function cardDetailHTML(model){
   const scens = [...new Set(rows.map(p => p.scenario))]
     .sort((a, b) => (SCEN_ORDER[a] ?? 9) - (SCEN_ORDER[b] ?? 9));
   const tables = scens.map(sc => scenDetailTable(sc, rows.filter(p => p.scenario === sc),
-    {showTotal: rows.some(p => p.concurrency > 1), withReps, tpcOn})).join("");
+    {showTotal: hasMultiConc(rows), withReps, tpcOn})).join("");
   return `<div class="sc-detail"><div class="sc-tt-title">测速结果明细${withReps ? "（含逐次重复）" : "（聚合行：多次重复取均值）"}</div>${tables}${tpcSuppressHTML([...tpcSuppressCount(rows, tpcOn)].map(([m, n]) => [`${m}：`, n]))}</div>`;
 }
 /* 数据配置浮层：单次卡按是否含 agent 矩阵点给两组选项（矩阵卡=四个矩阵

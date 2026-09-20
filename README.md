@@ -163,6 +163,9 @@ python -m pytest -q                 # 或 python -m unittest discover -s tests -
 # 前端内联脚本语法 + 注入门禁（需 node）
 bash tests/check_frontend_js.sh
 
+# 前端展示层纯函数单测（提取内联脚本 §pure 区域，零依赖无构建，需 node）
+bash tests/run_frontend_pure.sh
+
 # 本地自测用的假网关（无需真实模型）
 python mock_server.py               # 缺省 :8901；MOCK_PP / MOCK_TG / MOCK_STALL 等旋钮见文件头
 ```
