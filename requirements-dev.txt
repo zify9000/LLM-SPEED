@@ -1,0 +1,6 @@
+# 开发/测试依赖（运行时依赖见 requirements.txt）
+# 安装：pip install -r requirements.txt -r requirements-dev.txt
+#
+# 只放测试框架：测试套件不依赖 pytest 专有特性（unittest 用例，pytest 与
+# `python -m unittest discover -s tests` 两种入口都能跑），故不额外引入插件。
+pytest==9.1.1

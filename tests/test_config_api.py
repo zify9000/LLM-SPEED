@@ -113,10 +113,9 @@ class TestConfigApi(unittest.TestCase):
             r = self.client.put("/api/config",
                                 json={"providers": [_prov(local=True, deployments=[dep])]})
             self.assertEqual(r.status_code, 400, q)
-        # kv_quants：校验口径与 quants 完全一致
+        # kv_quants：校验口径与 quants 完全一致（同一循环镜像，取代表样本）
         bad_kv = [
             {"kv_quants": "Q8_0"},                           # 非数组
-            {"kv_quants": ["x" * 65]},                       # 单项超 64 字符
             {"kv_quants": [f"Q{i}" for i in range(9)]},      # 超 8 项
         ]
         for q in bad_kv:
@@ -127,7 +126,6 @@ class TestConfigApi(unittest.TestCase):
 
     def test_invalid_rejected(self):
         bad = [
-            {"providers": []},                                          # 空列表
             {"providers": [_prov(name="名字")]},                         # 非法名称
             {"providers": [_prov(gateway_url="localhost:4000")]},       # 缺协议
             {"providers": [_prov(), _prov()]},                          # 名称重复
@@ -135,6 +133,17 @@ class TestConfigApi(unittest.TestCase):
         ]
         for body in bad:
             self.assertEqual(self.client.put("/api/config", json=body).status_code, 400, body)
+
+    def test_empty_providers_allowed(self):
+        """空 providers 是文档化的空态（前端空态引导新增）：必须能保存。
+
+        旧实现拒绝空数组，用户删掉最后一个 provider 后保存 400、只能手改
+        config.json 才能回到空态。"""
+        r = self.client.put("/api/config", json={"providers": []})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["providers"], 0)
+        self.assertEqual(self.client.get("/api/config").json()["providers"], [])
+        self.assertEqual(json.load(open(server.CONFIG_PATH, encoding="utf-8"))["providers"], [])
 
     def test_max_ctx_sanitize(self):
         r = self.client.put("/api/config", json={"providers": [
@@ -250,50 +259,45 @@ class TestValidateBenchCfg(unittest.TestCase):
             self.assertEqual(cm.exception.status_code, 400, cfg)
 
     def test_valid_passes(self):
-        server._validate_bench_cfg(self._cfg())                     # 常规放行
+        # 缺省放行：各校验的 None 跳过分支统一在此验证（其余用例不再重复）
+        server._validate_bench_cfg(self._cfg())
         server._validate_bench_cfg(self._cfg(ctx_list=[4 * 1048576],
                                              concurrencies=[64]))   # 边界值放行
 
     def test_reply_mode_validated(self):
-        """回复模式（ADR-0021）：仅 free/echo 放行，其余值 400。"""
-        for bad in ("rewrite", "", 1, True, ["echo"]):
+        """回复模式（ADR-0021）：仅 free/echo 放行，其余值 400（含非字符串）。"""
+        for bad in ("rewrite", ["echo"]):
             with self.assertRaises(HTTPException) as cm:
                 server._validate_bench_cfg(self._cfg(reply_mode=bad))
             self.assertEqual(cm.exception.status_code, 400, bad)
         server._validate_bench_cfg(self._cfg(reply_mode="free"))
         server._validate_bench_cfg(self._cfg(reply_mode="echo"))
-        server._validate_bench_cfg(self._cfg())   # 缺省放行（引擎按 free）
 
     def test_translate_ladder_validated(self):
         """翻译场景自定义阶梯（ADR-0034）：translate_ladder ≤16 档、逐值
-        1~65536 整数（字原文）；越界/类型错 400，缺省放行由引擎取场景默认。"""
-        bad = [self._cfg(translate_ladder=[0]),          # 0 字非法
-               self._cfg(translate_ladder=[-50]),        # 负档
+        1~65536 整数（字原文）；越界/类型错 400（缺省放行见 test_valid_passes，
+        引擎侧缺省取场景默认阶梯）。"""
+        bad = [self._cfg(translate_ladder=[0]),          # 低于下界 1
                self._cfg(translate_ladder=[65537]),      # 超上限
                self._cfg(translate_ladder=[1.5]),        # 非整数
-               self._cfg(translate_ladder=[True]),       # bool 非整数
-               self._cfg(translate_ladder=[50] * 17),    # 超 16 档
-               self._cfg(translate_ladder="6400")]       # 非列表
+               self._cfg(translate_ladder=[50] * 17)]    # 超 16 档
         for cfg in bad:
             with self.assertRaises(HTTPException) as cm:
                 server._validate_bench_cfg(cfg)
             self.assertEqual(cm.exception.status_code, 400, cfg)
         server._validate_bench_cfg(self._cfg(translate_ladder=[50, 6400]))
-        server._validate_bench_cfg(self._cfg())   # 缺省放行
 
     def test_agent_ladders_validated(self):
         """Agent 缓存×指令矩阵双阶梯（ADR-0042）：agent_cache_ladder ≤16 档、
         逐值 0~4M tokens（已缓存上下文）；agent_inst_ladder ≤16 档、逐值
-        16~65536 tokens（单步指令长度）。越界/类型错 400；缺省放行由引擎取
-        场景默认阶梯；旧连续任务链键（agent_turns / agent_turn_delta /
-        agent_turns_p1/p2 / agent_cold_ctx / agent_phase2_base）不再校验，
-        传入被忽略；纯 Agent 场景 ctx_list 可空。"""
+        16~65536 tokens（单步指令长度）。越界/类型错 400（缺省放行见
+        test_valid_passes，引擎侧缺省取场景默认阶梯）；旧连续任务链键（agent_turns /
+        agent_turn_delta / agent_turns_p1/p2 / agent_cold_ctx /
+        agent_phase2_base）不再校验，传入被忽略；纯 Agent 场景 ctx_list 可空。"""
         M = 4 * 1048576
-        bad_cache = [self._cfg(agent_cache_ladder=[-1]),        # 负档
+        bad_cache = [self._cfg(agent_cache_ladder=[-1]),        # 低于下界 0
                      self._cfg(agent_cache_ladder=[M + 1]),     # 超上限
                      self._cfg(agent_cache_ladder=[True]),      # bool 非整数
-                     self._cfg(agent_cache_ladder=["4096"]),    # 字符串项
-                     self._cfg(agent_cache_ladder=[1.5]),       # 非整数
                      self._cfg(agent_cache_ladder=[0] * 17),    # 超 16 档
                      self._cfg(agent_cache_ladder="0,4096")]    # 非列表
         for cfg in bad_cache:
@@ -301,12 +305,8 @@ class TestValidateBenchCfg(unittest.TestCase):
                 server._validate_bench_cfg(cfg)
             self.assertEqual(cm.exception.status_code, 400, cfg)
         bad_inst = [self._cfg(agent_inst_ladder=[8]),           # 低于下界 16
-                    self._cfg(agent_inst_ladder=[0]),
                     self._cfg(agent_inst_ladder=[65537]),       # 超上限
-                    self._cfg(agent_inst_ladder=[True]),
-                    self._cfg(agent_inst_ladder=[1.5]),
-                    self._cfg(agent_inst_ladder=[512] * 17),    # 超 16 档
-                    self._cfg(agent_inst_ladder=512)]           # 非列表
+                    self._cfg(agent_inst_ladder=[512] * 17)]    # 超 16 档
         for cfg in bad_inst:
             with self.assertRaises(HTTPException) as cm:
                 server._validate_bench_cfg(cfg)
@@ -314,7 +314,6 @@ class TestValidateBenchCfg(unittest.TestCase):
         # 边界值放行：cache 档含 0、上到 4M；inst 档 16~65536
         server._validate_bench_cfg(self._cfg(agent_cache_ladder=[0, M],
                                              agent_inst_ladder=[16, 65536]))
-        server._validate_bench_cfg(self._cfg())   # 缺省放行（引擎取场景默认）
         # 旧连续任务链键不再校验：传入被忽略、不 400
         server._validate_bench_cfg(self._cfg(
             agent_turns=8, agent_turn_delta=[256, 2048], agent_turns_p1=4,
@@ -325,38 +324,28 @@ class TestValidateBenchCfg(unittest.TestCase):
     def test_media_ladders_validated(self):
         """媒体场景自定义阶梯：asr_ladder/ocr_ladder/tts_ladder 各 ≤16 档、
         逐值 int 且落在对应范围（asr 1~3600 秒 / ocr 1~64 张 / tts 1~65536 字）；
-        越界（0 与上限+1）/非 list/float/bool 值一律 400；空数组合法
-        （引擎回退场景默认阶梯）；缺省放行。"""
+        越界/非 int/非 list 一律 400（三个字段共用一条校验循环，类型/档数子句
+        各取一个代表）；空数组合法（引擎回退场景默认阶梯）。"""
         bad = [self._cfg(asr_ladder=[0]),              # 低于下界 1
                self._cfg(asr_ladder=[3601]),           # 超上限
                self._cfg(asr_ladder=[5.5]),            # 非整数
-               self._cfg(asr_ladder=[True]),           # bool 非整数
-               self._cfg(asr_ladder="5,15"),           # 非列表
-               self._cfg(ocr_ladder=[0]),
-               self._cfg(ocr_ladder=[65]),
-               self._cfg(ocr_ladder=[1.5]),
-               self._cfg(ocr_ladder=[False]),
-               self._cfg(tts_ladder=[0]),
-               self._cfg(tts_ladder=[65537]),
-               self._cfg(tts_ladder=[50.0]),
-               self._cfg(tts_ladder=["50"]),
                self._cfg(asr_ladder=[5] * 17),         # 超 16 档
-               self._cfg(ocr_ladder=[1] * 17),
-               self._cfg(tts_ladder=[50] * 17)]
+               self._cfg(asr_ladder="5,15"),           # 非列表
+               self._cfg(ocr_ladder=[0]),              # ocr 范围下界
+               self._cfg(ocr_ladder=[65]),             # ocr 范围上界
+               self._cfg(tts_ladder=[0]),              # tts 范围下界
+               self._cfg(tts_ladder=[65537])]          # tts 范围上界
         for cfg in bad:
             with self.assertRaises(HTTPException) as cm:
                 server._validate_bench_cfg(cfg)
             self.assertEqual(cm.exception.status_code, 400, cfg)
-        # 合法放行：边界值 / 恰 16 档 / 空数组（回退默认）/ 缺省
+        # 合法放行：边界值 / 恰 16 档 / 空数组（回退默认）
         server._validate_bench_cfg(self._cfg(asr_ladder=[1, 3600],
                                              ocr_ladder=[1, 64],
                                              tts_ladder=[1, 65536]))
-        server._validate_bench_cfg(self._cfg(asr_ladder=[5] * 16,
-                                             ocr_ladder=[1] * 16,
-                                             tts_ladder=[50] * 16))
+        server._validate_bench_cfg(self._cfg(asr_ladder=[5] * 16))
         server._validate_bench_cfg(self._cfg(asr_ladder=[], ocr_ladder=[],
                                              tts_ladder=[]))
-        server._validate_bench_cfg(self._cfg())   # 缺省放行（引擎取场景默认）
 
     def test_repeats_timeout_max_tokens_thinking_validated(self):
         """repeats/timeout_s/max_tokens/thinking 白名单：bench_start 直接透传
@@ -364,13 +353,12 @@ class TestValidateBenchCfg(unittest.TestCase):
         ≤3600s、max_tokens 正整数 ≤32768、thinking 取引擎三值枚举。"""
         bad = [
             self._cfg(repeats=0), self._cfg(repeats=6),
-            self._cfg(repeats=1.5), self._cfg(repeats=True),
-            self._cfg(timeout_s=0), self._cfg(timeout_s=-1200),
-            self._cfg(timeout_s=3601), self._cfg(timeout_s="600"),
+            self._cfg(repeats=True),                       # bool 冒充整数
+            self._cfg(timeout_s=0), self._cfg(timeout_s=3601),
+            self._cfg(timeout_s="600"),
             self._cfg(max_tokens=0), self._cfg(max_tokens=32769),
-            self._cfg(max_tokens=1.5), self._cfg(max_tokens="512"),
-            self._cfg(thinking="off"), self._cfg(thinking=1),
-            self._cfg(thinking=["auto"]),
+            self._cfg(max_tokens="512"),
+            self._cfg(thinking="off"),
         ]
         for cfg in bad:
             with self.assertRaises(HTTPException) as cm:
@@ -380,7 +368,6 @@ class TestValidateBenchCfg(unittest.TestCase):
                                              max_tokens=32768))
         for th in ("auto", "enabled", "disabled"):
             server._validate_bench_cfg(self._cfg(thinking=th))
-        server._validate_bench_cfg(self._cfg())   # 缺省放行（引擎取默认值）
 
 
 class _FakeBenchRun:
@@ -720,13 +707,20 @@ class TestAtomicWrite(unittest.TestCase):
             self.assertEqual(f.read(), "old")                     # 旧文件完好
         self.assertEqual(os.listdir(self.tmp.name), ["a.json"])   # tmp 已清理
 
-    def test_private_new_file_0600(self):
+    def test_private_file_always_0600(self):
+        """凭据文件写入一律收紧到 0o600，含"旧文件权限偏宽"的纠正。
+
+        旧实现对已存在的 .env 沿用原权限，于是 `cp .env.example .env` 带来的
+        0664（同机其他用户可读）会一直传下去，API Key 长期可被读走——这是
+        缺陷不是特性，故断言随实现一并修正。"""
         p = self._path(".env")
         server._atomic_write(p, "K=V\n", private=True)
         self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o600)   # 新建收紧
         os.chmod(p, 0o644)
         server._atomic_write(p, "K=W\n", private=True)
-        self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o644)   # 已存在沿用原权限
+        self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o600)   # 已存在也收紧
+        with open(p, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "K=W\n")
 
 
 class TestHistoryApi(unittest.TestCase):

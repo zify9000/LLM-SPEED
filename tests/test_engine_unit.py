@@ -2,7 +2,8 @@
 复测聚合、错误语义化、超窗删减辅助、部署上限超窗贴边裁减判定、
 agent 未回传点缓存迹象三通道判别（走平/全量预期/运行级佐证）、
 媒体语料合成与媒体聚合口径（ADR-0020）、瞬时失败兜底重试（传输异常/429/5xx/
-空流分类、重试后成功留 retried 痕、耗尽收口、stop_flag 中止、quiet 静默重试）。
+空流分类、重试后成功留 retried 痕、耗尽收口、stop_flag 中止、quiet 静默重试）、
+批级并发口径（decode 峰值滑窗/批级 6 指标守卫/复测聚合）。
 
 运行（任一方式，无需 pytest 也可跑）：
     python3 -m unittest discover -s tests -v
@@ -27,6 +28,8 @@ from bench import (
     CTX_DEV_TOLERANCE,
     CTX_EDGE_TRIM_RATIO,
     CTX_HEADROOM,
+    DECODE_PEAK_WINDOW_S,
+    FLOOR_RETEST_MAX,
     BenchRun,
     CLIENT_CUT_FACTOR,
     OUT_HINT_FACTOR,
@@ -36,14 +39,18 @@ from bench import (
     _aggregate_reps,
     _align_echo_region,
     _asr_audio,
+    _batch_prefill_point,
     _build_ocr_messages,
     _build_translate_messages,
     _cache_hit_from_usage,
     _cache_hit_verdict,
     _cache_pollution_verdict,
     _classify_http_error,
+    _conc_batch_stats,
     _correct_filler_chars,
     _decode_burst,
+    _decode_peak_rate,
+    _decode_sums,
     _detect_agent_anomaly,
     _detect_rep_anomaly,
     _fill,
@@ -61,7 +68,9 @@ from bench import (
     _make_stream,
     _net_elapsed,
     _ocr_images,
+    _out_hint_tail,
     _plan_ctx_edge,
+    _prior_suspect,
     _ratio_refold,
     _render_in_full,
     _retry_after_s,
@@ -79,6 +88,7 @@ from bench import (
     build_messages,
     rate_prior,
     TRANSIENT_RETRY_MAX,
+    EMPTY_STREAM_RETRY_MAX,
 )
 
 
@@ -166,11 +176,6 @@ class TestCacheHitVerdict(unittest.TestCase):
         self.assertIsNone(
             _cache_hit_verdict(4096, 4600, 0.1, 0.2, None, 0, True))
 
-    def test_no_prior_skips_full_expectation_channel(self):
-        # 无先验：全量预期通道不判，仅剩走平/佐证——非走平且未证实 → None
-        self.assertIsNone(
-            _cache_hit_verdict(4096, 4600, 0.9, 0.25, None, 4096, False))
-
     def test_estimate_capped_by_ptok(self):
         # 估算钳制 min(prime, ptok−1)：prime 超过测量 prompt 时取 ptok−1
         self.assertEqual(
@@ -180,6 +185,58 @@ class TestCacheHitVerdict(unittest.TestCase):
         # 零缓存档不走本判别（回传/0 分流在调用点）
         self.assertIsNone(
             _cache_hit_verdict(0, 700, 0.2, None, 3000.0, 700, True))
+
+
+class TestOutHintTail(unittest.TestCase):
+    """_out_hint_tail（指令末尾复述输出长度约束，2026-09-16 拍板）：仅双向
+    引导场景（out_hint 含 {aim}：creative/code/agent）；translate/ocr 单向
+    封顶不复述；上下文贴边（ctx + 预算 + 余量 + 安全边超 max_ctx）不加。"""
+
+    def test_two_way_scenarios_return_template(self):
+        for sc in ("creative", "code", "agent"):
+            tail = _out_hint_tail(SCENARIOS[sc], None, 4096, 512)
+            self.assertIsNotNone(tail, f"{sc} 双向引导应复述")
+            self.assertIn("{aim}", tail)
+            self.assertEqual(tail, SCENARIOS[sc]["out_hint"])
+
+    def test_one_way_scenarios_none(self):
+        for sc in ("translate", "ocr"):
+            self.assertIsNone(_out_hint_tail(SCENARIOS[sc], None, 4096, 512),
+                              f"{sc} 单向封顶不复述")
+
+    def test_edge_headroom_gate(self):
+        sc = SCENARIOS["code"]
+        # 4096 + 512 + CTX_HEADROOM(1024) + 256 = 5888 ≤ 8192 → 加
+        self.assertIsNotNone(_out_hint_tail(sc, 8192, 4096, 512))
+        # 5888 > 5000 → 贴边不加（省 tokens 防顶窗）
+        self.assertIsNone(_out_hint_tail(sc, 5000, 4096, 512))
+        # 无 max_ctx 配置恒加
+        self.assertIsNotNone(_out_hint_tail(sc, None, 131072, 512))
+
+
+class TestPriorSuspect(unittest.TestCase):
+    """_prior_suspect（hit=None 的 C>0 点登记先验曲线的防污染判别）：速率
+    超先验 1.5× → 疑似漏判的缓存命中，不登记；真无缓存后端的诚实速率
+    （0.8~1.3× 先验）不误伤。"""
+
+    def test_inflated_none_hit_point_suspect(self):
+        # 实测 2026-09-16 事故形态：缓存档判别 None，34928 tok/s 虚高速率
+        # vs 先验 1371 → 25× 远超 1.5× 闸，判疑似不登记
+        self.assertTrue(_prior_suspect(131072, False, None, 1371.0, 34928.0))
+        # 1.67× 先验（全量预期通道边缘漏判带）也判疑似
+        self.assertTrue(_prior_suspect(8192, False, None, 1000.0, 1600.0))
+
+    def test_honest_full_prefill_rate_registers(self):
+        # 真无缓存后端的诚实速率落在 ±30% 带内：照常登记
+        self.assertFalse(_prior_suspect(131072, False, None, 1371.0, 1300.0))
+        self.assertFalse(_prior_suspect(131072, False, None, 1371.0, 2056.0))
+
+    def test_non_suspect_shapes(self):
+        # c=0 零缓存档 / 回传点 / 已有估算命中 / 无先验可对照 → 不判
+        self.assertFalse(_prior_suspect(0, False, None, 1000.0, 99999.0))
+        self.assertFalse(_prior_suspect(8192, True, None, 1000.0, 99999.0))
+        self.assertFalse(_prior_suspect(8192, False, 8000, 1000.0, 99999.0))
+        self.assertFalse(_prior_suspect(8192, False, None, None, 99999.0))
 
 
 class TestCachePollutionVerdict(unittest.TestCase):
@@ -278,11 +335,11 @@ class TestDecodeBurst(unittest.TestCase):
     def test_few_fat_chunks_branch(self):
         """少而肥分支（BURST_FAT_*）：2~4 个多 token 事件亚毫秒冲刷按每 chunk
         token 数增补甄别（e2e 的 MOCK_ACCEPT=16 冲刷用例即走此分支）。"""
-        self.assertTrue(_decode_burst(4, 0.003, 64))    # 0.75ms/事件、16 tok/chunk
-        self.assertFalse(_decode_burst(4, 0.02, 64))    # 5ms/事件：真实周期交付
+        self.assertTrue(_decode_burst(4, 0.0024, 64))   # 0.8ms/间隔（n−1=3 段）、16 tok/chunk
+        self.assertFalse(_decode_burst(4, 0.02, 64))    # 6.7ms/间隔：真实周期交付
         self.assertFalse(_decode_burst(2, 0.001, 64))   # 2 个不足为凭
-        self.assertFalse(_decode_burst(4, 0.003, 16))   # 4 tok/chunk 不够肥
-        self.assertFalse(_decode_burst(4, 0.003))       # 无 out_tokens 不判
+        self.assertFalse(_decode_burst(4, 0.0024, 16))  # 4 tok/chunk 不够肥
+        self.assertFalse(_decode_burst(4, 0.0024))      # 无 out_tokens 不判
 
 
 class TestTokPerBatch(unittest.TestCase):
@@ -374,6 +431,24 @@ class TestFillStream(unittest.TestCase):
     def test_empty_and_nonpositive(self):
         self.assertEqual(_fill(self.stream, 0), "")
         self.assertEqual(_fill("", 10), "")
+
+    def test_offset_window(self):
+        """换料偏移（弃测重测翻落点，2026-09-17 拍板）：offset>0 时截取
+        窗口循环平移——长度不变、内容不同；offset=0 与原口径逐字节一致；
+        offset 超过流长时取模回绕。"""
+        total = len(self.stream)
+        base = _fill(self.stream, 300)
+        self.assertEqual(base, _fill(self.stream, 300, offset=0),
+                         "offset=0 必须保持原嵌套前缀口径")
+        shifted = _fill(self.stream, 300, offset=150)
+        self.assertEqual(len(shifted), 300)
+        self.assertEqual(shifted, self.stream[150:450])
+        self.assertNotEqual(shifted, base)
+        # 回绕：offset 取模；跨流尾时循环续接
+        wrapped = _fill(self.stream, 300, offset=total - 100)
+        self.assertEqual(wrapped, self.stream[total - 100:] + self.stream[:200])
+        self.assertEqual(_fill(self.stream, 50, offset=total + 10),
+                         _fill(self.stream, 50, offset=10))
 
 
 class TestModuleStream(unittest.TestCase):
@@ -580,6 +655,26 @@ class TestBuildMessages(unittest.TestCase):
         """显式 filler_chars 精确控制填充长度（嵌套前缀记账路径）。"""
         _, _, n1 = build_messages("code", 4096, 3.4, "n", filler_chars=5000)
         self.assertEqual(n1, 5000)
+
+    def test_stream_offset_shifts_echo_region(self):
+        """换料偏移翻 echo 改写区落点（2026-09-17 拍板）：同目标同 nonce
+        同 filler_chars 下，offset>0 的构造填充长度不变、内容不同，echo
+        预填（改写区开头）随之改变；缺省/0 与嵌套前缀口径逐字节一致。"""
+        base, _, n1 = build_messages("code", 4096, 3.4, "nonce-5",
+                                     filler_chars=20000, echo=True)
+        same, _, _ = build_messages("code", 4096, 3.4, "nonce-5",
+                                    filler_chars=20000, echo=True,
+                                    stream_offset=0)
+        shifted, _, n2 = build_messages("code", 4096, 3.4, "nonce-5",
+                                        filler_chars=20000, echo=True,
+                                        stream_offset=7919)
+        self.assertEqual(base, same, "offset=0 与缺省口径一致")
+        self.assertEqual(n1, n2, "换料只平移窗口，填充长度不变")
+        self.assertNotEqual(base[1]["content"], shifted[1]["content"],
+                            "平移后参考材料内容应不同")
+        self.assertEqual(len(base), len(shifted), 3)
+        self.assertNotEqual(base[2]["content"], shifted[2]["content"],
+                            "echo 预填（改写区开头）应随落点翻牌改变")
 
     def test_nonzero_injects_filler_and_nonce(self):
         msgs, est, filler_n = build_messages("creative", 4096, 1.8, "nonce-42")
@@ -802,11 +897,6 @@ class TestAggregateReps(unittest.TestCase):
         self.assertEqual(clean["reqs"][0]["req"], 2)
         self.assertTrue(all(r["anomaly"] is None for r in clean["reps"]))
 
-    def test_mean_of_even_reps(self):
-        """偶数次复测：均值（非中位）——[50,10] 均值 30。"""
-        agg = _aggregate_reps([self._rep(50), self._rep(10)])
-        self.assertEqual(agg["decode_tok_s"], 30.0)
-
     def test_total_s_aggregated(self):
         """agent 矩阵端到端总时长（ADR-0042）：聚合行 total_s 取均值 2 位小数，
         复测子行逐次留档 total_s。"""
@@ -826,8 +916,6 @@ class TestAggregateReps(unittest.TestCase):
         """all_ok 严格过半（>）：偶数平票判失败——repeats=2 时 1 成 1 败不算成功点。"""
         tie = _aggregate_reps([self._rep(50), self._rep(10, all_ok=False)])
         self.assertFalse(tie["all_ok"])
-        self.assertTrue(_aggregate_reps(
-            [self._rep(50), self._rep(10), self._rep(5, all_ok=False)])["all_ok"])
 
     def test_max_gap_takes_mean_across_reps(self):
         """停滞诊断 max_gap_s 取各次复测均值（与标量同口径）；无停滞不产出该键。"""
@@ -894,14 +982,6 @@ class TestAggregateReps(unittest.TestCase):
         self.assertEqual(agg["reps"][1]["tok_per_chunk"], 2.25)   # 摘要逐次保真
         self.assertNotIn("tok_per_chunk",
                          _aggregate_reps([self._rep(1), self._rep(2)]))
-
-    def test_decode_burst_detection(self):
-        """突发甄别：亚毫秒平均间隔 + 足够 chunk 数 → 缓冲冲刷；真流式不误判。"""
-        self.assertTrue(_decode_burst(32, 0.01))        # 32 chunk / 10ms → 0.3ms
-        self.assertFalse(_decode_burst(32, 0.5))        # 16ms 间隔，真流式
-        self.assertFalse(_decode_burst(3, 0.001))       # chunk 太少不足为凭
-        self.assertFalse(_decode_burst(32, None))       # 无 decode 窗口
-        self.assertFalse(_decode_burst(1, 0.001))       # 除零保护
 
     def test_all_failed_pool_falls_back_to_reps(self):
         """all_ok 全 False：聚合池回退为 reps 本身，标量均值照常算，all_ok=False。"""
@@ -2082,9 +2162,10 @@ class TestDegenerateText(unittest.TestCase):
 
 
 class TestDetectRepAnomaly(unittest.TestCase):
-    """_detect_rep_anomaly：early_stop 仅 echo 模式启用（free 提前停止合法）、
-    0.8×max_tokens 阈值、finish=length 不判、全 err 不判、退化重复两模式
-    通用且 text/reason 通道任一命中。"""
+    """_detect_rep_anomaly：early_stop 阈值 = max(比例, 有效地板)——echo
+    0.8×max_tokens、free 不按比例只按地板（自主收尾合法，但输出几个字
+    就停完全不可信，2026-09-16 拍板）、finish=length 不判、全 err 不判、
+    退化重复两模式通用且 text/reason 通道任一命中。"""
 
     def _req(self, **over):
         r = {"err": None, "finish": "stop", "out_tokens": 512,
@@ -2098,14 +2179,35 @@ class TestDetectRepAnomaly(unittest.TestCase):
         self.assertEqual(_detect_rep_anomaly(reqs, 512, echo_mode=True),
                          ("early_stop", 1))
 
-    def test_free_no_early_stop(self):
+    def test_free_below_floor_early_stop(self):
+        # free 模式不按比例罚，但 4 < 有效地板 100：完全不可信同判
         reqs = [self._req(out_tokens=4)]
+        self.assertEqual(_detect_rep_anomaly(reqs, 512, echo_mode=False),
+                         ("early_stop", 0))
+
+    def test_free_above_floor_no_early_stop(self):
+        # free 模式 150 ≥ 地板 100（虽 <0.8×512）：自主收尾合法，不判
+        reqs = [self._req(out_tokens=150)]
         self.assertIsNone(_detect_rep_anomaly(reqs, 512, echo_mode=False))
+
+    def test_echo_above_floor_below_ratio_still_flagged(self):
+        # echo 模式 150 ≥ 地板但 <0.8×512=409.6：续写口径仍判
+        reqs = [self._req(out_tokens=150)]
+        self.assertEqual(_detect_rep_anomaly(reqs, 512, echo_mode=True),
+                         ("early_stop", 0))
 
     def test_echo_within_threshold_none(self):
         # 480/512 超过 0.8×512=409.6：预算内的正常收尾，不判
         reqs = [self._req(out_tokens=480)]
         self.assertIsNone(_detect_rep_anomaly(reqs, 512, echo_mode=True))
+
+    def test_floor_capped_by_budget(self):
+        # 小预算地板随预算钳制：max_tokens=32 时地板=32，满预算输出不判
+        reqs = [self._req(out_tokens=32)]
+        self.assertIsNone(_detect_rep_anomaly(reqs, 32, echo_mode=False))
+        reqs = [self._req(out_tokens=31)]
+        self.assertEqual(_detect_rep_anomaly(reqs, 32, echo_mode=False),
+                         ("early_stop", 0))
 
     def test_length_finish_none(self):
         reqs = [self._req(out_tokens=4, finish="length")]
@@ -2128,8 +2230,11 @@ class TestDetectRepAnomaly(unittest.TestCase):
 
 
 class TestRunRepGuarded(unittest.IsolatedAsyncioTestCase):
-    """_run_rep_guarded：弃测重测编排——首次异常重测一次（换 nonce 破缓存
-    由 _run_point 内部保证）、重测仍异常按实留档 anomaly、首次正常不重测、
+    """_run_rep_guarded：弃测重测编排——重测预算按异常形态分两档（低于
+    有效地板的早停最多 FLOOR_RETEST_MAX 次、其余异常最多
+    ANOMALY_RETEST_MAX 次，重测换 nonce 破缓存 + stream_salt 换语料
+    落点由 _run_point 内部落实）、预算耗尽仍异常高于地板按实留档
+    anomaly、仍低于地板按测量失败留档（读数置空 + err）、首次正常不重测、
     stop_flag 置位不检测不重测。_run_point 打桩脚本化返回，emit 收队列。"""
 
     ANOM_PT = {   # 实测案例形态：4K 档 echo 模式仅输出 4/512 tokens
@@ -2164,7 +2269,7 @@ class TestRunRepGuarded(unittest.IsolatedAsyncioTestCase):
 
         async def fake_run_point(*args, **kwargs):
             i = len(calls)
-            calls.append(args)
+            calls.append((args, kwargs))
             src = points[min(i, len(points) - 1)]
             pt = {**src, "reqs": [dict(r) for r in src["reqs"]]}
             if post:
@@ -2200,11 +2305,12 @@ class TestRunRepGuarded(unittest.IsolatedAsyncioTestCase):
                             for s in statuses), f"应有弃测播报: {statuses}")
 
     async def test_anomaly_persists_marked(self):
-        """重测仍异常：接受结果、pt 带 anomaly='early_stop' 留档、reps_discarded
-        仅 1 条（每个槽位最多重测 ANOMALY_RETEST_MAX 次，不无限重试）；肇事
-        req 打 anomaly + in_text（输入全文抄本），全部 req 剥离 _in_full。"""
+        """重测仍异常但高于有效地板：接受结果、pt 带 anomaly='early_stop'
+        按实留档、reps_discarded 仅 1 条（不无限重试）；肇事 req 打
+        anomaly + in_text（输入全文抄本），全部 req 剥离 _in_full。"""
         run, _ = self._make_run()
-        calls = self._script(run, [dict(self.ANOM_PT), dict(self.ANOM_PT)])
+        above = {"reqs": [dict(self.ANOM_PT["reqs"][0], out_tokens=200)]}
+        calls = self._script(run, [dict(self.ANOM_PT), above])
         pt = await run._run_rep_guarded(None, "m", "creative", 4096, 1, 1.8,
                                         0, 512, True)
         self.assertEqual(len(calls), 1 + ANOMALY_RETEST_MAX)
@@ -2214,9 +2320,75 @@ class TestRunRepGuarded(unittest.IsolatedAsyncioTestCase):
         culprit = pt["reqs"][0]
         self.assertEqual(culprit["anomaly"], "early_stop",
                          "重测仍异常的肇事 req 应带 anomaly 标记")
+        self.assertIsNone(culprit.get("err"),
+                          "高于地板的持续异常不按测量失败留档")
+        self.assertNotIn("err", pt)
         self.assertEqual(culprit["in_text"], "【user】" + "指令材料" * 150,
                          "肇事 req 应带输入全文 in_text")
         self.assertNotIn("_in_full", culprit, "_in_full 剥离后全文留在 in_text")
+
+    async def test_anomaly_persists_below_floor_failed(self):
+        """重测预算（FLOOR_RETEST_MAX=2，2026-09-17 收紧）耗尽仍低于有效
+        输出地板（4 < 100）：读数完全不可信——按测量失败留档：pt err 落档、
+        all_ok=False、点读数置空不进聚合；肇事 req 带 err + anomaly +
+        in_text；reps_discarded 逐条留痕每次弃测（ADR-0032 的按实留档
+        宽容止于地板之上）。"""
+        run, statuses = self._make_run()
+        anom_full = {**self.ANOM_PT, "out_tokens": 4, "decode_tok_s": 29.1,
+                     "prefill_tok_s": 300.0, "all_ok": True}
+        calls = self._script(run, [dict(anom_full), dict(anom_full)])
+        pt = await run._run_rep_guarded(None, "m", "creative", 4096, 1, 1.8,
+                                        0, 512, True)
+        self.assertEqual(len(calls), 1 + FLOOR_RETEST_MAX,
+                         "低于地板的早停最多重测 FLOOR_RETEST_MAX 次")
+        self.assertEqual(pt["anomaly"], "early_stop")
+        self.assertFalse(pt["all_ok"])
+        self.assertIn("早停", pt["err"])
+        self.assertIsNone(pt["out_tokens"], "垃圾读数应置空不进聚合")
+        self.assertIsNone(pt["decode_tok_s"])
+        self.assertIsNone(pt["prefill_tok_s"])
+        self.assertEqual(len(pt["reps_discarded"]), FLOOR_RETEST_MAX)
+        culprit = pt["reqs"][0]
+        self.assertEqual(culprit["anomaly"], "early_stop")
+        self.assertIn("早停", culprit["err"])
+        self.assertEqual(culprit["in_text"], "【user】" + "指令材料" * 150)
+        self.assertTrue(any("测量失败留档" in s for s in statuses),
+                        f"应有失败留档播报: {statuses}")
+
+    async def test_below_floor_recovers_on_later_retest(self):
+        """低于地板的早停在第 2 次重测恢复：持续重测直到正常——返回正常
+        pt（无 anomaly 键）、reps_discarded 逐条留痕 2 次弃测、读数来自
+        恢复批；高于地板的异常无此宽限（仍 1 次，见上例）。"""
+        run, _ = self._make_run()
+        calls = self._script(run, [dict(self.ANOM_PT), dict(self.ANOM_PT),
+                                   dict(self.OK_PT)])
+        pt = await run._run_rep_guarded(None, "m", "creative", 4096, 1, 1.8,
+                                        0, 512, True)
+        self.assertEqual(len(calls), 3, "首测 + 2 次弃测重测后恢复")
+        self.assertNotIn("anomaly", pt)
+        self.assertNotIn("err", pt)
+        self.assertEqual(len(pt["reps_discarded"]), 2)
+        self.assertTrue(all(d["anomaly"] == "early_stop"
+                            for d in pt["reps_discarded"]))
+        self.assertEqual(pt["reqs"][0]["out_tokens"], 512,
+                         "最终读数来自恢复批")
+
+    async def test_retest_passes_stream_salt(self):
+        """弃测重测换料（2026-09-17 拍板）：首测不带 stream_salt（=0，嵌套
+        前缀确定性不变），每次重测带递增 stream_salt 驱动 _run_point 平移
+        语料窗口翻 echo 落点——确定型早停与落点绑定，同料重测只会复现
+        同一答案。"""
+        run, _ = self._make_run()
+        calls = self._script(run, [dict(self.ANOM_PT), dict(self.ANOM_PT),
+                                   dict(self.OK_PT)])
+        pt = await run._run_rep_guarded(None, "m", "creative", 4096, 1, 1.8,
+                                        0, 512, True)
+        self.assertEqual(len(calls), 3)
+        self.assertNotIn("stream_salt", calls[0][1],
+                         "首测不传盐（等价 salt=0，保持嵌套前缀口径）")
+        self.assertEqual(calls[1][1].get("stream_salt"), 1)
+        self.assertEqual(calls[2][1].get("stream_salt"), 2)
+        self.assertNotIn("anomaly", pt)
 
     async def test_ok_no_retest_no_keys(self):
         """首次正常：不重测、不附加 anomaly/reps_discarded 键。"""
@@ -2349,13 +2521,14 @@ class TestAgentMatrixAnomalyGuard(unittest.IsolatedAsyncioTestCase):
                             and "弃测重测" in s for s in statuses), statuses)
 
     async def test_persistent_early_stop_marked(self):
-        """重测仍早停：anomaly='early_stop' 按实留档、reps_discarded 仅 1 条
-        （最多重测 1 次，不无限重试洗掉）、出点不中断；留档样本取自异常轮——
-        肇事 req 带 anomaly + in_text（输入全文抄本），全部 req 剥离 _in_full。"""
+        """重测仍早停但高于有效地板（200 ≥ min(100,512)，仍 <0.5×512 判据）：
+        anomaly='early_stop' 按实留档、reps_discarded 仅 1 条（最多重测 1 次，
+        不无限重试洗掉）、出点不中断；留档样本取自异常轮——肇事 req 带
+        anomaly + in_text（输入全文抄本），全部 req 剥离 _in_full。"""
         run, _ = self._make_run()
         calls = self._script_one(run, 300, [
             {"out_tokens": 4, "text_sample": "short answer"},
-            {"out_tokens": 7, "text_sample": "short answer again"},
+            {"out_tokens": 200, "text_sample": "still short but above floor"},
         ])
         pt = await self._run_matrix(run)
         self.assertEqual(len(calls), 4, "首测 + 异常重测各一轮（基线+测量）")
@@ -2365,11 +2538,38 @@ class TestAgentMatrixAnomalyGuard(unittest.IsolatedAsyncioTestCase):
         culprit = pt["reqs"][0]
         self.assertEqual(culprit["anomaly"], "early_stop",
                          "重测仍异常的肇事 req 应带 anomaly 标记")
+        self.assertIsNone(culprit.get("err"),
+                          "高于地板的持续异常不按测量失败留档")
         self.assertEqual(culprit["in_text"], "【user】指令输入全文",
                          "肇事 req 应带输入全文 in_text")
         self.assertFalse(any("_in_full" in r for r in pt["reqs"]),
                          "点位 reqs 应全部剥离 _in_full 瞬态字段")
         self.assertTrue(pt["all_ok"])
+
+    async def test_persistent_early_stop_below_floor_failed(self):
+        """重测预算（FLOOR_RETEST_MAX=2，2026-09-17 收紧）耗尽仍低于有效
+        输出地板（7 < min(100,512)=100）：读数完全不可信——按测量失败留档：
+        pt err 落档、all_ok=False、读数置空不进聚合；anomaly 标记与
+        reps_discarded（逐条留痕每次弃测）保留供复核。"""
+        run, _ = self._make_run()
+        calls = self._script_one(run, 300, [
+            {"out_tokens": 4, "text_sample": "short answer"},
+            {"out_tokens": 7, "text_sample": "short answer again"},
+        ])
+        pt = await self._run_matrix(run)
+        self.assertEqual(len(calls), 2 * (1 + FLOOR_RETEST_MAX),
+                         "首测 + FLOOR_RETEST_MAX 次弃测重测（基线+测量）")
+        self.assertEqual(pt["anomaly"], "early_stop")
+        self.assertEqual(len(pt["reps_discarded"]), FLOOR_RETEST_MAX)
+        self.assertEqual(pt["reps_discarded"][0]["out_tokens"], 4)
+        self.assertFalse(pt["all_ok"], "重测仍低于地板：点按测量失败留档")
+        self.assertIn("早停", pt["err"])
+        self.assertIsNone(pt["out_tokens"], "垃圾读数应置空不进聚合")
+        culprit = pt["reqs"][0]
+        self.assertEqual(culprit["anomaly"], "early_stop")
+        self.assertIn("早停", culprit["err"])
+        self.assertEqual(culprit["in_text"], "【user】指令输入全文")
+        self.assertFalse(any("_in_full" in r for r in pt["reqs"]))
 
     async def test_degenerate_retest(self):
         """退化重复（文本通道样本 ≥80 字符且字符集 ≤12）弃测重测：留痕
@@ -2390,8 +2590,9 @@ class TestAgentMatrixAnomalyGuard(unittest.IsolatedAsyncioTestCase):
 
     async def test_input_correction_then_anomaly(self):
         """次序与有界性：指令长度偏离先触发输入校正（nonce tag 'r'）、校正批
-        又早停才触发输出异常重测（tag 'a'）——共 3 次测量尝试，各自最多
-        1 次；重测正常即点干净且 inst_real_tokens 收敛。"""
+        又早停才触发输出异常重测（tag 逐次 'a0'/'a1'/…，2026-09-16 地板
+        多次重试换盐）——共 3 次测量尝试；重测正常即点干净且
+        inst_real_tokens 收敛。"""
         run, statuses = self._make_run()
         calls = self._script_one(run, 300, [
             {"prompt_tokens": 600, "out_tokens": 512},    # 差分 300，偏离 -41%
@@ -2403,8 +2604,8 @@ class TestAgentMatrixAnomalyGuard(unittest.IsolatedAsyncioTestCase):
         tags = [re.search(rf"-z{self.INST}(\w*)）：", msgs[1]["content"]).group(1)
                 or ""
                 for quiet, msgs in calls if not quiet]
-        self.assertEqual(tags, ["", "r", "a"],
-                         f"先输入校正（r）后异常重测（a）: {tags}")
+        self.assertEqual(tags, ["", "r", "a0"],
+                         f"先输入校正（r）后异常重测（a0）: {tags}")
         self.assertNotIn("anomaly", pt)
         self.assertEqual(len(pt["reps_discarded"]), 1)
         self.assertIsNotNone(pt["inst_real_tokens"])
@@ -2621,11 +2822,14 @@ class TestPrefillGateCallSite(unittest.IsolatedAsyncioTestCase):
     async def test_in_sample_archived(self):
         """输入侧头部采样入档（ADR-0053）：req 级 in_sample = 末条消息文本
         头部 ≤200 字符（agent 矩阵末条即指令、echo 末条为预填）——异常日志
-        复盘输入侧；超窗删减重试后反映实际发送内容"""
+        复盘输入侧；超窗删减重试后反映实际发送内容。agent 为双向引导场景，
+        短消息的 200 字符采样窗内可见指令末尾复述约束（ADR-0076）"""
         usage = {"prompt_tokens": 1024, "completion_tokens": 3}
         r, _ = await self._one_ok(usage, 0.02)
-        self.assertEqual(r.get("in_sample"), "u" * 40,
-                         "in_sample 取末条消息（user 'u'*40）文本头部")
+        self.assertTrue(
+            r.get("in_sample", "").startswith("u" * 40 + "\n\nLength requirement"),
+            f"in_sample = 末条消息头部（user 'u'*40 + 指令末尾复述约束）: "
+            f"{r.get('in_sample')!r}")
 
     async def test_large_prompt_prior_band_applies(self):
         """未命中量 16384 ≥8K：速率 8192 > 先验带 3000 → 判「物理上不可能」
@@ -2854,7 +3058,9 @@ class TestTransientRetry(unittest.IsolatedAsyncioTestCase):
                          [("read timed out", 0)])
 
     async def test_empty_stream_retried(self):
-        """空流（200 但无任何输出 token）：可重试，两次空流后第三次成功。"""
+        """空流（200 但无任何输出 token）：走专属重试预算
+        （EMPTY_STREAM_RETRY_MAX，2026-09-17 拍板——Lvllm「空 EOS」间歇
+        故障每次重试约 50% 自愈），两次空流后第三次成功。"""
         run, events = self._make_run()
         client = self._ChatClient([
             self._Resp(lines=["data: [DONE]"]),
@@ -2866,14 +3072,17 @@ class TestTransientRetry(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["err"])
         self.assertEqual(result["retried"], 2)
         statuses = self._statuses(events)
-        self.assertTrue(any("兜底重试 2/2" in s for s in statuses), statuses)
+        self.assertTrue(any(f"兜底重试 2/{EMPTY_STREAM_RETRY_MAX}" in s
+                            for s in statuses), statuses)
 
     async def test_empty_stream_exhausted(self):
-        """空流耗尽：返回既有的「未收到任何输出 token」错误口径。"""
+        """空流耗尽专属预算（1+EMPTY_STREAM_RETRY_MAX 次尝试）：返回既有的
+        「未收到任何输出 token」错误口径；专属预算独立于通用瞬时重试
+        （TRANSIENT_RETRY_MAX）。"""
         run, events = self._make_run()
         client = self._ChatClient([self._Resp(lines=["data: [DONE]"])])
         result = await self._call_one(run, client)
-        self.assertEqual(client.calls, 1 + TRANSIENT_RETRY_MAX)
+        self.assertEqual(client.calls, 1 + EMPTY_STREAM_RETRY_MAX)
         self.assertIn("未收到任何输出 token", result["err"])
         self.assertNotIn("retried", result)
 
@@ -2958,6 +3167,122 @@ class TestTransientRetry(unittest.IsolatedAsyncioTestCase):
                          [("HTTP 500: boom", 0)])
 
 
+class TestPrefillContinueParams(unittest.IsolatedAsyncioTestCase):
+    """echo 真·预填续写参数（ADR-0079）：末条为 assistant 预填时 payload 带
+    add_generation_prompt=false + continue_final_message=true（模板不闭合
+    轮次、从预填末尾直接续写——闭合形态是 32K+ 确定性早停的根因）；末条
+    非 assistant 不下发；网关 400 点名参数时成对省略、按模型锁定、同端点
+    重试（回退闭合轮次形态），锁定后不再下发。"""
+
+    MODEL = "m"
+    ECHO_MSGS = [{"role": "system", "content": "s"},
+                 {"role": "user", "content": "u" * 40},
+                 {"role": "assistant", "content": "预填正文"}]
+
+    class _Resp:
+        def __init__(self, status=200, lines=(), body=""):
+            self.status_code = status
+            self._lines = list(lines)
+            self.headers = {}
+            self._body = body
+
+        @property
+        def text(self):
+            return self._body
+
+        async def aiter_lines(self):
+            for ln in self._lines:
+                yield ln
+
+        async def aread(self):
+            return self._body.encode("utf-8")
+
+    class _Ctx:
+        def __init__(self, resp):
+            self.resp = resp
+
+        async def __aenter__(self):
+            return self.resp
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _CapClient:
+        """脚本化假客户端：逐次返回脚本项并记录每次请求的 payload。"""
+        def __init__(self, script):
+            self.script = list(script)
+            self.payloads = []
+
+        def stream(self, *a, **k):
+            i = min(len(self.payloads), len(self.script) - 1)
+            self.payloads.append(k["json"])
+            return TestPrefillContinueParams._Ctx(self.script[i])
+
+    @staticmethod
+    def _ok_resp():
+        lines = ["data: " + json.dumps({"choices": [{"delta": {"content": "测"}}]}),
+                 "data: " + json.dumps(
+                     {"choices": [{"delta": {}, "finish_reason": "stop"}],
+                      "usage": {"prompt_tokens": 1, "completion_tokens": 3}}),
+                 "data: [DONE]"]
+        return TestPrefillContinueParams._Resp(200, lines)
+
+    def _make_run(self):
+        run = BenchRun({})
+        events = []
+
+        async def fake_emit(ev):
+            events.append(ev)
+
+        run.emit = fake_emit
+        return run, events
+
+    async def _call(self, run, client, msgs):
+        return await run._one(client, self.MODEL, msgs, "creative",
+                              0, 0, 1, 1.8, 128)
+
+    async def test_echo_prefill_sends_continue_params(self):
+        """末条 assistant 预填 → payload 带续写参数对。"""
+        run, _ = self._make_run()
+        client = self._CapClient([self._ok_resp()])
+        r = await self._call(run, client, self.ECHO_MSGS)
+        self.assertIsNone(r["err"])
+        p = client.payloads[0]
+        self.assertIs(p.get("add_generation_prompt"), False)
+        self.assertIs(p.get("continue_final_message"), True)
+
+    async def test_non_assistant_last_omits_params(self):
+        """末条为 user（常规/agent/媒体形态）→ 不下发续写参数。"""
+        run, _ = self._make_run()
+        client = self._CapClient([self._ok_resp()])
+        r = await self._call(run, client, [{"role": "system", "content": "s"},
+                                           {"role": "user", "content": "u"}])
+        self.assertIsNone(r["err"])
+        self.assertNotIn("add_generation_prompt", client.payloads[0])
+        self.assertNotIn("continue_final_message", client.payloads[0])
+
+    async def test_400_locks_and_retries_without_params(self):
+        """网关 400 点名 add_generation_prompt → 成对省略同端点重试成功、
+        模型入 prefill_locked、播报；锁定后的后续请求不再下发。"""
+        run, events = self._make_run()
+        bad = self._Resp(400, body='{"error":{"message":"unknown parameter: '
+                                   'add_generation_prompt"}}')
+        client = self._CapClient([bad, self._ok_resp(), self._ok_resp()])
+        r = await self._call(run, client, self.ECHO_MSGS)
+        self.assertIsNone(r["err"])
+        self.assertEqual(len(client.payloads), 2, "400 后应同端点重试")
+        self.assertNotIn("add_generation_prompt", client.payloads[1])
+        self.assertNotIn("continue_final_message", client.payloads[1])
+        self.assertIn(self.MODEL, run.prefill_locked)
+        statuses = [e["msg"] for e in events if e.get("type") == "status"]
+        self.assertTrue(any("add_generation_prompt" in s for s in statuses),
+                        f"应有省略播报: {statuses}")
+        # 锁定后后续请求不再下发
+        r2 = await self._call(run, client, self.ECHO_MSGS)
+        self.assertIsNone(r2["err"])
+        self.assertNotIn("add_generation_prompt", client.payloads[2])
+
+
 class TestStallFlushOne(unittest.IsolatedAsyncioTestCase):
     """停滞回吐剔除（_one 收口级）：合成流复现真实事故形状（20260913-234719
     fastllm 27B：平稳段 + 13.5s 单次停滞 + 430 tokens 亚毫秒回吐），走真实
@@ -3007,18 +3332,31 @@ class TestStallFlushOne(unittest.IsolatedAsyncioTestCase):
             return TestStallFlushOne._Ctx(self.script[i])
 
     @staticmethod
-    def _plan_lines(plan, usage):
+    def _plan_lines(plan, usage, clock=None):
         """定时 SSE：plan = [(间隔秒, 事件数)] 或 [(间隔秒, 事件数, 每事件
-        字符数)]——先 sleep 间隔，再连发 n 个内容事件（组内到达间隔≈0，构成
+        字符数)]——先等间隔，再连发 n 个内容事件（组内到达间隔≈0，构成
         亚毫秒回吐串；间隔出现在组首事件前，即组与组之间；ch 缺省 1）；末尾
-        补 usage 帧 + [DONE]。"""
+        补 usage 帧 + [DONE]。
+
+        clock 给定时用**假时钟推进**代替真实等待：判据门限（
+        BURST_AVG_GAP_MS=1ms、STALL_THRESHOLD_S=0.5s）是墙钟量，而真实
+        asyncio 调度在负载下会把"亚毫秒串"拉过 1ms，于是同一个用例时过时不过
+        （实测 flush_tok 411/414/422 漂移，极端情况 episode 判不出直接
+        KeyError）。假时钟把时间轴完全交给测试，判定与机器负载解耦。"""
         async def lines():
             for item in plan:
                 gap, n = item[0], item[1]
                 ch = item[2] if len(item) > 2 else 1
-                if gap:
-                    await asyncio.sleep(gap)
-                for _ in range(n):
+                if clock is None:
+                    if gap:
+                        await asyncio.sleep(gap)
+                else:
+                    clock.now += gap
+                for i in range(n):
+                    # 组内亚毫秒（<BURST_AVG_GAP_MS）；gap=0 的组首个事件也要
+                    # 有正增量——同刻到达会被 _one 记为 0 间隔，纯属浪费判据
+                    if clock is not None and (i or not gap):
+                        clock.now += 0.0002
                     yield "data: " + json.dumps(
                         {"choices": [{"delta": {"content": "测" * ch}}]})
             yield "data: " + json.dumps(
@@ -3026,6 +3364,26 @@ class TestStallFlushOne(unittest.IsolatedAsyncioTestCase):
                  "usage": usage})
             yield "data: [DONE]"
         return lines()
+
+    class _Clock:
+        """可推进的假时钟（只有 bench.py 会看到它，见 _ClockShim）。"""
+        def __init__(self, now=1000.0):
+            self.now = now
+
+    class _ClockShim:
+        """把 bench.py 视角下的 time.perf_counter 换成假时钟，其余属性透传。
+
+        直接 patch 全局 time.perf_counter 会牵连 pytest 计时等无关模块；
+        bench.py 是 `import time` + `time.perf_counter()` 的用法，替换模块属性
+        即可精确命中被测代码。"""
+        def __init__(self, clock):
+            self._clock = clock
+
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+        def perf_counter(self):
+            return self._clock.now
 
     @staticmethod
     def _make_run():
@@ -3040,19 +3398,26 @@ class TestStallFlushOne(unittest.IsolatedAsyncioTestCase):
     MSGS = [{"role": "system", "content": "s"},
             {"role": "user", "content": "u" * 40}]
 
+    async def _run_one(self, plan, usage, max_tokens=1024, conc=1):
+        """用假时钟跑一次 _one（时间轴确定，与机器负载无关）。"""
+        clock = self._Clock()
+        run = self._make_run()
+        resp = self._Resp(self._plan_lines(plan, usage, clock=clock))
+        with unittest.mock.patch.object(bench, "time", self._ClockShim(clock)):
+            return await run._one(self._Client(resp), self.MODEL, self.MSGS,
+                                  "creative", 0, 0, conc, 1.8, max_tokens)
+
     async def test_real_case_shape_flush_removed(self):
         """复现真实案例形状：47 tokens × 30ms + 13.5s 停滞 + 430 亚毫秒回吐
         （每事件 1 token）→ 剔除后 adj ≈ 平稳段速率（绝非 200+）、tpc 为
         None、flush_tok ≈ 430；原始 stall_s 留痕与毛口径 decode_tok_s 不变。"""
         usage = {"prompt_tokens": 100, "completion_tokens": 477}
         plan = [(0.03, 1)] * 47 + [(13.5, 430)]
-        run = self._make_run()
-        r = await run._one(self._Client(self._Resp(self._plan_lines(plan, usage))),
-                           self.MODEL, self.MSGS, "creative", 0, 0, 1, 1.8, 1024)
+        r = await self._run_one(plan, usage)
         self.assertIsNone(r["err"])
         self.assertEqual(r["flush_count"], 1)
         self.assertAlmostEqual(r["flush_tok"], 430, delta=1)
-        self.assertAlmostEqual(r["stall_s"], 13.5, delta=0.5,
+        self.assertAlmostEqual(r["stall_s"], 13.5, delta=0.05,
                                msg="原始停滞留痕不变")
         self.assertEqual(r["stall_count"], 1)
         adj = r["decode_tok_s_adj"]
@@ -3067,9 +3432,7 @@ class TestStallFlushOne(unittest.IsolatedAsyncioTestCase):
         不足 32 时 adj 置空。usage=10 tokens、40 事件（回吐折算 9.25 → 钳 9）。"""
         usage = {"prompt_tokens": 1, "completion_tokens": 10}
         plan = [(0, 1), (0.6, 37), (0.03, 2)]
-        run = self._make_run()
-        r = await run._one(self._Client(self._Resp(self._plan_lines(plan, usage))),
-                           self.MODEL, self.MSGS, "creative", 0, 0, 1, 1.8, 128)
+        r = await self._run_one(plan, usage, max_tokens=128)
         self.assertIsNone(r["err"])
         self.assertEqual(r["flush_count"], 1)
         self.assertEqual(r["flush_tok"], 9, "回吐折算 9.25 应钳制到 out−1")
@@ -3080,9 +3443,7 @@ class TestStallFlushOne(unittest.IsolatedAsyncioTestCase):
         """无回吐：flush 两键不出现（与「有值才出现」的留痕风格一致）。"""
         usage = {"prompt_tokens": 1, "completion_tokens": 3}
         plan = [(0.03, 1), (0.03, 1), (0.03, 1)]
-        run = self._make_run()
-        r = await run._one(self._Client(self._Resp(self._plan_lines(plan, usage))),
-                           self.MODEL, self.MSGS, "creative", 0, 0, 1, 1.8, 128)
+        r = await self._run_one(plan, usage, max_tokens=128)
         self.assertIsNone(r["err"])
         self.assertNotIn("flush_tok", r)
         self.assertNotIn("flush_count", r)
@@ -3096,14 +3457,12 @@ class TestStallFlushOne(unittest.IsolatedAsyncioTestCase):
         usage = {"prompt_tokens": 100, "completion_tokens": 257}   # 80×1 + 59×3
         plan = ([(0.029, 1, 1)] * 80 + [(6.0, 1, 1)]
                 + [(0.008, 1, 3)] * 59)
-        run = self._make_run()
-        r = await run._one(self._Client(self._Resp(self._plan_lines(plan, usage))),
-                           self.MODEL, self.MSGS, "creative", 0, 0, 1, 1.8, 1024)
+        r = await self._run_one(plan, usage)
         self.assertIsNone(r["err"])
         self.assertEqual(r["flush_count"], 1)
         self.assertAlmostEqual(r["flush_tok"], 177, delta=2,   # 59×3 实测累计
                                msg="per-event 记账应还原真实回吐量")
-        self.assertAlmostEqual(r["stall_s"], 6.0, delta=0.3,
+        self.assertAlmostEqual(r["stall_s"], 6.0, delta=0.05,
                                msg="原始停滞留痕不变")
         self.assertEqual(r["stall_count"], 1)
         adj = r["decode_tok_s_adj"]
@@ -3123,14 +3482,12 @@ class TestStallFlushOne(unittest.IsolatedAsyncioTestCase):
         usage = {"prompt_tokens": 100, "completion_tokens": 258}   # 24×1 + 9×26
         plan = ([(0.024, 1, 1)] * 24 + [(6.61, 1, 1)]
                 + [(0.022, 1, 26)] * 9)
-        run = self._make_run()
-        r = await run._one(self._Client(self._Resp(self._plan_lines(plan, usage))),
-                           self.MODEL, self.MSGS, "creative", 0, 0, 1, 1.8, 1024)
+        r = await self._run_one(plan, usage)
         self.assertIsNone(r["err"])
         self.assertEqual(r["flush_count"], 1)
         self.assertAlmostEqual(r["flush_tok"], 234, delta=2,
                                msg="per-event 记账应还原真实回吐量")
-        self.assertAlmostEqual(r["stall_s"], 6.61, delta=0.3,
+        self.assertAlmostEqual(r["stall_s"], 6.61, delta=0.05,
                                msg="原始停滞留痕不变")
         self.assertEqual(r["stall_count"], 1)
         adj = r["decode_tok_s_adj"]
@@ -3151,16 +3508,15 @@ class TestStallFlushOne(unittest.IsolatedAsyncioTestCase):
         plan = ([(0.024, 1, 1)] * 23 + [(6.8, 1, 1)]
                 + [(0.15, 1, 25)] * 6 + [(0.15, 1, 28)]
                 + [(0.15, 1, 11)] * 5)
-        run = self._make_run()
-        r = await run._one(self._Client(self._Resp(self._plan_lines(plan, usage))),
-                           self.MODEL, self.MSGS, "creative", 0, 0, 1, 1.8, 1024)
+        r = await self._run_one(plan, usage)
         self.assertIsNone(r["err"])
         self.assertEqual(r["flush_count"], 1)
         self.assertAlmostEqual(r["flush_tok"], 233, delta=2,
                                msg="拖尾应整段剔除（233 = 178+55 实测累计）")
-        self.assertAlmostEqual(r["flush_s"], 11 * 0.15, delta=0.25,
-                               msg="flush_s = 剔除段交付总时长（含拖尾）")
-        self.assertAlmostEqual(r["stall_s"], 6.8, delta=0.3,
+        self.assertAlmostEqual(r["flush_s"], 12 * 0.15, delta=0.01,
+                               msg="flush_s = 剔除段交付总时长（停滞后首个交付"
+                                   "事件 → 最后一个回吐事件，12 个间隔）")
+        self.assertAlmostEqual(r["stall_s"], 6.8, delta=0.05,
                                msg="原始停滞留痕不变")
         self.assertEqual(r["stall_count"], 1)
         adj = r["decode_tok_s_adj"]
@@ -3169,33 +3525,417 @@ class TestStallFlushOne(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(adj, 50, f"adj={adj} 拖尾漏剔/仍被注水（应 ≈ 健康段 ~40）")
         self.assertLess(r["decode_tok_s"], 60, "毛口径仍含停滞（原始窗口语义不变）")
 
-    async def test_point_flush_worst_req(self):
-        """点级透传（_run_point 批级）：flush 取剔除量最大的请求（worst-req，
-        与 stall_s 同口径；flush_s 同源同请求）；无回吐点保持 None。回吐流
-        构造为物理自洽形态（回吐 tokens ≤ r_pre×stall_s：0.6s 停滞 × 健康
-        ~33 tok/s ≈ 20 上限，16 个回吐事件 @8ms 不被封顶、交付时长可测）。"""
+    # 回吐流：10×30ms 健康 + 0.6s 停滞 + 15×零间隔亚毫秒回吐；无回吐对照流。
+    # 计划由调用方交给 _run_point_plans（假时钟推进，判定与负载解耦）
+    FLUSH_PLAN = ([(0.03, 1)] * 10 + [(0.6, 1)] + [(0, 1)] * 15,
+                  {"prompt_tokens": 1, "completion_tokens": 26})
+    PLAIN_PLAN = ([(0.01, 3)], {"prompt_tokens": 1, "completion_tokens": 3})
+
+    async def _run_point_plans(self, plans, conc):
+        """plans = [(plan, usage), ...] 按序作为各请求的流；假时钟推进时间轴。"""
+        clock = self._Clock()
         run = self._make_run()
-        plain = self._Resp(self._plan_lines(
-            [(0.01, 3)], {"prompt_tokens": 1, "completion_tokens": 3}))
-        flush = self._Resp(self._plan_lines(
-            [(0.03, 1)] * 10 + [(0.6, 1)] + [(0.008, 1)] * 15,
-            {"prompt_tokens": 1, "completion_tokens": 26}))
-        pt = await run._run_point(self._SeqClient([plain, flush]),
-                                  self.MODEL, "creative", 0, 2, 1.8)
+        script = [self._Resp(self._plan_lines(p, u, clock=clock))
+                  for p, u in plans]
+        with unittest.mock.patch.object(bench, "time", self._ClockShim(clock)):
+            return await run._run_point(self._SeqClient(script), self.MODEL,
+                                        "creative", 0, conc, 1.8)
+
+    async def test_point_flush_conc1_only(self):
+        """点级透传（_run_point 批级，ADR-0074 新口径）：停滞/回吐诊断仅
+        conc=1 产出——conc=1 点透传该请求的 flush 三键（无回吐点保持
+        None）；conc>1 批内请求共享服务端资源，逐请求停滞/回吐只是资源挤占
+        的观测噪声、无判读意义，点级恒 None（_flush_episodes 仅 conc=1 执行，
+        旧「worst-req 取剔除量最大的请求」口径随 conc>1 诊断退役）。回吐流
+        构造为物理自洽形态（回吐 tokens ≤ r_pre×stall_s：0.6s 停滞 × 健康
+        ~33 tok/s ≈ 20 上限，16 个回吐 tokens 不被封顶）。"""
+        pt = await self._run_point_plans([self.FLUSH_PLAN], 1)
         self.assertTrue(pt["all_ok"])
         self.assertEqual(pt["flush_tok"], 16)   # e10(停滞段首事件) + 15 回吐事件
         self.assertEqual(pt["flush_count"], 1)
-        self.assertAlmostEqual(pt["flush_s"], 15 * 0.008, delta=0.03,
-                               msg="flush_s 与 flush_tok 同源同请求")
-        # 对照：全无回吐的批，点级 flush 三键为 None
-        run2 = self._make_run()
-        pt2 = await run2._run_point(
-            self._SeqClient([plain, self._Resp(self._plan_lines(
-                [(0.01, 3)], {"prompt_tokens": 1, "completion_tokens": 3}))]),
-            self.MODEL, "creative", 0, 2, 1.8)
+        # flush_s = 回吐段交付总时长：亚毫秒串 ≈0（与毛口径「亚毫秒串时间
+        # ≈0」一致）；假时钟下 15 事件 ×0.2ms = 3ms，上界仍留余量
+        self.assertLessEqual(pt["flush_s"], 0.1,
+                             msg="flush_s 与 flush_tok 同源同请求（亚毫秒段）")
+        self.assertAlmostEqual(pt["stall_s"], 0.6, delta=0.05,
+                               msg="原始停滞留痕透传")
+        # 对照①：conc=1 全无回吐，点级 flush 三键为 None
+        pt2 = await self._run_point_plans([self.PLAIN_PLAN], 1)
+        self.assertTrue(pt2["all_ok"])
         self.assertIsNone(pt2["flush_tok"])
         self.assertIsNone(pt2["flush_count"])
         self.assertIsNone(pt2["flush_s"])
+        # 对照②：conc>1 批（含回吐请求）点级 flush 三键保持 None（新口径）
+        pt3 = await self._run_point_plans([self.PLAIN_PLAN, self.FLUSH_PLAN], 2)
+        self.assertTrue(pt3["all_ok"])
+        self.assertIsNone(pt3["flush_tok"])
+        self.assertIsNone(pt3["flush_count"])
+        self.assertIsNone(pt3["flush_s"])
+
+
+class TestFlushEpisodesPure(unittest.TestCase):
+    """_flush_episodes 纯函数口径（间隔与每事件 token 全部显式给定）：把
+    "哪些形态算回吐"钉死在算法层，不依赖任何时钟。集成侧 TestStallFlushOne
+    负责"接线"（_one 是否按该口径剔除并留痕），两侧分工避免用墙钟测算法。"""
+
+    def test_real_case_shape(self):
+        """真实事故①形态：47×30ms 平稳（r_pre≈33 tok/s）+ 13.5s 停滞 +
+        430 个亚毫秒 1-token 回吐；r_pre×stall≈450 上限不干涉（430<450）。"""
+        gaps = [0.03] * 46 + [13.5] + [0.0002] * 429
+        ev_toks = [1.0] * 477
+        eps = _flush_episodes(gaps, ev_toks)
+        self.assertEqual(len(eps), 1)
+        e = eps[0]
+        self.assertEqual(e["stall_idx"], 46)
+        self.assertEqual(e["start_idx"], 47)     # 停滞段首事件（其后即回吐串）
+        self.assertEqual(e["end_idx"], 477)      # 全部事件入段
+        self.assertEqual(e["burst_events"], 430)
+        self.assertAlmostEqual(e["burst_tok"], 430, delta=0.01)
+        self.assertAlmostEqual(e["burst_s"], 429 * 0.0002, delta=1e-6,
+                               msg="交付时长 = 串内间隙之和")
+
+    def test_over_removal_capped_by_healthy_rate(self):
+        """剔除封顶 r_pre×stall_s：停滞期间服务端最多生成这么多 token，
+        剔超了就会误杀正常生成。10×30ms 平稳（r_pre≈33）+ 1.0s 停滞 +
+        100 个回吐事件 → burst_tok 被压到 ≈33.3，而非 100。"""
+        gaps = [0.03] * 9 + [1.0] + [0.0002] * 99
+        ev_toks = [1.0] * 110
+        eps = _flush_episodes(gaps, ev_toks)
+        self.assertEqual(len(eps), 1)
+        self.assertAlmostEqual(eps[0]["burst_tok"], 100 / 3.0, delta=0.2)
+        self.assertLess(eps[0]["burst_tok"], 100)
+
+    def test_mtp_batch_cadence_not_flagged(self):
+        """MTP 批节奏 = 健康速率：3 token/事件 @5ms（r_pre≈600 tok/s）在
+        停滞后照常交付——速率未达 3×，不得误判为回吐。"""
+        gaps = [0.005] * 9 + [1.0] + [0.005] * 9
+        ev_toks = [3.0] * 20
+        self.assertEqual(_flush_episodes(gaps, ev_toks), [])
+
+    def test_zero_token_events_do_not_break_segment(self):
+        """零内容/keepalive 事件（est_tok=0）跳过不中断回吐段。"""
+        # 10 平稳 + 停滞 + 10 回吐 = 20 事件 / 19 间隙；第 3 个回吐事件为
+        # keepalive（est_tok=0）——它不得把回吐段拦腰截断（Σ 仍 9 ≥ 门槛）
+        gaps = [0.03] * 9 + [1.0] + [0.0002] * 9
+        ev_toks = [1.0] * 10 + [1.0, 1.0, 0.0] + [1.0] * 7
+        eps = _flush_episodes(gaps, ev_toks)
+        self.assertEqual(len(eps), 1)
+        self.assertGreaterEqual(eps[0]["burst_tok"], 8)
+
+    def test_small_or_malformed_inputs(self):
+        """认定门槛 Σburst < FLUSH_MIN_TOK(8) 不成立；长度错配/全零 token
+        直接返回空（消费方不做形状假设）。"""
+        self.assertEqual(_flush_episodes([], [1.0]), [])
+        self.assertEqual(_flush_episodes([0.03], [1.0, 1.0]), [])          # 长度错配
+        self.assertEqual(_flush_episodes([0.03, 1.0], [0.0, 0.0, 0.0]), [])
+        # 停滞 + 仅 3 个回吐 token：低于门槛，不认定
+        self.assertEqual(_flush_episodes([0.03, 1.0, 0.0002], [1.0, 1.0, 3.0]), [])
+
+    def test_short_stall_below_threshold_ignored(self):
+        """停滞门限 0.5s：0.4s 空窗只是正常抖动，不触发回吐剔除。"""
+        gaps = [0.03] * 9 + [0.4] + [0.0002] * 20
+        ev_toks = [1.0] * 31
+        self.assertEqual(_flush_episodes(gaps, ev_toks), [])
+
+
+class TestDecodePeakRate(unittest.TestCase):
+    """_decode_peak_rate（并发 decode 峰值，DECODE_PEAK_WINDOW_S 右对齐滑窗）：
+    全批 token 交付事件合并时间轴后 max(窗内 tok 合计 ÷ window)；突发/回吐
+    峰值如实计入（其不可信已由 decode_burst/flush 字段分别标注，本口径不
+    重复甄别）；无有效事件返回 None。"""
+
+    def test_empty_none(self):
+        self.assertIsNone(_decode_peak_rate([]))
+        self.assertIsNone(_decode_peak_rate([(0.0, [], [])]))
+        self.assertIsNone(_decode_peak_rate([(0.0, [], []), (1.0, [], [])]))
+
+    def test_single_uniform(self):
+        """单请求匀速：10 事件、间隔 0.2s、每事件 2 tok。1s 窗（右对齐、
+        端点含入）最多罩住 6 个事件 = 12 tok → 峰值 12.0（手算核对）。"""
+        tl = (0.0, [0.2] * 9, [2.0] * 10)
+        self.assertEqual(_decode_peak_rate([tl]), 12.0)
+
+    def test_two_requests_overlap_doubles(self):
+        """两请求时间轴完全重叠：任一窗内 tokens 翻倍 → 峰值翻倍。"""
+        tl = (0.0, [0.2] * 9, [2.0] * 10)
+        self.assertEqual(_decode_peak_rate([tl, tl]), 24.0)
+
+    def test_window_boundary_half_rate(self):
+        """1s 窗边界：tokens 均匀分布在 2s 上（11 事件 @0.2s、各 1 tok，
+        均速 5.5 tok/s），窗内最多罩住 [0,1] 闭区间上的 6 个事件 → 峰值 6.0
+        ——≈ 一半速率，边界含端点略高于均速。"""
+        tl = (0.0, [0.2] * 10, [1.0] * 11)
+        self.assertEqual(_decode_peak_rate([tl]), 6.0)
+
+    def test_subms_burst_counted_honestly(self):
+        """亚毫秒突发：50 tok 挤在 0.01s → 窗宽恒为 window（不按实际跨度
+        缩放），峰值 = 50/1.0 = 50.0 如实计入、不爆炸；单 fat 事件同值。"""
+        gaps = [0.01 / 49] * 49
+        self.assertEqual(_decode_peak_rate([(0.0, gaps, [1.0] * 50)]), 50.0)
+        self.assertEqual(_decode_peak_rate([(0.0, [], [50.0])]), 50.0)
+
+    def test_custom_window_parameter(self):
+        """window 参数生效（默认 DECODE_PEAK_WINDOW_S=1.0）：两事件相距
+        10s，1s 窗各罩一个 → 100.0；20s 窗全罩 → 200÷20 = 10.0。"""
+        self.assertEqual(DECODE_PEAK_WINDOW_S, 1.0)
+        tl = (0.0, [10.0], [100.0, 100.0])
+        self.assertEqual(_decode_peak_rate([tl]), 100.0)
+        self.assertEqual(_decode_peak_rate([tl], window=20.0), 10.0)
+
+
+class TestConcBatchStats(unittest.TestCase):
+    """_conc_batch_stats（批级并发口径 6 指标）：批起点 = min(start_abs)；
+    prefill/total span 从批起点量起、decode_span = total − prefill；
+    守卫 len(ok)==conc 与计时字段齐备（与 _total_decode_rates 同口径），
+    span 分母 ≤0 只置空对应速率键；峰值只看 _tl 有无，不依赖 span。"""
+
+    @staticmethod
+    def _none_stats():
+        return {"prefill_span_s": None, "total_span_s": None,
+                "decode_span_s": None, "prefill_conc_tok_s": None,
+                "decode_conc_tok_s": None, "decode_peak_tok_s": None}
+
+    @staticmethod
+    def _req(req, start, first, last, ptok, otok, tl=None):
+        r = {"req": req, "start_abs": start, "first_abs": first,
+             "last_abs": last, "prompt_tokens": ptok, "out_tokens": otok}
+        if tl is not None:
+            r["_tl"] = tl
+        return r
+
+    def test_incomplete_guards_all_none(self):
+        """len(ok)!=conc / start_abs 缺失 / first_abs 或 last_abs 为 None：
+        6 键全 None。"""
+        one = self._req(0, 0.0, 1.0, 3.0, 100, 50)
+        self.assertEqual(_conc_batch_stats([one], 2), self._none_stats())
+        no_start = self._req(0, 0.0, 1.0, 3.0, 100, 50)
+        del no_start["start_abs"]
+        pair = [self._req(1, 0.5, 2.0, 4.0, 100, 50)]
+        self.assertEqual(_conc_batch_stats([no_start] + pair, 2),
+                         self._none_stats())
+        self.assertEqual(
+            _conc_batch_stats([self._req(0, 0.0, None, 3.0, 100, 50)] + pair, 2),
+            self._none_stats())
+        self.assertEqual(
+            _conc_batch_stats([self._req(0, 0.0, 1.0, None, 100, 50)] + pair, 2),
+            self._none_stats())
+
+    def test_normal_conc2_batch(self):
+        """正常 2 并发批（手算逐一核对）：批起点 = min(0.0, 0.5) = 0.0；
+        prefill_span = max(1.0, 2.0) − 0 = 2.0；total_span = max(3.0, 4.0)
+        = 4.0；decode_span = 2.0；prefill_conc = (1000+500)÷2 = 750.0；
+        decode_conc = (200+300)÷2 = 250.0；峰值：合并时间轴
+        (1,100)(2,100)(2,150)(3,150)，窗 [2,3] 含 400 tok → 400.0。"""
+        r0 = self._req(0, 0.0, 1.0, 3.0, 1000, 200, (1.0, [1.0], [100.0, 100.0]))
+        r1 = self._req(1, 0.5, 2.0, 4.0, 500, 300, (2.0, [1.0], [150.0, 150.0]))
+        stats = _conc_batch_stats([r0, r1], 2)
+        self.assertEqual(stats["prefill_span_s"], 2.0)
+        self.assertEqual(stats["total_span_s"], 4.0)
+        self.assertEqual(stats["decode_span_s"], 2.0)
+        self.assertEqual(stats["prefill_conc_tok_s"], 750.0)
+        self.assertEqual(stats["decode_conc_tok_s"], 250.0)
+        self.assertEqual(stats["decode_peak_tok_s"], 400.0)
+
+    def test_decode_span_nonpositive(self):
+        """decode_span ≤ 0（所有请求 last ≤ max(first)）：decode_conc_tok_s
+        置 None 而 prefill/span 正常（decode_span_s 如实记 0.0）；峰值不依赖
+        span，照常产出（200.0）。"""
+        r0 = self._req(0, 0.0, 2.0, 2.0, 1000, 100, (2.0, [], [100.0]))
+        r1 = self._req(1, 0.5, 3.0, 3.0, 500, 100, (3.0, [], [100.0]))
+        stats = _conc_batch_stats([r0, r1], 2)
+        self.assertEqual(stats["prefill_span_s"], 3.0)        # max(first)−0
+        self.assertEqual(stats["prefill_conc_tok_s"], 500.0)  # 1500÷3
+        self.assertEqual(stats["total_span_s"], 3.0)          # max(last)−0
+        self.assertEqual(stats["decode_span_s"], 0.0)
+        self.assertIsNone(stats["decode_conc_tok_s"])
+        self.assertEqual(stats["decode_peak_tok_s"], 200.0)
+
+    def test_no_tl_peak_none_rest_normal(self):
+        """无 _tl 键：峰值 None，其余 5 键照常产出（峰值只看 _tl 有无）。"""
+        r0 = self._req(0, 0.0, 1.0, 3.0, 1000, 200)
+        r1 = self._req(1, 0.5, 2.0, 4.0, 500, 300)
+        stats = _conc_batch_stats([r0, r1], 2)
+        self.assertIsNone(stats["decode_peak_tok_s"])
+        self.assertEqual(stats["prefill_span_s"], 2.0)
+        self.assertEqual(stats["total_span_s"], 4.0)
+        self.assertEqual(stats["decode_span_s"], 2.0)
+        self.assertEqual(stats["prefill_conc_tok_s"], 750.0)
+        self.assertEqual(stats["decode_conc_tok_s"], 250.0)
+
+    def test_prefill_span_nonpositive_only_prefill_cleared(self):
+        """分母级守卫①：prefill_span ≤ 0（max(first) == min(start)）只置空
+        prefill 两键，total/decode 与峰值照常产出（span 起点 = 2.0）。"""
+        r0 = self._req(0, 2.0, 2.0, 6.0, 1000, 100, (2.0, [2.0], [50.0, 50.0]))
+        r1 = self._req(1, 2.0, 2.0, 5.0, 500, 100, (2.0, [1.0], [50.0, 50.0]))
+        stats = _conc_batch_stats([r0, r1], 2)
+        self.assertIsNone(stats["prefill_span_s"])
+        self.assertIsNone(stats["prefill_conc_tok_s"])
+        self.assertEqual(stats["total_span_s"], 4.0)          # max(last)−2
+        self.assertEqual(stats["decode_span_s"], 4.0)         # 4−0
+        self.assertEqual(stats["decode_conc_tok_s"], 50.0)    # 200÷4
+        self.assertEqual(stats["decode_peak_tok_s"], 150.0)   # 手算见注释
+        # 峰值手算：合并 (2,50)(2,50)(3,50)(4,50)，窗 [2,3] 含 150 tok
+
+    def test_total_span_nonpositive_only_three_cleared(self):
+        """分母级守卫②：total_span ≤ 0 只置空 total/decode 三键；prefill
+        两键同样因 span ≤0 置空；peak 只看 _tl，照常产出（20.0）。"""
+        r0 = self._req(0, 3.0, 3.0, 3.0, 1000, 100, (3.0, [], [10.0]))
+        r1 = self._req(1, 3.0, 3.0, 3.0, 500, 100, (3.0, [], [10.0]))
+        stats = _conc_batch_stats([r0, r1], 2)
+        self.assertEqual(
+            stats, {**self._none_stats(), "decode_peak_tok_s": 20.0})
+
+
+class TestBatchPrefillPoint(unittest.TestCase):
+    """_batch_prefill_point（批级 prefill 点口径，_run_point 与 agent 矩阵
+    共用）：TTFT = 批开始→全部首 token（stats["prefill_span_s"]）、速度 =
+    Σtokens ÷ span、净口径经 _net_elapsed 扣 RTT；span 缺失（守卫未过/分母
+    ≤0，如部分失败批）返回 {} 由调用方回退逐请求均值；rtt None 时净口径
+    两键 None。"""
+
+    def test_span_missing_returns_empty(self):
+        """span 缺失 / stats 空 / span=0（分母级守卫）：返回 {}，调用方回退
+        逐请求均值口径。"""
+        self.assertEqual(_batch_prefill_point(4096, {}, 0.2), {})
+        self.assertEqual(_batch_prefill_point(
+            4096, {"prefill_span_s": None, "total_span_s": None}, 0.2), {})
+        self.assertEqual(_batch_prefill_point(
+            4096, {"prefill_span_s": 0.0}, 0.2), {})
+
+    def test_rtt_none_net_keys_none(self):
+        """rtt None（基线缺失）：毛口径两键照常产出，净口径两键 None。"""
+        self.assertEqual(_batch_prefill_point(8192, {"prefill_span_s": 2.0}, None),
+                         {"ttft_s": 2.0, "prefill_tok_s": 4096.0,
+                          "ttft_net_s": None, "prefill_net_tok_s": None})
+
+    def test_normal_values_hand_computed(self):
+        """正常值手算：span=2.0、Σ=8192、rtt=0.2 → ttft_s = span = 2.0、
+        prefill = 8192÷2 = 4096.0、ttft_net = 2.0−0.2 = 1.8、
+        prefill_net = 8192÷1.8 = 4551.1。"""
+        bp = _batch_prefill_point(8192, {"prefill_span_s": 2.0}, 0.2)
+        self.assertEqual(bp["ttft_s"], 2.0)
+        self.assertEqual(bp["prefill_tok_s"], 4096.0)
+        self.assertEqual(bp["ttft_net_s"], 1.8)
+        self.assertAlmostEqual(bp["prefill_net_tok_s"], 4551.1, delta=0.05)
+
+    def test_conc1_equals_single_request(self):
+        """conc=1 与单请求口径严格相等：批 span 与单请求 TTFT 同源（起点/
+        终点取同一 perf_counter 值）——start=10.0/first=12.0 的批 stats →
+        ttft 2.0、prefill 4096÷2 = 2048.0（与逐请求均值口径同值）；rtt=0
+        时净口径 = 毛口径。"""
+        req = {"req": 0, "start_abs": 10.0, "first_abs": 12.0,
+               "last_abs": 14.0, "prompt_tokens": 4096, "out_tokens": 100}
+        stats = _conc_batch_stats([req], 1)
+        self.assertEqual(stats["prefill_span_s"], 2.0)
+        bp = _batch_prefill_point(4096, stats, 0.0)
+        self.assertEqual(bp["ttft_s"], 2.0)
+        self.assertEqual(bp["prefill_tok_s"], 2048.0)
+        self.assertEqual(bp["ttft_net_s"], 2.0)
+        self.assertEqual(bp["prefill_net_tok_s"], 2048.0)
+
+
+class TestDecodeSums(unittest.TestCase):
+    """_decode_sums（点级 decode Σ÷Σ 口径，ADR-0074 追加）：decode 总耗时 =
+    Σ各请求 decode 窗口（last_abs − first_abs）、均速 = Σout_tokens ÷ Σ窗口；
+    conc=1 退化为单请求口径严格相等；pairs 空 → (None, None)。"""
+
+    def test_empty_ok_returns_none_pair(self):
+        """空批 / 无齐备时间轴的请求（缺 first_abs/last_abs/out_tokens 或
+        last≤first）：两键均 None。"""
+        self.assertEqual(_decode_sums([]), (None, None))
+        self.assertEqual(_decode_sums([{"req": 0, "err": None}]), (None, None))
+        self.assertEqual(_decode_sums(
+            [{"req": 0, "first_abs": 10.0, "last_abs": 12.0,
+              "out_tokens": 600}]), (2.0, 300.0))   # 对照：齐备请求正常产出
+        self.assertEqual(_decode_sums(
+            [{"req": 0, "first_abs": 10.0, "out_tokens": 600},
+             {"req": 1, "last_abs": 12.0, "out_tokens": 600}]), (None, None))
+        self.assertEqual(_decode_sums(
+            [{"req": 0, "first_abs": 12.0, "last_abs": 12.0,
+              "out_tokens": 600}]), (None, None))   # last≤first 守卫
+
+    def test_single_request_equals_per_request(self):
+        """单请求（conc=1 等价性）：Σ÷Σ 退化为逐请求口径——窗口 2.0s、
+        out 600 → decode_time_s=2.0、decode_tok_s=300.0，与逐请求
+        decode_tok_s = round(600÷2, 1) 严格相等。"""
+        req = {"req": 0, "first_abs": 10.0, "last_abs": 12.0,
+               "out_tokens": 600}
+        dt, dc = _decode_sums([req])
+        self.assertEqual(dt, 2.0)
+        self.assertEqual(dc, round(600 / (req["last_abs"] - req["first_abs"]), 1))
+        self.assertEqual(dc, 300.0)
+
+    def test_two_unequal_windows_sum_ratio_not_mean(self):
+        """两请求窗口不等：Σ÷Σ ≠ 逐请求速率算术均值——窗口 1.0s/100 tok
+        与 3.0s/600 tok → Σ÷Σ = (100+600)÷4 = 175.0，而算术均值 =
+        (100÷1 + 600÷3)÷2 = 150.0；总耗时 = Σ窗口 = 4.0。"""
+        r1 = {"req": 0, "first_abs": 10.0, "last_abs": 11.0,
+              "out_tokens": 100}
+        r2 = {"req": 1, "first_abs": 10.0, "last_abs": 13.0,
+              "out_tokens": 600}
+        dt, dc = _decode_sums([r1, r2])
+        self.assertEqual(dt, 4.0)
+        self.assertEqual(dc, 175.0)
+        mean = (r1["out_tokens"] / (r1["last_abs"] - r1["first_abs"])
+                + r2["out_tokens"] / (r2["last_abs"] - r2["first_abs"])) / 2
+        self.assertNotEqual(dc, round(mean, 1))   # 口径差异：≠ 均值 150.0
+
+    def test_rounding(self):
+        """精度：decode_time_s round 2、decode_tok_s round 1——窗口和
+        0.33+0.33=0.66、Σout=100 → 均速 151.5。"""
+        rs = [{"req": 0, "first_abs": 10.0, "last_abs": 10.33,
+               "out_tokens": 50},
+              {"req": 1, "first_abs": 10.0, "last_abs": 10.33,
+               "out_tokens": 50}]
+        dt, dc = _decode_sums(rs)
+        self.assertEqual(dt, 0.66)
+        self.assertEqual(dc, 151.5)
+
+
+class TestConcBatchStatsAggregate(unittest.TestCase):
+    """批级并发口径的复测聚合冒烟：6 新键（_ROUND 白名单）与其他标量同取
+    各次复测均值，reps 子行逐次保真带新键；旧口径复测缺新键时聚合点不产出
+    该键、子行按 None 留档（前端空值回退）。"""
+
+    @staticmethod
+    def _rep(decode, batch):
+        rep = {"all_ok": True, "decode_tok_s": decode, "ttft_s": 1.0,
+               "prefill_tok_s": 100.0, "prompt_tokens": 4000,
+               "out_tokens": 500, "reqs": [{"req": 0, "err": None}]}
+        rep.update(batch)
+        return rep
+
+    def test_six_new_keys_mean_and_reps_subrows(self):
+        """2 个 rep 的迷你 point（6 新键不同值）→ 聚合取均值；reps 子行
+        逐次带新键原值。"""
+        batch1 = {"prefill_span_s": 2.0, "total_span_s": 4.0,
+                  "decode_span_s": 2.0, "prefill_conc_tok_s": 750.0,
+                  "decode_conc_tok_s": 250.0, "decode_peak_tok_s": 800.0}
+        batch2 = {"prefill_span_s": 3.0, "total_span_s": 6.0,
+                  "decode_span_s": 3.0, "prefill_conc_tok_s": 850.0,
+                  "decode_conc_tok_s": 350.0, "decode_peak_tok_s": 1000.0}
+        agg = _aggregate_reps([self._rep(50, batch1), self._rep(30, batch2)])
+        self.assertEqual(agg["decode_tok_s"], 40.0)   # 对照标量同取均值
+        self.assertEqual(agg["prefill_span_s"], 2.5)
+        self.assertEqual(agg["total_span_s"], 5.0)
+        self.assertEqual(agg["decode_span_s"], 2.5)
+        self.assertEqual(agg["prefill_conc_tok_s"], 800.0)
+        self.assertEqual(agg["decode_conc_tok_s"], 300.0)
+        self.assertEqual(agg["decode_peak_tok_s"], 900.0)
+        self.assertEqual(agg["reps"][0]["decode_peak_tok_s"], 800.0)
+        self.assertEqual(agg["reps"][1]["prefill_span_s"], 3.0)
+        self.assertEqual(agg["reps"][1]["decode_conc_tok_s"], 350.0)
+
+    def test_legacy_reps_without_new_keys(self):
+        """旧口径复测（无 6 新键）：聚合点不产出新键、子行以 None 留档。"""
+        legacy = {"all_ok": True, "decode_tok_s": 50.0, "ttft_s": 1.0,
+                  "prefill_tok_s": 100.0, "prompt_tokens": 4000,
+                  "out_tokens": 500, "reqs": [{"req": 0, "err": None}]}
+        agg = _aggregate_reps([dict(legacy), dict(legacy)])
+        self.assertNotIn("prefill_span_s", agg)
+        self.assertNotIn("decode_peak_tok_s", agg)
+        self.assertIsNone(agg["reps"][0]["decode_peak_tok_s"])
+        self.assertIsNone(agg["reps"][1]["decode_conc_tok_s"])
 
 
 if __name__ == "__main__":

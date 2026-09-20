@@ -1,0 +1,35 @@
+name: CI
+
+# 回归门禁：引擎纯逻辑 + mock 端到端 + 接口契约 + SSE 回放 + 前端语法/注入门禁。
+# 前端静态资源从 CDN 加载，测试不依赖网络（e2e 全部走 127.0.0.1 的假网关）。
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Backend regression (pytest)
+        run: python -m pytest -q -rf
+
+      - name: Frontend syntax + injection gate
+        run: bash tests/check_frontend_js.sh
