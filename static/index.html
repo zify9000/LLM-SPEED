@@ -2273,6 +2273,9 @@ function setPhase(phase){
   unhide($("#liveCard"), phase === "run");
   updateToggleText();
   showDataSections();
+  // 阶段切换是权威视图切换：若 addPoint 的合帧重绘仍在排队，此刻立即落地
+  //（新 phase 已生效，retest 闸等按新阶段判定），不让排队帧吞掉最后一帧
+  flushScheduledRender();
 }
 /* 测速中/完成后可手动展开或收起配置 */
 function toggleConfig(){
@@ -3028,7 +3031,7 @@ function addPoint(p){
   if(!state.points.has(pointKey(p))) state.donePoints++;
   state.points.set(pointKey(p), p);
   bumpProgress();
-  renderAll();
+  scheduleRender();   // 合帧全量重绘（终态/阶段切换由 renderAll/setPhase 同步落地，见上）
   const pv = preOf(p);
   if(pv) kpiPush("#kpiPrefill", "#prefillBarWrap", "#prefillBarFill", pv, "最快 Prefill");
   const dv = decOf(p);
@@ -3061,7 +3064,42 @@ function showDataSections(){
   unhide($("#cardCard"), has && !run);
   unhide($("#resultCard"), has);   // 明细表是事实，运行中即累积展示
 }
+/* 明细表渲染合帧（性能项②，2026-09 评审 backlog）：addPoint 原先每到达一个
+   测点就同步全量重绘——allPoints() 全排序 + scens.map(scenDetailTable).join("")
+   + innerHTML 全量重建，累计 ≈ Σk = n²/2 行。tests/frontend/bench_render.mjs
+   实测（Node + DOM 桩，**仅计字符串构建**：innerHTML 赋值被桩元素吸收，
+   DOM 解析/布局成本未计）：
+     N=64 累计 ≈ 27ms；N=128 ≈ 95–123ms；N=256 ≈ 396–487ms；单次全量渲染
+     N=128 仅 ≈ 1.5ms。
+   以 150ms 为「值得做增量追加快路径」的门槛：多模型/多并发运行的现实上限约
+   120+ 点，N=128 累计未过线，故**不做**增量追加（不引入 guard/快路径复杂度），
+   只做合帧：每帧至多一次全量重绘，把同一帧内到达的多个测点合并成一次渲染。
+   结论与数字见该 harness 输出与评审报告。
+   权威/终态路径不得被排队帧吞掉：renderAll 先作废排队帧（同步渲染即当前权威
+   视图），setPhase 在阶段切换后把排队帧立即落地（而非丢弃）。 */
+let _renderRaf = 0;
+function cancelScheduledRender(){
+  if(_renderRaf){
+    cancelAnimationFrame(_renderRaf);
+    _renderRaf = 0;
+  }
+}
+/* 合帧请求：本帧已排队则合并（多次 addPoint 只换一次重绘）。注意
+   bumpProgress 与 KPI 回写仍在 addPoint 内同步执行，不参与合帧 */
+function scheduleRender(){
+  if(_renderRaf) return;
+  _renderRaf = requestAnimationFrame(() => { _renderRaf = 0; renderAll(); });
+}
+/* 阶段切换等权威路径：排队帧立即同步落地，保证不漏渲染（renderAll 内部
+   再作废排队帧为幂等空操作） */
+function flushScheduledRender(){
+  if(!_renderRaf) return;
+  cancelAnimationFrame(_renderRaf);
+  _renderRaf = 0;
+  renderAll();
+}
 function renderAll(){
+  cancelScheduledRender();   // 同步全量渲染即权威视图：作废排队中的合帧渲染
   showDataSections();
   renderResultTable();
   renderCharts();

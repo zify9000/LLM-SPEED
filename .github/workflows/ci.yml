@@ -36,3 +36,6 @@ jobs:
 
       - name: Frontend pure-function tests
         run: bash tests/run_frontend_pure.sh
+
+      - name: Frontend render benchmark + coalescing equivalence
+        run: bash tests/run_frontend_render.sh

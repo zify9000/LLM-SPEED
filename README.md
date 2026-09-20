@@ -161,7 +161,7 @@ pip install -r requirements-dev.txt
 # 回归测试：引擎纯逻辑 + mock 端到端 + 接口契约 + SSE 回放（约 4 分钟）
 python -m pytest -q                 # 或 python -m unittest discover -s tests -v
 
-# 前端内联脚本语法 + 注入门禁（需 node）
+# 前端门禁：内联脚本语法 + 注入防护 + 「无外部资源」（需 node）
 bash tests/check_frontend_js.sh
 
 # 前端展示层纯函数单测（提取内联脚本 §pure 区域，零依赖无构建，需 node）
