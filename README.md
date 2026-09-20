@@ -115,10 +115,10 @@ Agent的调用形态和普通聊天不一样，**长对话历史早已躺在服�
 
 **3️⃣ 开测** — 「开始测速」：实时表逐帧刷新 → 完成自动生成测速卡片 → 「下载 PNG」
 
-> 页面从 jsDelivr 加载 ECharts 与 html2canvas（**首次打开需要联网**，加载失败会显式提示，
-> 测速/配置/历史不受影响）；离线环境请自行把两个文件放进 `static/` 并改本地引用。
-> 服务默认只绑 `127.0.0.1`；确需局域网访问时设 `HOST=0.0.0.0`，并在 `.env` 用
-> `ALLOWED_HOSTS=<访问用的主机名或IP>` 显式放行（写接口有 Host/同源校验）。
+> **完全离线可用**：图表库（ECharts / html2canvas）随仓库 vendored 在
+> `static/vendor/`，页面不请求任何外部资源，也不需要联网（版本与哈希见该目录
+> README）。服务默认只绑 `127.0.0.1`；确需局域网访问时设 `HOST=0.0.0.0`，并在
+> `.env` 用 `ALLOWED_HOSTS=<访问用的主机名或IP>` 显式放行（写接口有 Host/同源校验）。
 
 ## 🗺️ 数据流
 
@@ -137,6 +137,7 @@ start.sh / start.bat  一键启动（建虚拟环境、装依赖、生成配置�
 server.py          FastAPI 服务端（provider 解析 + 测速任务 + SSE + 历史 + 配置写入）
 bench.py           测速引擎（prompt 构造、流式计时、矩阵调度）
 static/index.html  单页前端（ECharts 图表 + html2canvas 卡片 + 配置编辑）
+static/vendor/     本地 vendored 的图表/卡片库（离线可用；版本与哈希见其 README）
 mock_server.py     假 OpenAI 网关（自测）
 corpus/            语料：code（llama.cpp 源码）/ creative（公版《红楼梦》）/ agent（SWE-agent 真实执行轨迹）/ asr（自有 wav，可选）
 scripts/           语料构建脚本（agent 轨迹提取，仅构建期用）

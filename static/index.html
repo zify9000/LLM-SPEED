@@ -5,10 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LLM-SPEED · LLM 测速台</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23EEF2FF'/%3E%3Cpolygon points='34.7 5.3 8 37.3 32 37.3 29.3 58.7 56 26.7 32 26.7' fill='%234F46E5'/%3E%3C/svg%3E">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+<!-- 图表/卡片库**本地 vendored**（版本与哈希见 static/vendor/README.md）：离线
+     可用、无第三方运行时依赖，也不再需要 SRI（同源自带）。字体走系统栈，
+     同样不请求外部。升级时同步 vendor 文件 + 版本哈希 + 无外部资源门禁。 -->
+<script src="/static/vendor/echarts.min.js"></script>
+<script src="/static/vendor/html2canvas.min.js"></script>
 <style>
 /* ============ 设计令牌（浅色 BI 风格） ============ */
 :root{
@@ -28,7 +29,7 @@
   --red:#DC2626;   --red-soft:#FEF2F2;
   --blue-soft:#EFF6FF;
   --violet:#9333EA;
-  --font:"Inter","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --font:"Inter","PingFang SC","Microsoft YaHei","Noto Sans CJK SC",system-ui,-apple-system,"Segoe UI",sans-serif;
   --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
   --shadow:0 1px 2px rgba(0,0,0,.05);
 }
@@ -1028,13 +1029,14 @@ async function init(){
     $(id).addEventListener("change", saveMatrixCfg);
   onProviderChange();
   setPhase("idle");   // 刚启动：平铺全部配置，不展示测速组件
-  // CDN 降级：echarts/html2canvas 缺失时明确告警（不静默半死）——图表/卡片导出
-  // 降级，配置、测速与历史记录不受影响
+  // 图表库降级：两个库已本地 vendored（static/vendor/），缺失只可能是部署问题
+  // （文件被删/静态挂载不可用）。仍显式告警不静默半死——测速、配置与历史不受影响
   const cdnMiss = [!window.echarts && "ECharts（速度曲线/卡片内嵌图表）",
                    !window.html2canvas && "html2canvas（卡片 PNG 导出）"].filter(Boolean);
   if(cdnMiss.length){
     const w = $("#cdnWarn");
-    w.textContent = "⚠ CDN 资源加载失败：" + cdnMiss.join("、") + " 不可用；测速、配置与历史记录不受影响";
+    w.textContent = "⚠ 本地图表库未加载：" + cdnMiss.join("、") + " 不可用；"
+      + "测速、配置与历史记录不受影响（检查 static/vendor/ 是否完整、/static 是否可访问）";
     w.hidden = false;
   }
   offChart = window.echarts ? echarts.init($("#offChart")) : null;
@@ -2881,7 +2883,7 @@ function showDataSections(){
   const run = state.phase === "run";
   const cc = $("#chartCard");
   const wasHidden = cc.hidden;
-  unhide(cc, has && !run && !!window.echarts);   // 图表属统计分析，完成后才展示；echarts 缺失（CDN 降级）不展空壳
+  unhide(cc, has && !run && !!window.echarts);   // 图表属统计分析，完成后才展示；echarts 缺失（图表库缺失）不展空壳
   if(wasHidden && !cc.hidden){
     // echarts 在隐藏容器内渲染为 0 尺寸：先显示，再 rAF 构建/重绘
     requestAnimationFrame(() => renderCharts());
@@ -3610,7 +3612,7 @@ function buildMediaChartOpt(pts, metric, title, forExport, kind){
 /* 速度曲线按模型 × 场景平铺：两个场景同屏对比，多模型各自成块 */
 function renderCharts(){
   const box = $("#chartList");
-  if(!box || $("#chartCard").hidden || !window.echarts) return;   // echarts 缺失（CDN 降级）跳过
+  if(!box || $("#chartCard").hidden || !window.echarts) return;   // echarts 缺失（图表库缺失）跳过
   state.charts.forEach(c => c.dispose());
   state.charts = [];
   box.innerHTML = "";
@@ -3928,7 +3930,7 @@ function cardHTML(model){
   // 各场景区块：速度范围 + 峰值上下文 + 并发对比
   const imgs = captureScenarioCharts(model, scens);
   // 卡片头配置工具组（图例/明细）：图例按钮需有内嵌图表（offChart 存在，
-  // CDN 降级时无图）才出；环境信息操作（切换/编辑）= 本地部署 + 存在 runId
+  // 图表库缺失时无图）才出；环境信息操作（切换/编辑）= 本地部署 + 存在 runId
   // （可写回）+ 非运行中阶段（运行中编辑会被运行结束落盘覆盖）——不要求
   // model_info 快照存在（无快照的历史存档也能补建，端点会新建条目）；meta
   // 块为空时工具组照常出现（tools 渲染不依赖 mi）
@@ -4163,7 +4165,7 @@ function cardChartTitles(sk){
     : (sk === "asr" || sk === "tts") ? ["倍速", "并发吞吐"]
     : ["Prefill", "Decode"];
 }
-/* 离屏渲染各场景图表并导出 base64；echarts 缺失（CDN 降级）时无图可导，返回空集（卡片仍生成，仅无内嵌图）。
+/* 离屏渲染各场景图表并导出 base64；echarts 缺失（图表库缺失）时无图可导，返回空集（卡片仍生成，仅无内嵌图）。
    图例按 state.cardLegend 注入 legend.selected（只记隐藏系列，未记录的默认可见，
    新增系列自动可见）；PNG 导出走同一渲染路径，选择自然继承 */
 function captureScenarioCharts(model, scens){
@@ -4192,7 +4194,7 @@ function captureScenarioCharts(model, scens){
 }
 /* 图例浮层：按图表分组列出该卡片全部系列名（默认全选，取消勾选即隐藏）。
    勾选即时写回 state.cardLegend 并只重渲染当前卡片（不整页重渲，避免滚动跳动）；
-   点外部 / ESC 关闭；offChart 缺失（CDN 降级）不出浮层；与明细浮层互斥。
+   点外部 / ESC 关闭；offChart 缺失（图表库缺失）不出浮层；与明细浮层互斥。
    对比卡片走对比数据（系列名带运行标签，记忆键 cmp:: 前缀隔离单次卡片选择） */
 function toggleCardLegend(btn){
   if($("#cardLegendPop")) closeCardLegend();
@@ -4312,7 +4314,7 @@ function refreshCard(model){
    异步渲染后再多次 a.click() 会被浏览器当作无手势的多文件下载拦截；
    先逐卡 canvas 渲染、再拼接成一张图一次点击，可靠且单文件更易分享 */
 async function downloadCard(){
-  if(!window.html2canvas){ setPill("html2canvas 未加载（CDN 降级），无法导出 PNG", "err"); return; }
+  if(!window.html2canvas){ setPill("html2canvas 未加载（图表库缺失），无法导出 PNG", "err"); return; }
   const btn = $("#btnDl");
   if(btn.disabled) return;   // 重入保护：双击不并发跑两次导出
   const cards = [...document.querySelectorAll("#cardWrap .speed-card")];

@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from bench import (AGENT_CACHE_RANGE, AGENT_INST_RANGE, AGENT_LADDER_MAX,
@@ -343,6 +344,14 @@ async def pick_gateway_url(p: dict) -> tuple[str, float | None]:
 @app.get("/")
 async def index():
     return FileResponse(os.path.join(BASE, "static", "index.html"))
+
+
+# 静态资源（vendored 的 ECharts / html2canvas，见 static/vendor/README.md）：
+# 本地化后页面不再请求任何外部资源——离线/内网可用，且第三方脚本这条供应链
+# 面直接消失（此前 CDN 脚本运行在"能调用本机全部 API"的页面里）。
+# 只挂 static/ 且仅 GET：写接口守卫（ADR-0081）不受影响。
+app.mount("/static", StaticFiles(directory=os.path.join(BASE, "static")),
+          name="static")
 
 
 @app.get("/api/config")

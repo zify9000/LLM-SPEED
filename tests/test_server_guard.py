@@ -13,6 +13,7 @@
 配置与存档（fixture 模式同 test_history_edit.py）。
 """
 import asyncio
+import hashlib
 import json
 import os
 import tempfile
@@ -280,6 +281,58 @@ class TestRenameGuard(_GuardBase):
             json.dump(d, f, ensure_ascii=False)
         r = self._rename({"old": "m1", "new": "m2"})
         self.assertEqual(r.status_code, 400)
+
+
+class TestVendoredAssets(unittest.TestCase):
+    """前端依赖本地化契约：页面不得外链、vendored 文件必须可服务且未被替换。
+
+    依赖走 CDN 时，第三方脚本运行在**能调用本机全部 API** 的页面里（改配置、
+    删历史、触发对云端付费网关的测速）；本地化把这条供应链面直接消掉，但
+    "vendor 文件被误删/被换版本/静态挂载失效"都要能被回归抓住（见
+    static/vendor/README.md）。文件哈希在此硬编码——换库时同步改这里与 README。
+
+    本类**不继承 _GuardBase**：那些用例把 server.BASE 指向临时目录，而这里要
+    校验真实仓库里的 vendored 资源（StaticFiles 在 import 时已捕获真实目录）。"""
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    VENDOR = {
+        "echarts.min.js":
+            "42f8329d989b6f6539dd2b15bbdf0d82025762ac112fbb60dc57b27d7bcf3946",
+        "html2canvas.min.js":
+            "e87e550794322e574a1fda0c1549a3c70dae5a93d9113417a429016838eab8cb",
+    }
+
+    def setUp(self):
+        self.client = TestClient(server.app)
+
+    def test_vendor_files_match_documented_hashes(self):
+        for name, want in self.VENDOR.items():
+            path = os.path.join(self.ROOT, "static", "vendor", name)
+            self.assertTrue(os.path.isfile(path), f"{name} 缺失（static/vendor/）")
+            with open(path, "rb") as f:
+                got = hashlib.sha256(f.read()).hexdigest()
+            self.assertEqual(got, want,
+                             f"{name} 内容变了——换版本请同步 static/vendor/README.md、"
+                             f"本测试与 static/index.html 的引用")
+
+    def test_vendor_assets_served(self):
+        for name, _ in self.VENDOR.items():
+            r = self.client.get(f"/static/vendor/{name}")
+            self.assertEqual(r.status_code, 200, name)
+            self.assertIn("javascript", r.headers.get("content-type", ""), name)
+            self.assertGreater(len(r.content), 50_000, f"{name} 疑似截断")
+
+    def test_index_loads_only_local_resources(self):
+        with open(os.path.join(self.ROOT, "static", "index.html"),
+                  encoding="utf-8") as f:
+            html = f.read()
+        self.assertIn("/static/vendor/echarts.min.js", html)
+        self.assertIn("/static/vendor/html2canvas.min.js", html)
+        # 真正会发起请求的标签不得指外部；<a href>（用户点击跳转）允许
+        for tag in ("script", "link", "img", "iframe", "source", "video", "audio"):
+            self.assertNotRegex(
+                html, rf'<{tag}[^>]*\s(src|href)="https?://',
+                f"<{tag}> 引用了外部资源——应本地 vendored")
+        self.assertNotIn("fonts.googleapis.com", html)
 
 
 class TestCredentialKeyApi(_GuardBase):

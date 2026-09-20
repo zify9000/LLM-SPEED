@@ -53,4 +53,17 @@ if [ "${pure_lines:-0}" -eq 0 ]; then
   exit 1
 fi
 
-echo "frontend JS syntax OK · 注入门禁通过"
+# 门禁：页面不得加载任何**外部资源**（脚本/样式/字体/图片外链）。
+# 图表库已本地 vendored（static/vendor/，见其 README）：既保证离线/内网可用，
+# 也消掉"第三方脚本运行在能调用本机全部 API 的页面里"这条供应链面。
+# 允许的是相对路径与 data: URI；http(s):// 只允许出现在注释/文档链接里——
+# 因此只检查真正会发起请求的标签属性。
+if grep -nE '<(script|link|img|iframe|source|video|audio)[^>]*[[:space:]](src|href)="https?://' \
+     static/index.html >/dev/null; then
+  echo "ERROR: 页面引用了外部资源（应本地 vendored，见 static/vendor/README.md）：" >&2
+  grep -nE '<(script|link|img|iframe|source|video|audio)[^>]*[[:space:]](src|href)="https?://' \
+    static/index.html >&2
+  exit 1
+fi
+
+echo "frontend JS syntax OK · 注入门禁通过 · 无外部资源"
