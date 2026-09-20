@@ -13,20 +13,24 @@
 <style>
 /* ============ 设计令牌（浅色 BI 风格） ============ */
 :root{
+  /* 文字色令牌按 WCAG AA 正文 4.5:1 定标，卡的是各自最差的 tinted 底色：
+     --ink-3/--ink-4 压 --primary-soft(4.32)、--red 压 --red-soft(4.41)、
+     --green 压 --green-soft(3.15)。#5F6775 / #CE2020 / #15803D 是满足
+     该约束下最浅的取值，别再调浅（--ink-3 与 --ink-4 同值，必须同步改） */
   --bg:#F9FAFB;
   --card:#FFFFFF;
   --border:#E5E7EB;
   --border-2:#D1D5DB;
   --ink:#111827;
   --ink-2:#374151;
-  --ink-3:#6B7280;
-  --ink-4:#6B7280;
+  --ink-3:#5F6775;
+  --ink-4:#5F6775;
   --primary:#4F46E5;
   --primary-hover:#4338CA;
   --primary-soft:#EEF2FF;
-  --green:#16A34A; --green-soft:#F0FDF4;
+  --green:#15803D; --green-soft:#F0FDF4;
   --yellow:#92400E; --yellow-soft:#FEFCE8;
-  --red:#DC2626;   --red-soft:#FEF2F2;
+  --red:#CE2020;   --red-soft:#FEF2F2;
   --blue-soft:#EFF6FF;
   --violet:#9333EA;
   --font:"Inter","PingFang SC","Microsoft YaHei","Noto Sans CJK SC",system-ui,-apple-system,"Segoe UI",sans-serif;
@@ -174,7 +178,7 @@ label.f.m-sep{margin-top:16px; padding-top:14px; border-top:1px solid var(--bord
 #drawerRoot{position:fixed; inset:0; z-index:100}
 #drawerScrim{position:absolute; inset:0; background:rgba(17,24,39,.45);
   opacity:0; transition:opacity .2s ease; cursor:default}
-#cfgDrawer{position:absolute; top:0; right:0; height:100dvh; width:min(560px,100vw);
+#cfgDrawer{position:absolute; top:0; right:0; height:100vh; height:100dvh; width:min(560px,100vw);
   background:var(--bg); border-left:1px solid var(--border);
   box-shadow:-16px 0 40px rgba(17,24,39,.12);
   transform:translateX(102%); display:flex; flex-direction:column; visibility:hidden;
@@ -186,8 +190,10 @@ label.f.m-sep{margin-top:16px; padding-top:14px; border-top:1px solid var(--bord
 /* 历史删除/对比/改名/拼接弹窗：居中对话框，复用抽屉的遮罩/头/底样式 */
 #delModalRoot, #cmpModalRoot, #renModalRoot, #spliceModalRoot{position:fixed; inset:0; z-index:110}
 #delModalScrim, #cmpModalScrim, #renModalScrim, #spliceModalScrim{position:absolute; inset:0; background:rgba(17,24,39,.45)}
+/* 先写 vh 再写 dvh：不认 dvh 的浏览器落回 vh（至少不塌成 0 高），
+   认的浏览器用后一条覆盖（移动端地址栏伸缩时不会被裁掉半截） */
 #delModal, #cmpModal, #renModal, #spliceModal{position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
-  width:min(640px, calc(100vw - 32px)); max-height:80dvh; display:flex; flex-direction:column;
+  width:min(640px, calc(100vw - 32px)); max-height:80vh; max-height:80dvh; display:flex; flex-direction:column;
   background:var(--bg); border:1px solid var(--border); border-radius:14px;
   box-shadow:0 16px 48px rgba(17,24,39,.18)}
 .del-toolbar{display:flex; align-items:center; gap:8px; padding:10px 20px;
@@ -439,7 +445,7 @@ tr.fade td{opacity:.45}
 .sc-cfg-btn .ic{width:13px; height:13px}
 .sc-cfg-btn.on, .sc-cfg-btn[aria-expanded="true"]{border-color:var(--primary);
   color:var(--primary); background:var(--primary-soft)}
-.card-legend-pop{position:fixed; z-index:120; width:280px; max-height:60dvh; overflow-y:auto;
+.card-legend-pop{position:fixed; z-index:120; width:280px; max-height:60vh; max-height:60dvh; overflow-y:auto;
   background:var(--card); border:1px solid var(--border); border-radius:12px;
   box-shadow:0 16px 48px rgba(17,24,39,.18); padding:10px 12px; font-size:12.5px}
 .card-legend-pop .lg-group + .lg-group{margin-top:10px}
@@ -502,6 +508,14 @@ tr.fade td{opacity:.45}
 </style>
 </head>
 <body>
+<!-- 无 JS 时页面等于白屏（配置面板/表格/图表全靠脚本渲染）：这是唯一能在
+     脚本完全不执行时出现的提示，所以只能用静态 HTML + 内联样式，不依赖脚本 -->
+<noscript>
+  <div role="alert" style="background:var(--yellow-soft); color:var(--yellow); border:1px solid #FDE68A;
+       border-radius:8px; padding:8px 12px; margin:12px 24px 0; font-size:13px">
+    ⚠ 本页面需要 JavaScript：脚本被禁用或未能加载，配置面板、测速控制台与图表都不会显示。请启用 JavaScript 后刷新。
+  </div>
+</noscript>
 <nav>
   <div class="nav-inner">
     <div class="brand-ic" aria-hidden="true">
@@ -552,23 +566,25 @@ tr.fade td{opacity:.45}
               <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>刷新模型列表</button>
             <button class="btn-ghost" onclick="openCfgDrawer()">管理 Provider / 部署…</button>
           </div>
-          <label class="f">被测模型（可多选，逐一顺序测试）</label>
+          <!-- 组标签（label.f）与容器显式关联：容器是一组复选框而非单个控件，
+               用 role="group" + aria-labelledby 让读屏在进入每组时报出组名 -->
+          <label class="f" id="lbModelList">被测模型（可多选，逐一顺序测试）</label>
           <div class="btnrow" style="margin:0 0 6px">
             <button class="btn-ghost" onclick="selAllModels(true)">全选</button>
             <button class="btn-ghost" onclick="selAllModels(false)">全不选</button>
           </div>
-          <div id="modelList" class="ckrow"><span class="hint" style="margin:0">请先刷新模型列表…</span></div>
+          <div id="modelList" class="ckrow" role="group" aria-labelledby="lbModelList"><span class="hint" style="margin:0">请先刷新模型列表…</span></div>
         </div>
       </div>
 
       <div class="card">
         <div class="card-head"><h3>测试矩阵</h3></div>
         <div class="card-body">
-          <label class="f">场景一：通用</label>
-          <div id="scenarioList" class="ckrow"></div>
+          <label class="f" id="lbScenarioList">场景一：通用</label>
+          <div id="scenarioList" class="ckrow" role="group" aria-labelledby="lbScenarioList"></div>
           <div id="ctxWrap">
-            <label class="f">上下文长度（目标输入 tokens）</label>
-            <div id="ctxList" class="ckrow"></div>
+            <label class="f" id="lbCtxList">上下文长度（目标输入 tokens）</label>
+            <div id="ctxList" class="ckrow" role="group" aria-labelledby="lbCtxList"></div>
             <div class="btnrow" style="margin:6px 0 0">
               <input type="text" id="fCustomCtx" placeholder="自定义档位，如 192K" style="width:150px"
                      onkeydown="if(event.key==='Enter')addCustomCtx()">
@@ -578,8 +594,8 @@ tr.fade td{opacity:.45}
           <!-- 翻译场景档位区：与上下文档位同机制（勾选翻译时才展开），
                默认值来自场景 ladder（字原文），自定义档 localStorage 记忆 -->
           <div id="translateWrap" hidden>
-            <label class="f">翻译档位（原文字数）</label>
-            <div id="translateList" class="ckrow"></div>
+            <label class="f" id="lbTranslateList">翻译档位（原文字数）</label>
+            <div id="translateList" class="ckrow" role="group" aria-labelledby="lbTranslateList"></div>
             <div class="btnrow" style="margin:6px 0 0">
               <input type="text" id="fCustomTranslate" placeholder="自定义档位字数，如 2400" style="width:150px"
                      onkeydown="if(event.key==='Enter')addCustomTranslate()">
@@ -603,15 +619,15 @@ tr.fade td{opacity:.45}
             <label class="f m-sep">场景二：Agent</label>
             <div id="agentScen" class="ckrow"></div>
             <div id="agentParams" hidden>
-              <label class="f">已缓存上下文（tokens，每档先预热写入前缀缓存）</label>
-              <div id="agentCacheList" class="ckrow"></div>
+              <label class="f" id="lbAgentCacheList">已缓存上下文（tokens，每档先预热写入前缀缓存）</label>
+              <div id="agentCacheList" class="ckrow" role="group" aria-labelledby="lbAgentCacheList"></div>
               <div class="btnrow" style="margin:6px 0 0">
                 <input type="text" id="fCustomAgentCache" placeholder="自定义缓存档，如 192K" style="width:150px"
                        onkeydown="if(event.key==='Enter')addCustomAgentCache()">
                 <button class="btn-ghost" onclick="addCustomAgentCache()">添加</button>
               </div>
-              <label class="f">指令长度（tokens，缓存基础上的单步新输入）</label>
-              <div id="agentInstList" class="ckrow"></div>
+              <label class="f" id="lbAgentInstList">指令长度（tokens，缓存基础上的单步新输入）</label>
+              <div id="agentInstList" class="ckrow" role="group" aria-labelledby="lbAgentInstList"></div>
               <div class="btnrow" style="margin:6px 0 0">
                 <input type="text" id="fCustomAgentInst" placeholder="自定义指令档，如 3072" style="width:150px"
                        onkeydown="if(event.key==='Enter')addCustomAgentInst()">
@@ -628,7 +644,7 @@ tr.fade td{opacity:.45}
             <div id="mediaScen" class="ckrow"></div>
             <div id="mediaLadderWrap" hidden>
               <label class="f" id="mediaLadderLabel">档位</label>
-              <div id="mediaList" class="ckrow"></div>
+              <div id="mediaList" class="ckrow" role="group" aria-labelledby="mediaLadderLabel"></div>
               <div class="btnrow" style="margin:6px 0 0">
                 <input type="text" id="fCustomMediaLadder" placeholder="自定义档位" style="width:150px"
                        onkeydown="if(event.key==='Enter')addCustomMediaLadder()">
@@ -799,8 +815,8 @@ tr.fade td{opacity:.45}
           <div><label class="f" for="ceLabel">显示标签</label>
             <input type="text" id="ceLabel" placeholder="如 本地网关（LiteLLM）"></div>
         </div>
-        <label class="f">网关地址（可多个，按顺序取第一个可达）</label>
-        <div id="ceUrls"></div>
+        <label class="f" id="lbCeUrls">网关地址（可多个，按顺序取第一个可达）</label>
+        <div id="ceUrls" role="group" aria-labelledby="lbCeUrls"></div>
         <button class="btn-ghost" onclick="ceUrlAdd()" style="margin-top:6px">+ 添加地址</button>
         <div class="hint">把优选地址（如内网）排在前面：可达即绕开隧道等传输中继，不可达自动落到下一个</div>
         <label class="ck" style="margin-top:10px"><input type="checkbox" id="ceLocal"> 本地部署（允许并发测试；云端强制单发）</label>
@@ -830,7 +846,7 @@ tr.fade td{opacity:.45}
 </div>
 
 <!-- ========== 历史记录删除弹窗：勾选要删的记录，全选/全不选快捷 ========== -->
-<div id="delModalRoot" hidden>
+<div id="delModalRoot" hidden tabindex="-1">
   <div id="delModalScrim" onclick="closeDelModal()"></div>
   <div id="delModal" role="dialog" aria-modal="true" aria-labelledby="delModalTitle">
     <header class="dr-head">
@@ -856,7 +872,7 @@ tr.fade td{opacity:.45}
 </div>
 
 <!-- ========== 历史存档拼接弹窗：单选来源存档，合并进当前选中存档 ========== -->
-<div id="spliceModalRoot" hidden>
+<div id="spliceModalRoot" hidden tabindex="-1">
   <div id="spliceModalScrim" onclick="closeSpliceModal()"></div>
   <div id="spliceModal" role="dialog" aria-modal="true" aria-labelledby="spliceModalTitle">
     <header class="dr-head">
@@ -877,7 +893,7 @@ tr.fade td{opacity:.45}
 </div>
 
 <!-- ========== 历史记录对比弹窗：勾选 ≥2 条记录合并生成对比卡片 ========== -->
-<div id="cmpModalRoot" hidden>
+<div id="cmpModalRoot" hidden tabindex="-1">
   <div id="cmpModalScrim" onclick="closeCmpModal()"></div>
   <div id="cmpModal" role="dialog" aria-modal="true" aria-labelledby="cmpModalTitle">
     <header class="dr-head">
@@ -903,7 +919,7 @@ tr.fade td{opacity:.45}
 </div>
 
 <!-- ========== 存档模型改名弹窗：本地部署改名后，把存档中的旧模型名改写为新名 ========== -->
-<div id="renModalRoot" hidden>
+<div id="renModalRoot" hidden tabindex="-1">
   <div id="renModalScrim" onclick="closeRenameModal()"></div>
   <div id="renModal" role="dialog" aria-modal="true" aria-labelledby="renModalTitle">
     <header class="dr-head">
@@ -934,6 +950,25 @@ tr.fade td{opacity:.45}
 
 <script>
 "use strict";
+/* 启动期兜底：先挂一次性 error 钩子。旧浏览器缺 CSS.escape、被安全扩展改写
+   内联脚本等会令顶层求值抛错（TDZ ReferenceError 等），此时 init() 根本轮不到
+   执行，页面只剩白屏 + 控制台红字。钩子在 init 成功前有效，把首个错误写进
+   顶部已有的 #cdnWarn（role="alert"）。注：整段脚本若**语法**就无法解析，
+   脚本内任何代码（含本钩子）都不会执行，那种情况只能靠 <noscript> 之外的
+   降级手段，本页无构建步骤故不做。 */
+let _booted = false;
+function bootFailed(err){
+  try{
+    const w = document.getElementById("cdnWarn");
+    if(w){
+      w.textContent = "⚠ 页面初始化失败（浏览器版本过低或脚本被拦截）："
+        + ((err && err.message) || err);
+      w.hidden = false;
+    }
+  }catch(e){}   // 兜底路径自身不能再抛
+  console.error(err);
+}
+window.addEventListener("error", e => { if(!_booted) bootFailed(e.error || e.message); });
 const $ = s => document.querySelector(s);
 const SCEN_LABEL = {creative:"创意写作", code:"代码生成", translate:"翻译（中→英）",
   agent:"Agent 调用", asr:"语音转写", ocr:"图像识别", tts:"语音合成"};
@@ -1613,6 +1648,69 @@ function ceUrlAdd(){
   const rows = document.querySelectorAll("#ceUrls .ce-url");
   rows[rows.length - 1]?.focus();
 }
+/* ---------------- 浮层焦点圈定（配置抽屉 + 4 个历史弹窗共用） ----------------
+   浮层打开时 Tab 必须圈在浮层内：否则焦点会溜到被遮罩挡住的背景控件上，
+   键盘用户既看不见焦点也点不到，等于把浮层变成键盘陷阱。抽成一份共享实现，
+   抽屉与弹窗的口径才不会各自漂移。 */
+const FOCUSABLE_SEL = 'button,input,select,textarea,a[href],[tabindex]:not([tabindex="-1"])';
+/* 圈定候选：可见且未禁用。offsetParent 过滤 display:none，visibility:hidden
+   （如未分组虚组的 .g-grip）仍占布局但不可聚焦，必须单独排除，否则
+   兜底焦点会落到一个永远拿不到焦点的元素上，Tab 看起来"卡死" */
+function focusableWithin(root){
+  return [...root.querySelectorAll(FOCUSABLE_SEL)]
+    .filter(el => !el.disabled && el.offsetParent !== null
+                  && getComputedStyle(el).visibility !== "hidden");
+}
+/* Tab 环绕：非 Tab 键一律不处理（调用方自己管 Escape 等）。activeElement
+   不在 root 内（点了浮层内的非聚焦区域会落到 body）时也拉回浮层，否则
+   浏览器会顺着文档顺序把焦点送出浮层 */
+function wrapTabWithin(root, e){
+  if(!root || e.key !== "Tab") return;
+  const f = focusableWithin(root);
+  if(!f.length){   // 浮层内无可聚焦元素：退到浮层本身（根节点带 tabindex="-1"）
+    root.tabIndex = -1;
+    root.focus();
+    e.preventDefault();
+    return;
+  }
+  const active = document.activeElement;
+  if(!root.contains(active)){
+    (e.shiftKey ? f[f.length-1] : f[0]).focus();
+    e.preventDefault();
+    return;
+  }
+  if(e.shiftKey && active === f[0]){ f[f.length-1].focus(); e.preventDefault(); }
+  else if(!e.shiftKey && active === f[f.length-1]){ f[0].focus(); e.preventDefault(); }
+}
+/* 弹窗焦点圈定：trap 时记下 opener（关闭后把焦点还回去，键盘用户不丢位），
+   release 时摘监听 + 还原焦点。用 WeakMap 兼作幂等标记：同一个根节点重复
+   trap 直接短路，避免同一 keydown 注册两次（一次 Tab 跳两格）。 */
+const _modalTraps = new WeakMap();   // root -> {onKey, opener}
+let _activeTrapRoot = null;          // 当前生效的弹窗根：用于踢掉未正常关闭的旧圈定
+function trapModalFocus(root){
+  if(!root || _modalTraps.has(root)) return;
+  if(_activeTrapRoot && _activeTrapRoot !== root){
+    // 上一个浮层没走 close（例如直接开了第二个弹窗）：先摘掉它的监听，
+    // 否则它的 Tab 环绕还会把焦点拽回已经隐藏的旧浮层
+    releaseModalFocus(_activeTrapRoot);
+  }
+  const onKey = e => wrapTabWithin(root, e);
+  _modalTraps.set(root, {onKey, opener: document.activeElement});
+  _activeTrapRoot = root;
+  document.addEventListener("keydown", onKey);
+  const f = focusableWithin(root);
+  if(f.length) f[0].focus();
+  else { root.tabIndex = -1; root.focus(); }
+}
+function releaseModalFocus(root){
+  const st = root && _modalTraps.get(root);
+  if(!st) return;
+  document.removeEventListener("keydown", st.onKey);
+  _modalTraps.delete(root);
+  if(_activeTrapRoot === root) _activeTrapRoot = null;
+  // opener 可能已被重渲换掉（历史列表按钮随轮询重建）：只还给还在文档里的
+  if(st.opener && st.opener.isConnected) st.opener.focus();
+}
 /* 抽屉开合：浮于所有阶段之上；未保存改动关闭前确认；ESC / 遮罩点击可关 */
 let drawerHideTimer = null;   // 关 drawer 的 300ms 退场计时：重开时须撤销，否则动画中途被 hidden
 function openCfgDrawer(){
@@ -1640,12 +1738,7 @@ function closeCfgDrawer(){
 }
 function onDrawerKey(e){
   if(e.key === "Escape"){ closeCfgDrawer(); return; }
-  if(e.key !== "Tab") return;   // 焦点圈定在抽屉内
-  const f = [...$("#cfgDrawer").querySelectorAll("button,input,select,textarea")]
-    .filter(el => !el.disabled && el.offsetParent !== null);
-  if(!f.length) return;
-  if(e.shiftKey && document.activeElement === f[0]){ f[f.length-1].focus(); e.preventDefault(); }
-  else if(!e.shiftKey && document.activeElement === f[f.length-1]){ f[0].focus(); e.preventDefault(); }
+  wrapTabWithin($("#cfgDrawer"), e);   // 焦点圈定在抽屉内（共享实现，与 4 个弹窗同口径）
 }
 /* 抽屉内任何字段改动都标记未保存（关闭守卫用）；仅切换编辑目标不算改动 */
 $("#cfgDrawer").addEventListener("input", e => {
@@ -1680,7 +1773,9 @@ $("#ceKey").addEventListener("input", () => { state.cfgEdit.keyClear = false; })
 function depHTML(d, i){
   return `<div class="dep-edit${d._collapsed ? " collapsed" : ""}">
     <div class="dep-head">
-      <span class="dgrip" draggable="true" title="拖动排序（组内）"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5h6M9 12h6M9 19h6"/></svg></span>
+      <span class="dgrip" draggable="true" tabindex="0" role="button"
+        aria-label="部署「${esc(d.label || `部署环境 ${i+1}`)}」：上下键组内移动，左右键换组"
+        title="拖动排序（组内）；键盘：↑↓ 组内移动，←→ 换到相邻分组"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5h6M9 12h6M9 19h6"/></svg></span>
       <svg class="ic chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
       <span class="t"><span class="tt">${esc(d.label || `部署环境 ${i+1}`)}</span>${(d.models||[]).length ? `<small>　${esc(d.models.join("、"))}</small>` : ""}</span>
       <label class="ck dep-active" title="同一模型映射多套部署环境时，仅激活的一套生效（测速卡片 meta 与 max_ctx 钳制）；与其模型重叠的其他部署会自动取消激活">
@@ -1742,7 +1837,9 @@ function renderCeDeps(){
       </span>`;
     return `<div class="dep-group" data-group="${esc(g||"")}"${isDefault ? ' data-default="1"' : ""}>
       <div class="g-head${isDefault ? " def-grp" : ""}">
-        <span class="g-grip" draggable="true" title="拖动排序分组"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5h6M9 12h6M9 19h6"/></svg></span>
+        <span class="g-grip" draggable="true" tabindex="0" role="button"
+          aria-label="分组「${esc(g || "未分组")}」：上下键移动顺序"
+          title="拖动排序分组；键盘：↑↓ 移动顺序"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5h6M9 12h6M9 19h6"/></svg></span>
         <input class="g-name" value="${esc(g || "未分组")}" ${isDefault ? "disabled" : ""} title="${isDefault ? "未分组为默认虚组，不可改名/删除，恒居末尾" : "分组名（回车/失焦生效）"}">
         <span class="g-count">${members.length} 条</span>
         ${gDel}
@@ -1899,6 +1996,13 @@ function clearMarkers(){
   document.querySelectorAll(".drop-marker").forEach(el => el.classList.remove("drop-marker"));
   document.querySelectorAll(".drop-target-zone").forEach(el => el.classList.remove("drop-target-zone"));
 }
+/* drop 与键盘重排共用的落盘路径：DOM 是唯一事实源，ceStash 依 DOM 顺序重建
+   数据后重渲。两处必须走同一条路，否则键盘与鼠标排出两种结果。 */
+function _ceApplyReorder(){
+  ceStash();
+  state.cfgEdit.dirty = true;
+  renderCeDeps();
+}
 $("#ceDeps").addEventListener("dragstart", e => {
   const grip = e.target.closest(".g-grip");
   const dgrip = e.target.closest(".dgrip");
@@ -1953,11 +2057,68 @@ $("#ceDeps").addEventListener("drop", e => {
     else items.appendChild(src);   // 同组末尾 / 移入新组末尾
   }
   // 以 DOM 布局重建数据并重渲（延迟一拍，让 dragend 先清理拖动态）
-  setTimeout(() => { ceStash(); state.cfgEdit.dirty = true; renderCeDeps(); }, 0);
+  setTimeout(_ceApplyReorder, 0);
 });
 $("#ceDeps").addEventListener("dragend", () => {
   if(_dnd){ _dnd.el.classList.remove("dragging"); _dnd = null; }
   clearMarkers();
+});
+/* 拖拽排序的键盘等价物（拖动对纯键盘用户完全不可达）：手柄已加 tabindex="0"
+   + role="button"，↑↓ 组内/分组间移动一位，←→ 把部署搬到相邻分组的条目区。
+   两件拖拽不需要、键盘必须做的事：① preventDefault 吃掉方向键的翻页滚动；
+   ② 把焦点还给移动后的同一个手柄——重渲会重建全部节点，不还原焦点的话
+   每按一次方向键焦点就被踢回文档开头，等于不能连续移动。 */
+$("#ceDeps").addEventListener("keydown", e => {
+  const grip = e.target.closest(".dgrip, .g-grip");
+  if(!grip) return;
+  const vert = e.key === "ArrowUp" || e.key === "ArrowDown";
+  const horiz = e.key === "ArrowLeft" || e.key === "ArrowRight";
+  if(!vert && !horiz) return;   // 其余键不拦（Enter/Space 交给既有 click 委托）
+  const up = e.key === "ArrowUp";
+  const left = e.key === "ArrowLeft";
+  if(grip.classList.contains("g-grip")){
+    if(horiz) return;   // 分组顺序只有一维，左右键不支持：静默放行
+    e.preventDefault();
+    const grp = grip.closest(".dep-group");
+    const box = grp && grp.closest(".dep-groups");
+    if(!box) return;
+    const sib = up ? grp.previousElementSibling : grp.nextElementSibling;
+    // 未分组虚组恒居末尾（renderCeDeps 保证），与它换位在数据上不可表达
+    // （ceStash 会把它滤出 deployment_groups）——按了等于没反应却标了未保存，
+    // 索性视为到头
+    if(!sib || sib.dataset.default === "1") return;
+    if(up) box.insertBefore(grp, sib); else box.insertBefore(sib, grp);
+    const name = grp.dataset.group;
+    _ceApplyReorder();
+    // 分组按组名找回（重渲后节点全是新的）
+    [...document.querySelectorAll("#ceDeps .dep-group")]
+      .find(x => x.dataset.group === name)?.querySelector(".g-grip")?.focus();
+    return;
+  }
+  // .dgrip：部署手柄
+  const dep = grip.closest(".dep-edit");
+  const items = dep && dep.parentElement;
+  if(!items) return;
+  e.preventDefault();
+  if(vert){
+    const sib = up ? dep.previousElementSibling : dep.nextElementSibling;
+    if(!sib || !sib.classList.contains("dep-edit")) return;   // 组内到头
+    if(up) items.insertBefore(dep, sib); else items.insertBefore(sib, dep);
+  } else {
+    const grp = dep.closest(".dep-group");
+    const box = grp && grp.closest(".dep-groups");
+    if(!box) return;
+    const tgt = left ? grp.previousElementSibling : grp.nextElementSibling;
+    if(!tgt || !tgt.classList.contains("dep-group")) return;   // 没有相邻分组
+    const titems = tgt.querySelector(".dep-items");
+    if(!titems) return;
+    titems.appendChild(dep);   // 追加到目标组末尾（空组的占位提示随重渲消失）
+  }
+  // 重渲会重建节点：先记下移动后的扁平序号，重渲后按序号找回同一部署
+  // （renderCeDeps 的分组顺序与 ceStash 的扁平顺序一一对应，序号稳定）
+  const idx = [...document.querySelectorAll("#ceDeps .dep-edit")].indexOf(dep);
+  _ceApplyReorder();
+  document.querySelectorAll("#ceDeps .dep-edit")[idx]?.querySelector(".dgrip")?.focus();
 });
 /* 把当前表单（含部署环境 DOM）暂存回内存数据源；折叠态以 DOM 当前态为准
    （_collapsed 仅记录本次会话的显式折叠/展开，载入编辑器时一律折叠） */
@@ -4494,10 +4655,12 @@ async function openCmpModal(){
   renderCmpList();
   $("#cmpModalRoot").hidden = false;
   document.addEventListener("keydown", onCmpModalKey);
+  trapModalFocus($("#cmpModalRoot"));   // Tab 圈定 + 关闭后焦点还原
 }
 function closeCmpModal(){
   $("#cmpModalRoot").hidden = true;
   document.removeEventListener("keydown", onCmpModalKey);
+  releaseModalFocus($("#cmpModalRoot"));
 }
 function onCmpModalKey(e){ if(e.key === "Escape") closeCmpModal(); }
 function renderCmpList(){
@@ -5307,10 +5470,12 @@ function openRenameModal(){
   $("#renNew").value = "";
   $("#renModalRoot").hidden = false;
   document.addEventListener("keydown", onRenModalKey);
+  trapModalFocus($("#renModalRoot"));   // Tab 圈定 + 关闭后焦点还原
 }
 function closeRenameModal(){
   $("#renModalRoot").hidden = true;
   document.removeEventListener("keydown", onRenModalKey);
+  releaseModalFocus($("#renModalRoot"));
 }
 function onRenModalKey(e){ if(e.key === "Escape") closeRenameModal(); }
 async function renameConfirm(){
@@ -5396,10 +5561,12 @@ async function openDelModal(){
   renderDelList(true);
   $("#delModalRoot").hidden = false;
   document.addEventListener("keydown", onDelModalKey);
+  trapModalFocus($("#delModalRoot"));   // Tab 圈定 + 关闭后焦点还原
 }
 function closeDelModal(){
   $("#delModalRoot").hidden = true;
   document.removeEventListener("keydown", onDelModalKey);
+  releaseModalFocus($("#delModalRoot"));
 }
 function onDelModalKey(e){ if(e.key === "Escape") closeDelModal(); }
 function renderDelList(checked){
@@ -5477,6 +5644,7 @@ async function openSpliceModal(){
   $("#btnSpliceConfirm").disabled = false;
   $("#spliceModalRoot").hidden = false;
   document.addEventListener("keydown", onSpliceModalKey);
+  trapModalFocus($("#spliceModalRoot"));   // Tab 圈定 + 关闭后焦点还原
 }
 function spliceTargetLabel(){
   const id = $("#historySel").value;
@@ -5486,6 +5654,7 @@ function spliceTargetLabel(){
 function closeSpliceModal(){
   $("#spliceModalRoot").hidden = true;
   document.removeEventListener("keydown", onSpliceModalKey);
+  releaseModalFocus($("#spliceModalRoot"));
 }
 function onSpliceModalKey(e){ if(e.key === "Escape") closeSpliceModal(); }
 async function spliceConfirm(){
@@ -5679,7 +5848,12 @@ $("#activeRuns").addEventListener("click", e => {
   enterRun(ident.run_id, ident.total_points);
 });
 
-init();
+/* 顶层引导：init() 是 async，既要接同步抛错也要接 Promise 拒绝；成功后才把
+   _booted 置真，关掉顶部那个启动期 error 钩子（启动后运行期的偶发错误不该
+   再冒充"初始化失败"）。 */
+try{
+  init().then(() => { _booted = true; }, bootFailed);
+}catch(err){ bootFailed(err); }
 </script>
 </body>
 </html>
