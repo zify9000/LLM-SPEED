@@ -114,9 +114,14 @@ class TestSseReplay(unittest.TestCase):
         # ① 事件流以 history 回放为前缀；③ 回放后注入的新事件实时到达
         self.assertEqual(got[:len(history)], history)
         self.assertEqual(got[len(history):], [live])
-        # ② seq 单调且 cfg 类事件 seq=0
-        self.assertEqual([e["seq"] for e in got], [0, 1, 2, 3])
+        # ② seq 严格单调且不重复、首帧为 cfg 且 seq=0——前端按 seq 去重
+        # （丢弃 ≤ maxSeq 的帧），回放前缀与实时帧必须共用同一个单调序列；
+        # ADR-0082 把 seq 从 len(history) 改成实例级计数器后该契约更关键
+        seqs = [e["seq"] for e in got]
+        self.assertEqual(seqs, sorted(seqs), "seq 必须单调递增")
+        self.assertEqual(len(set(seqs)), len(seqs), "seq 不得重复")
         self.assertEqual(got[0]["type"], "cfg")
+        self.assertEqual(got[0]["seq"], 0)
 
     def test_finished_run_replays_then_closes(self):
         """已结束的 run（finished_at 非空）：回放完 history 即关闭连接，不空转心跳。"""
