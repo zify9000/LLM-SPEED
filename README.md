@@ -12,8 +12,8 @@
 
 vLLM / llama.cpp / fastllm / Lvllm / ktransformers，五花八门的推理框架
 BF16 / FP8 / NVFP4 / Q8 / Q4，形形色色的量化格式
-本地部署一通折腾，换卡、调参、比量化，** 却始终缺一个工具去做横向对比 **
-面向 ** Agent 调用 / 创意写作 / 代码生成 / 翻译 / 图像识别 / 语音识别 ** 等多类应用场景
+本地部署一通折腾，换卡、调参、比量化，**却始终缺一个工具去做横向对比**
+面向 **Agent 调用 / 创意写作 / 代码生成 / 翻译 / 图像识别 / 语音识别** 等多类应用场景
 从 0K 到 1M 的不同上下文档位，每种模型、每种部署方式， prefill / decode 速度到底能到什么程度，与云端 API 的差距是多少
 
 ## ✨ 特点
@@ -22,7 +22,7 @@ BF16 / FP8 / NVFP4 / Q8 / Q4，形形色色的量化格式
 
 **🧮 场景真实 · 口径透明**
 - prefill 扣除实测网络往返，只留纯计算
-- decode 按 3 秒滑窗差分，不收首尾抖动干扰
+- decode 点级取首末 token 窗口（实时读数按 3 秒滑窗差分，不被首批突发带跑）
 - 前缀缓存命中逐点测算、服务端回写校准、异常卡顿显式标记
 - 可选「模板续写」回复模式，对齐真实编辑场景的投机采样命中率
 
@@ -40,7 +40,7 @@ BF16 / FP8 / NVFP4 / Q8 / Q4，形形色色的量化格式
 
 Agent的调用形态和普通聊天不一样，**长对话历史早已躺在服务端前缀缓存里，每一轮只追加一条很短的指令**。
 真正决定agent「单步反应快不快」的，不是全量上下文的 prefill，而是**增量短指令的 TTFT 与 decode**
-普通「按上下文长度测速」答不了这个问题。本项目用模拟** SWE 轨迹**重建这种形态，按「已缓存上下文 × 单步指令」矩阵逐点实测：
+普通「按上下文长度测速」答不了这个问题。本项目用模拟 **SWE 轨迹** 重建这种形态，按「已缓存上下文 × 单步指令」矩阵逐点实测：
 
 | 维度 | 默认阶梯（tokens；测速矩阵面板可自定义） |
 | --- | --- |
@@ -63,9 +63,11 @@ Agent的调用形态和普通聊天不一样，**长对话历史早已躺在服�
 命中三态识别：API 回传真值 / 网关剥离命中计数时按「TTFT 相对零缓存档走平」等
 三通道判别估算（标 ≈）/ 无迹象显式标注「未回传」，宁缺毋假。
 
-## 🎙️ 多模态测速（ASR / OCR / TTS）（开发中）
+## 🎙️ 多模态测速（ASR / OCR / TTS）
 
-不止文本生成：同一套测速台覆盖三类媒体模型，全部走 OpenAI 兼容端点、只测速度不测精度——
+不止文本生成：同一套测速台覆盖三类媒体模型，全部走 OpenAI 兼容端点、只测速度不测精度。
+链路与合成语料均已实现并有端到端回归（假网关覆盖三类端点）；**尚未在真实媒体服务上
+标定过读数**，首次接入真实后端时请以明细表的原始耗时为准复核。
 
 | 类型 | 端点 | 阶梯 | 核心指标 |
 | --- | --- | --- | --- |
@@ -113,6 +115,11 @@ Agent的调用形态和普通聊天不一样，**长对话历史早已躺在服�
 
 **3️⃣ 开测** — 「开始测速」：实时表逐帧刷新 → 完成自动生成测速卡片 → 「下载 PNG」
 
+> 页面从 jsDelivr 加载 ECharts 与 html2canvas（**首次打开需要联网**，加载失败会显式提示，
+> 测速/配置/历史不受影响）；离线环境请自行把两个文件放进 `static/` 并改本地引用。
+> 服务默认只绑 `127.0.0.1`；确需局域网访问时设 `HOST=0.0.0.0`，并在 `.env` 用
+> `ALLOWED_HOSTS=<访问用的主机名或IP>` 显式放行（写接口有 Host/同源校验）。
+
 ## 🗺️ 数据流
 
 ```mermaid
@@ -131,13 +138,37 @@ server.py          FastAPI 服务端（provider 解析 + 测速任务 + SSE + �
 bench.py           测速引擎（prompt 构造、流式计时、矩阵调度）
 static/index.html  单页前端（ECharts 图表 + html2canvas 卡片 + 配置编辑）
 mock_server.py     假 OpenAI 网关（自测）
-corpus/            真实语料（code: llama.cpp 源码 / creative: 公版《红楼梦》/ agent: SWE-agent 真实执行轨迹（SWE-bench））
+corpus/            语料：code（llama.cpp 源码）/ creative（公版《红楼梦》）/ agent（SWE-agent 真实执行轨迹）/ asr（自有 wav，可选）
 scripts/           语料构建脚本（agent 轨迹提取，仅构建期用）
 case/              测速卡片示例图（README 引用）
-tests/             回归测试
+tests/             回归测试（unittest/pytest）
+.github/           CI（pytest + 前端语法/注入门禁）
+requirements.txt   运行时依赖（锁定到本机验证过的版本）
+requirements-dev.txt  测试依赖（pytest）
 config.json / .env  provider 配置与凭据（不入库）
 results/           历次测速结果 JSON
 ```
+
+## 🛠️ 开发与测试
+
+```bash
+# 运行时依赖（start.sh / start.bat 会自动装）
+pip install -r requirements.txt
+# 测试依赖（pytest）
+pip install -r requirements-dev.txt
+
+# 回归测试：引擎纯逻辑 + mock 端到端 + 接口契约 + SSE 回放（约 4 分钟）
+python -m pytest -q                 # 或 python -m unittest discover -s tests -v
+
+# 前端内联脚本语法 + 注入门禁（需 node）
+bash tests/check_frontend_js.sh
+
+# 本地自测用的假网关（无需真实模型）
+python mock_server.py               # 缺省 :8901；MOCK_PP / MOCK_TG / MOCK_STALL 等旋钮见文件头
+```
+
+改动测量口径后请至少回归主要状态组合（见 `mock_server.py` 文件头的旋钮清单）；
+`.env` 与 `config.json` 只存在于本地、不入库，`results/` 同理。
 
 ## 📄 许可证
 
