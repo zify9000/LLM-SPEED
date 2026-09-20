@@ -336,3 +336,34 @@ test("cmpLegendKey：单并发档不带后缀，多并发档带并发后缀", ()
   assert.equal(cmpLegendKey("code", "decode", undefined), "cmp::code::decode");
   assert.equal(cmpLegendKey("code", "decode", 5), "cmp::code::decode::5");
 });
+
+test("口径版本：缺字段 = 遗留(0)，当前版本点不算遗留（ADR-0083）", () => {
+  // 本机制引入前的存量存档没有该字段 → 遗留口径，前端必须显式标注
+  assert.equal(metricVersionOf({}), 0);
+  assert.equal(metricVersionOf({metric_version: null}), 0);
+  assert.equal(metricVersionOf({metric_version: 0}), 0);
+  assert.equal(isLegacyMetric({}), true);
+  assert.equal(isLegacyMetric({metric_version: 0}), true);
+  assert.equal(metricVersionOf({metric_version: 1}), 1);
+  assert.equal(isLegacyMetric({metric_version: 1}), false);
+  assert.equal(isLegacyMetric({metric_version: CURRENT_METRIC_VERSION}), false);
+  // 未来版本也不得被判成"遗留"（> 当前版本说明是更新的口径）
+  assert.equal(isLegacyMetric({metric_version: CURRENT_METRIC_VERSION + 1}), false);
+  assert.equal(metricVersionTxt(0), "遗留");
+  assert.equal(metricVersionTxt(null), "遗留");
+  assert.equal(metricVersionTxt(1), "v1");
+});
+
+test("口径版本：遗留点的读数仍走隐式回退（不因缺版本而取不到值）", () => {
+  // 这正是要标注而非拒读的原因：旧档字段仍在，回退链照常成立
+  const legacy = {decode_tok_s_adj: 30, decode_time_s: 5, prefill_span_s: 1, out_tokens: 150};
+  assert.equal(decAvgOf(legacy), 30);
+  assert.equal(decTotalTimeOf(legacy), 5);
+  assert.equal(calcSpanTimeOf(legacy), 6);
+  assert.equal(isLegacyMetric(legacy), true);
+});
+
+test("口径版本：混档时按点判定，不是按整档一刀切", () => {
+  const mix = [{metric_version: 1}, {}, {metric_version: 1}, {metric_version: 0}];
+  assert.deepEqual(mix.map(isLegacyMetric), [false, true, false, true]);
+});

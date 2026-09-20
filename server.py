@@ -455,6 +455,8 @@ def _archive_summary(path: str, name: str) -> dict | None:
         "agent_cold_ctx": cfg.get("agent_cold_ctx"),
         "note": cfg.get("note") or "",
         "n_points": len(d.get("results", [])),
+        # 口径版本（无该字段 = 本机制引入前的遗留口径，见 bench.METRIC_VERSION）
+        "metric_version": d.get("metric_version"),
     }
     if len(_HIST_CACHE) >= _HIST_CACHE_MAX:
         _HIST_CACHE.clear()
@@ -1452,6 +1454,9 @@ async def _merge_retest(archive_id: str, new_run_id: str, ident: tuple):
                 "inst_tokens": ident[3], "concurrency": ident[4],
                 "at": now, "prev_all_ok": p.get("all_ok"),
                 "new_all_ok": new_point.get("all_ok"),
+                # 口径版本留痕：新旧不同说明这次复测换了口径，读数不可直接比
+                "prev_metric_version": p.get("metric_version"),
+                "metric_version": new_point.get("metric_version"),
                 "retest_run_id": new_run_id})
             results[i] = new_point
             await _write_json(apath, d)
@@ -1483,6 +1488,11 @@ async def _load_archive(run_id: str) -> dict:
     if not os.path.exists(path):
         raise HTTPException(404, "not found")
     return await _read_json(path, "存档")
+
+
+def _ver_txt(v) -> str:
+    """口径版本的人类可读写法（None/缺字段 = 本机制引入前的遗留口径）。"""
+    return "遗留" if v is None else str(v)
 
 
 def _check_point_ident(body: dict) -> tuple:
@@ -1612,6 +1622,16 @@ async def bench_history_splice(run_id: str, body: dict):
                      ("gateway_url", "网关地址"), ("model_max_ctx", "上下文上限")):
         if cfg.get(k) != scfg.get(k):
             warnings.append(f"{label}不一致：目标 {cfg.get(k)} / 来源 {scfg.get(k)}")
+    # 口径版本差异（ADR-0083）：顶层代表"本次运行的版本"，但点级可能因复测/
+    # 拼接而与顶层不同——两边都要比，否则把不同口径的点拼到一起却毫无提示
+    dv, sv = d.get("metric_version"), sd.get("metric_version")
+    if dv != sv:
+        warnings.append(f"口径版本不一致：目标 v{_ver_txt(dv)} / 来源 v{_ver_txt(sv)}"
+                        f"——同一张图上混排前请确认这些读数可以这么比")
+    src_vers = sorted({_ver_txt(p.get("metric_version")) for p in sresults
+                       if isinstance(p, dict)})
+    if len(src_vers) > 1:
+        warnings.append(f"来源存档内测点口径版本不统一（{', '.join(src_vers)}）")
     tgt_info, src_info = cfg.get("model_info") or {}, scfg.get("model_info") or {}
     for m in sorted(set(tgt_info) & set(src_info)):
         if tgt_info[m] != src_info[m]:

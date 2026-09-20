@@ -231,6 +231,13 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
         # 回复模式（ADR-0021）默认自由回答：消息序列 [system, user]，无预填
         self.assertEqual(mock_server.LAST_CHAT_ROLES, ["system", "user"])
 
+        # 口径版本（ADR-0083）：走真实测速路径的每个点都必须带点级版本戳，
+        # 否则拼接/复测把不同口径的点混进同一存档时无法判别
+        self.assertTrue(points)
+        for p in points:
+            self.assertEqual(p.get("metric_version"), bench.METRIC_VERSION,
+                             "测点缺 metric_version——口径版本机制失效")
+
         # mock 运行不落历史记录（ADR-0010）
         self.assertTrue(run.mock_seen)
         self.assertFalse(os.path.isdir(results_dir), "mock 运行不得创建 results 目录")
@@ -911,6 +918,8 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("turn_delta", p)
             self.assertIsNotNone(p["total_s"], "端到端总时长应产出")
             self.assertIn("inst_real_tokens", p, "指令真实长度字段应在位")
+            # 口径版本（ADR-0083）：agent 矩阵点走独立构造点，同样要带版本戳
+            self.assertEqual(p.get("metric_version"), bench.METRIC_VERSION)
         self.assertLess(pts[0]["prompt_tokens"], 500, "零缓存档为纯指令小 prompt")
         self.assertGreater(pts[2]["prompt_tokens"], 3500, "缓存档注入足量轨迹语料")
         self.assertIn("done", [e["type"] for e in events])
@@ -1669,6 +1678,9 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(pts), 2)
         for p in pts:
             self.assertEqual(p["kind"], "tts")
+            # 口径版本（ADR-0083）：媒体点走 _run_media_point 的独立构造点，
+            # 必须同样带版本戳（三处构造点各有一条断言，防漏挂）
+            self.assertEqual(p.get("metric_version"), bench.METRIC_VERSION)
             self.assertNotIn("audio_est", p, "mock 回合法 wav，时长必须为解析值")
             expect = p["ctx_target"] / 500.0
             self.assertAlmostEqual(p["audio_s"], expect, delta=max(0.03, expect * 0.1))

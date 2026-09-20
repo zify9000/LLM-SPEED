@@ -2699,6 +2699,15 @@ const decTotalOf = p => p.decode_conc_tok_s ?? p.decode_total_tok_s_adj ?? p.dec
 const hasMultiConc = pts => pts.some(p => p.concurrency > 1);
 const hiConcOf = pts => { const mx = pts.reduce((m,p)=>Math.max(m, p.concurrency||0), 0); return mx > 1 ? mx : null; };
 
+/* 结果口径版本（ADR-0083，常量与版本表见 bench.py METRIC_VERSION）：
+   存档顶层与点级都写 metric_version；**缺字段 = 本机制引入前的遗留口径**，
+   前端仍走上面各访问器的隐式三级回退（语义与 v1 相同），只是必须显式标注，
+   否则旧档读数会被当成当前口径直接与新档混比。 */
+const CURRENT_METRIC_VERSION = 1;
+const metricVersionOf = p => (p && p.metric_version != null ? p.metric_version : 0);
+const isLegacyMetric = p => metricVersionOf(p) < CURRENT_METRIC_VERSION;
+const metricVersionTxt = v => (v ? `v${v}` : "遗留");
+
 // Prefill 物理速率闸（tok/s）：常规硬件 prefill 上限远低于此，读数超出视为
 // 物理上不可能（多为网关吞掉请求后伪报成功/异常回传），从卡片均值/范围统计剔除
 const PRE_PHYS_GATE = 50000;
@@ -3107,6 +3116,10 @@ function pointRow(p, isAgent, showTotal,
     // 拼接端点打标），非本次运行实测；旧存档无该字段不显示
     const spliceMark = p.spliced_from
       ? ` <span style="color:var(--ink-4);cursor:help" title="本测速点由存档 ${esc(p.spliced_from)} 拼接而来（${esc(p.spliced_at || "时间未知")}），非本次运行实测">⇢拼接</span>` : "";
+    // 口径版本徽标：无 metric_version 的存档 = 本机制引入前的遗留口径。读数字段
+    // 靠前端隐式回退仍可用，但**不可与当前口径的读数直接混比**（ADR-0083）
+    const metricMark = isLegacyMetric(p)
+      ? ` <span style="color:var(--ink-4);cursor:help" title="该测点的存档没有口径版本标记（v${CURRENT_METRIC_VERSION} 之前测量）：字段含义按遗留口径回退解读，与当前口径的新读数不宜直接混比/拼图。"">旧口径</span>` : "";
     // 单点复测入口（仅历史/已完成态的页面明细表，opts.retest）：沿用原存档
     // 配置重跑本点，结果合并回本存档；旧版 agent 链测点（turn）不支持
     const retestBtn = (retest && p.turn == null)
@@ -3241,7 +3254,7 @@ function pointRow(p, isAgent, showTotal,
     const mainRow = `<tr class="${p.all_ok?"":"err"}">
       <td>${esc(p.model)}</td>${colsPre}<td${ttTitle}>${p.ttft_s ?? "-"}</td><td${preTitle}>${preMainVal}${prePhysMarkOf(p)}</td>
       ${decCells}${isAgent ? `<td title="端到端总时长：请求发出 → 末 token（TTFT + decode 全程）">${p.total_s ?? "-"}</td>` : ""}${calcCell}<td>${p.out_tokens ?? "-"}</td>
-      <td>${finishTxt(p.finish)}</td><td>${st}${gapWarn}${discardMark}${anomalyMark}${ctxRetryMark}${spliceMark}${fakeOkMarkOf(p)}${retestBtn}${delBtn}</td></tr>`;
+      <td>${finishTxt(p.finish)}</td><td>${st}${gapWarn}${discardMark}${anomalyMark}${ctxRetryMark}${spliceMark}${metricMark}${fakeOkMarkOf(p)}${retestBtn}${delBtn}</td></tr>`;
     // 重复轮次子行（withReps）：弃测轮（异常首测整批作废的留痕）在前、对应
     // 轮次的保留行（重测批）在后，按 rep 对齐插入；旧存档弃测条目无 rep 字段
     // 时标签回退「弃测#序号」且一律排在保留子行之前。聚合行保持均值口径；
@@ -3358,12 +3371,14 @@ function renderMediaTable(sc, scRows, kind, withReps = true, titled = true, rete
     // 拼接溯源徽标与单点删除入口（与 LLM 表同口径）
     const spliceMark = p.spliced_from
       ? ` <span style="color:var(--ink-4);cursor:help" title="本测速点由存档 ${esc(p.spliced_from)} 拼接而来（${esc(p.spliced_at || "时间未知")}），非本次运行实测">⇢拼接</span>` : "";
+    const metricMark = isLegacyMetric(p)
+      ? ` <span style="color:var(--ink-4);cursor:help" title="该测点的存档没有口径版本标记（v${CURRENT_METRIC_VERSION} 之前测量）：字段含义按遗留口径回退解读，与当前口径的新读数不宜直接混比/拼图。"">旧口径</span>` : "";
     const delBtn = retest
       ? ` <button class="btn-ghost danger" style="padding:0 6px;font-size:12px" title="从历史存档中删除该测试点（不可恢复；服务端留删除审计）" data-act="delete" data-ident="${esc(JSON.stringify({model: p.model, scenario: p.scenario, ctx_target: p.ctx_target, inst_tokens: null, concurrency: p.concurrency, turn: null}))}">删除</button>` : "";
     const mainRow = `<tr class="${p.all_ok ? "" : "err"}"><td>${esc(p.model)}</td>`
       + `<td>${p.ctx_target ?? "-"}</td><td>${p.concurrency}</td>`
       + mediaMetricCells(p, kind).map(v => `<td>${v}</td>`).join("")
-      + `<td>${st}${spliceMark}${retestBtn}${delBtn}</td></tr>`;
+      + `<td>${st}${spliceMark}${metricMark}${retestBtn}${delBtn}</td></tr>`;
     // 重复轮次子行：逐次列出，媒体字段（rtf/speed_x/ttfa_s 等）随子行自带；
     // 逐轮失败原因（r.err）收 ✗ 的 title 悬浮
     const repRows = (withReps && p.n_reps > 1 && Array.isArray(p.reps) ? p.reps : []).map((r, i) => {

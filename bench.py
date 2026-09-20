@@ -1794,6 +1794,27 @@ _ROUND = {"ttft_s": 3, "ttft_net_s": 3, "prefill_tok_s": 1, "prefill_net_tok_s":
           "out_chars": 0, "out_bytes": 0, "n_img": 0}
 
 
+# ---------------------------------------------------------------------------
+# 结果口径版本（存档顶层与每个测点各写一份）
+#
+# 为什么需要：ADR-0073/0074/0076/0079 反复改过 decode/TTFT/prefill 的口径，
+# 旧存档永远靠前端的隐式"三级回退"猜字段含义——**没有任何机器可读的标记**
+# 告诉读者这个点是哪一版口径测出来的。把存档单独发给别人、或把不同时期的点
+# 拼接（ADR-0077）到一起时，这一点直接决定结论能不能这么比。
+#
+# 取值规则：**字段含义**变化时 +1 并在下表追加一行；无该字段的存档一律按
+# LEGACY_METRIC_VERSION(0) 处理（本机制引入前的存量，前端走原隐式回退）。
+# 只改实现不改口径（重构/修 bug/换语料落点）不递增。
+# ---------------------------------------------------------------------------
+METRIC_VERSION = 1
+LEGACY_METRIC_VERSION = 0
+METRIC_VERSION_NOTES = {
+    1: "2026-09-20 起：批级 6 字段（ADR-0073）+ 单发/并发双轨口径与点级 Σ÷Σ"
+       "（ADR-0074）+ 有效输出地板与指令复述约束（ADR-0076）"
+       "+ echo 真续写形态（ADR-0079）",
+}
+
+
 def _first_err(reqs: list[dict] | None) -> str | None:
     """批内首个失败请求的错误文本（点级 err 落档取此为代表；逐请求明细
     仍在 reqs 内）。"""
@@ -2385,6 +2406,8 @@ class BenchRun:
                 json.dump({
                     "run_id": self.run_id,
                     "started_at": self.started_at,
+                    # 口径版本（顶层 = 本次运行；点级另有自己的版本，见其注释）
+                    "metric_version": METRIC_VERSION,
                     "cfg": cfg_safe,
                     "results": self.results,
                 }, f, ensure_ascii=False, indent=1)
@@ -3205,6 +3228,9 @@ class BenchRun:
         point = {
             "model": model, "scenario": scenario,
             "kind": sc_kind,   # 场景类型：llm/asr/ocr/tts，前端按此分叉（ADR-0020）
+            # 口径版本：点级也写（拼接/复测会把不同时期的点混进同一存档，
+            # 顶层字段只代表本次运行的版本；见 METRIC_VERSION 注释）
+            "metric_version": METRIC_VERSION,
             "ctx_target": ctx, "concurrency": conc,
             "reqs": reqs, "all_ok": len(ok) == conc, "batch_time_s": round(batch_time, 3),
             "prompt_tokens": None, "ttft_s": None, "prefill_tok_s": None,
@@ -3357,6 +3383,7 @@ class BenchRun:
         sc = SCENARIOS[scenario]
         point = {
             "model": model, "scenario": scenario, "kind": kind,
+            "metric_version": METRIC_VERSION,   # 口径版本（见 METRIC_VERSION 注释）
             "ctx_target": rung, "concurrency": conc,
             "reqs": reqs, "all_ok": len(ok) == conc,
             "batch_time_s": round(batch_time, 3),
@@ -4069,6 +4096,7 @@ class BenchRun:
                     point = {
                         "model": model, "scenario": scenario, "ctx_target": c,
                         "inst_tokens": inst, "inst_real_tokens": real_inst,
+                        "metric_version": METRIC_VERSION,   # 口径版本
                         "concurrency": conc,
                         "reqs": reqs, "all_ok": len(ok) == conc,
                         "batch_time_s": round(batch_time, 3),

@@ -598,6 +598,30 @@ class TestCorpusProvenance(unittest.TestCase):
         self.assertTrue(os.path.isfile(self._dir("code", "LICENSE")),
                         "corpus/code/LICENSE（上游 MIT 许可）缺失")
 
+    def test_metric_version_is_documented(self):
+        """口径版本表：每个已发布的版本都要有一句"它是什么口径"的说明——
+        版本号本身没有意义，读者要能查到怎么解读（ADR-0083）。"""
+        import bench as b
+        self.assertGreaterEqual(b.METRIC_VERSION, 1)
+        for v in range(1, b.METRIC_VERSION + 1):
+            self.assertIn(v, b.METRIC_VERSION_NOTES, f"缺少 v{v} 的口径说明")
+            self.assertTrue(b.METRIC_VERSION_NOTES[v].strip())
+        self.assertEqual(b.LEGACY_METRIC_VERSION, 0)
+
+    def test_save_stamps_metric_version(self):
+        """落盘顶层带口径版本；点级版本随点自身保存（拼接/复测可混档）。"""
+        import bench as b
+        self.assertIn("METRIC_VERSION", b.__dict__)
+        with tempfile.TemporaryDirectory() as td:
+            run = BenchRun({}, results_dir=td)
+            run.results.append({"model": "m1", "scenario": "code", "ctx_target": 0,
+                                "metric_version": b.METRIC_VERSION})
+            run._save()
+            with open(os.path.join(td, f"{run.run_id}.json"), encoding="utf-8") as f:
+                d = json.load(f)
+        self.assertEqual(d["metric_version"], b.METRIC_VERSION)
+        self.assertEqual(d["results"][0]["metric_version"], b.METRIC_VERSION)
+
     def test_engine_actually_loads_vendored_corpora(self):
         """回归"静默降级"：语料在盘时必须真被引擎加载（而非回退内置池）。"""
         self.assertTrue(bench._load_agent_pool(), "agent 语料未被加载（回退内置池？）")

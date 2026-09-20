@@ -29,13 +29,17 @@ def _point(**kw):
     return p
 
 
-def _write(rid, points, **cfg_extra):
+def _write(rid, points, metric_version=None, **cfg_extra):
+    """写一份存档。metric_version=None 表示**不写该字段**（= 遗留口径存档，
+    与本机制引入前的存量形态一致）；显式传值才写顶层版本。"""
     cfg = {"provider": "p1", "models": ["m1"], "scenarios": ["code"],
            "ctx_list": [4096], "concurrencies": [1], "max_tokens": 512,
            "repeats": 1}
     cfg.update(cfg_extra)
     d = {"run_id": rid, "started_at": "2026-09-16 22:00:00",
          "cfg": cfg, "results": points}
+    if metric_version is not None:
+        d["metric_version"] = metric_version
     with open(os.path.join(server.RESULTS_DIR, f"{rid}.json"), "w",
               encoding="utf-8") as f:
         json.dump(d, f, ensure_ascii=False)
@@ -191,6 +195,45 @@ class TestHistoryEditApi(unittest.TestCase):
         self.assertTrue(any("输出预算" in x for x in w), w)
         self.assertTrue(any("回复模式" in x for x in w), w)
         self.assertFalse(any("思考模式" in x for x in w), w)
+
+    def test_splice_warns_on_metric_version_mismatch(self):
+        """口径版本不一致必须告警（ADR-0083）：本机制引入前的存档没有
+        metric_version，与当前口径的读数混拼后不可直接比——顶层差异与
+        "来源内部版本不统一"都要提示，且均不阻断。"""
+        _write("dst", [_point(metric_version=1)], metric_version=1)
+        _write("src", [_point(ctx_target=8192)])           # 遗留存档（无版本字段）
+        r = self.client.post("/api/bench/history/dst/splice",
+                             json={"source_run_id": "src"})
+        self.assertEqual(r.status_code, 200)
+        w = r.json()["warnings"]
+        self.assertTrue(any("口径版本不一致" in x for x in w), w)
+        self.assertTrue(any("遗留" in x for x in w), w)
+        # 拼接进来的点保留自己的版本（不冒充目标档的版本）
+        d = _read("dst")
+        spl = [p for p in d["results"] if p.get("ctx_target") == 8192]
+        self.assertEqual(len(spl), 1)
+        self.assertNotIn("metric_version", spl[0],
+                         "拼接点不得被改写成目标存档的口径版本")
+
+    def test_splice_warns_when_source_versions_mixed(self):
+        """来源存档内测点版本不统一时单独提示（顶层字段只能代表运行版本，
+        点级可能因历史复测/拼接而不一致）。"""
+        _write("dst", [_point(metric_version=1)], metric_version=1)
+        _write("src", [_point(ctx_target=8192, metric_version=1),
+                       _point(ctx_target=16384)], metric_version=1)
+        r = self.client.post("/api/bench/history/dst/splice",
+                             json={"source_run_id": "src"})
+        self.assertEqual(r.status_code, 200)
+        w = r.json()["warnings"]
+        self.assertTrue(any("测点口径版本不统一" in x for x in w), w)
+
+    def test_splice_no_warning_when_versions_match(self):
+        _write("dst", [_point(metric_version=1)], metric_version=1)
+        _write("src", [_point(ctx_target=8192, metric_version=1)], metric_version=1)
+        r = self.client.post("/api/bench/history/dst/splice",
+                             json={"source_run_id": "src"})
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(any("口径版本" in x for x in r.json()["warnings"]))
 
     def test_splice_same_archive_400(self):
         _write("dst", [_point()])
