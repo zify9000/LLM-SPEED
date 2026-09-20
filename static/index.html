@@ -4558,7 +4558,32 @@ function anomalyBadgeTxt(p){
   if(discards.length) return `首测异常，${[...new Set(kinds)].join("、")}`;
   return p.anomaly ? `首测复测均异常，${aLabel}` : "";
 }
-function buildAnomalyLogText(pts, cfg, runId){
+/* 异常输入全文外置（ADR-0084）：存档里超长 in_text 只留头尾摘要 + in_text_ref
+   字节切片，原文在 <run_id>.anomaly.txt 侧车。导出日志时先把侧车取来按切片还原，
+   拿不到就用截断形式并在日志头显式注明（不假装完整）。
+   resolve(ref) → 全文 | null；sidecar 为 null 表示本次没取到侧车。 */
+async function fetchAnomalyTextResolver(runId){
+  if(!runId) return null;
+  try{
+    const r = await fetch(`/api/bench/history/${encodeURIComponent(runId)}/anomaly-text`);
+    if(!r.ok) return null;
+    const buf = await r.arrayBuffer();
+    const dec = new TextDecoder("utf-8");
+    const cache = new Map();   // "off:len" → 解码文本（同一 ref 多处引用只解一次）
+    return ref => {
+      try{
+        const off = +ref?.off, len = +ref?.len;
+        if(!Number.isFinite(off) || !Number.isFinite(len) || off < 0 || len < 0) return null;
+        const k = `${off}:${len}`;
+        if(cache.has(k)) return cache.get(k);
+        const txt = dec.decode(buf.slice(off, off + len));
+        cache.set(k, txt);
+        return txt;
+      }catch(e){ return null; }
+    };
+  }catch(e){ return null; }
+}
+function buildAnomalyLogText(pts, cfg, runId, resolve){
   const head = [
     "LLM-SPEED 异常输出日志",
     `导出时间: ${new Date().toLocaleString("zh-CN")}`,
@@ -4566,7 +4591,10 @@ function buildAnomalyLogText(pts, cfg, runId){
       (cfg?.note ? ` | 备注: ${cfg.note}` : ""),
     `模型: ${(cfg?.models || []).join(", ")} | 场景: ${(cfg?.scenarios || []).map(s => SCEN_LABEL[s] || s).join(", ")}`
       + ` | 并发: ${(cfg?.concurrencies || []).join("/")} | max_tokens: ${cfg?.max_tokens ?? "-"} | 重复轮次: ${cfg?.repeats ?? 1}`,
-    "说明: 输入 = 异常记录的完整发送原文（全部消息，仅异常记录入档，正常测量不保留全文）；输出 = 正文/思考头部采样（≤200 字符）；弃测 = 命中异常判据（提前停止/退化重复）后整批作废的数据；留档 = 弃测重测仍异常被采纳的数据（读数需谨慎参考）。",
+    "说明: 输入 = 异常记录的完整发送原文（全部消息，仅异常记录入档，正常测量不保留全文）。"
+      + (resolve ? "超长原文已按异常文本存档（侧车）还原为全文；"
+                 : "⚠ 本次未取到异常文本存档，超长原文以截断形式给出（中间省略处见标注）；")
+      + "输出 = 正文/思考头部采样（≤200 字符）；弃测 = 命中异常判据（提前停止/退化重复）后整批作废的数据；留档 = 弃测重测仍异常被采纳的数据（读数需谨慎参考）。",
   ];
   const blocks = pts.map((p, i) => {
     const scen = SCEN_LABEL[p.scenario] || p.scenario;
@@ -4577,8 +4605,14 @@ function buildAnomalyLogText(pts, cfg, runId){
     // 输入原文优先（in_text 多行原文整块缩进嵌入）；旧存档回退头部采样
     // in_sample，再无则注明缺字段
     const inBlockOf = o => {
+      if(o.in_text_ref && resolve){
+        const full = resolve(o.in_text_ref);
+        if(full != null)
+          return [`    输入原文（全部消息；由异常文本存档按切片还原）:`]
+            .concat(String(full || "（空）").split("\n").map(l => `      ${l}`));
+      }
       if(o.in_text != null)
-        return [`    输入原文（全部消息）:`]
+        return [`    输入原文（全部消息${o.in_text_ref ? "；⚠ 侧车缺失，此处为截断形式" : ""}）:`]
           .concat(String(o.in_text || "（空）").split("\n").map(l => `      ${l}`));
       if(o.in_sample != null)
         return [`    输入样本（旧存档仅头部采样）: ${o.in_sample || "（空）"}`];
@@ -4606,16 +4640,22 @@ function buildAnomalyLogText(pts, cfg, runId){
     + blocks.join("\n" + "=".repeat(60) + "\n") + "\n" + "=".repeat(60)
     + `\n共 ${pts.length} 个异常点位（弃测 ${nDisc} 条）\n`;
 }
-function downloadAnomalyLog(){
+async function downloadAnomalyLog(){
   const pts = allPoints().filter(p => p.anomaly || (p.reps_discarded || []).length);
   if(!pts.length) return setPill("本次运行无异常记录", "");
+  // 有 ref 就尝试取侧车还原全文（取不到不阻断：日志退回截断形式并在头部注明）
+  const needSidecar = pts.some(p =>
+    (p.reps_discarded || []).some(d => d.in_text_ref) ||
+    (p.reqs || []).some(r => r.in_text_ref));
+  const resolve = needSidecar ? await fetchAnomalyTextResolver(state.runId) : null;
   const a = document.createElement("a");
   a.download = `anomaly-${state.runId || Date.now()}.log`;
-  a.href = URL.createObjectURL(new Blob([buildAnomalyLogText(pts, state.cfg, state.runId)],
+  a.href = URL.createObjectURL(new Blob([buildAnomalyLogText(pts, state.cfg, state.runId, resolve)],
     {type: "text/plain;charset=utf-8"}));
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  setPill(`已导出 ${pts.length} 个异常点位的日志`, "");
+  setPill(`已导出 ${pts.length} 个异常点位的日志`
+    + (needSidecar && !resolve ? "（⚠ 异常文本存档不可读，超长原文为截断形式）" : ""), "");
 }
 
 /* ---------------- 多次测速对比卡片（合并多次运行出卡） ----------------
