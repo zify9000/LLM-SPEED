@@ -6,17 +6,21 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import logging
 import math
 import os
 import re
-import stat
 import tempfile
 import time
+import urllib.parse
+from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from bench import (AGENT_CACHE_RANGE, AGENT_INST_RANGE, AGENT_LADDER_MAX,
                    ASR_LADDER_RANGE, BenchRun, CTX_HEADROOM,
@@ -30,7 +34,11 @@ CONFIG_PATH = os.path.join(BASE, "config.json")
 
 
 def _load_dotenv():
-    """轻量 .env 加载（不覆盖已有环境变量，避免引入额外依赖）。"""
+    """轻量 .env 加载（不覆盖已有环境变量，避免引入额外依赖）。
+
+    兼容常见手写形态：`export K=V`、带引号的值（写侧 json.dumps 加引号，
+    读侧对称 json 解码）、无引号值后的行内注释 `K=sk-x  # kimi`——旧解析会把
+    `sk-x" # kimi` 整串当 key 发出去，表现为"刚填的 key 401"，极难自查。"""
     path = os.path.join(BASE, ".env")
     if not os.path.exists(path):
         return
@@ -38,18 +46,21 @@ def _load_dotenv():
         with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
+                if line.startswith("export "):
+                    line = line[len("export "):].lstrip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 k, v = line.split("=", 1)
                 k, v = k.strip(), v.strip()
-                if v.startswith('"'):   # 写侧 json.dumps 加引号（值含 # 等），读侧对称解码
+                if v.startswith('"'):
                     try:
-                        v = json.loads(v)
+                        v = json.loads(v)   # 写侧 json.dumps，读侧对称解码
                     except ValueError:
                         v = v.strip('"')
                 else:
-                    v = v.strip("'")
-                os.environ.setdefault(k, v)
+                    v = v.split("#", 1)[0].strip().strip("'")
+                if k:
+                    os.environ.setdefault(k, v)
     except OSError:
         pass
 
@@ -57,7 +68,77 @@ def _load_dotenv():
 _load_dotenv()
 GLOBAL_API_KEY = os.environ.get("API_KEY", "")     # 兜底 key；仅存服务端，绝不下发前端
 
-app = FastAPI(title="LLM-SPEED")
+log = logging.getLogger("llm-speed")
+
+
+# ---------------------------------------------------------------------------
+# 本机写接口的同源 / Host 校验与请求体限额（ADR-0081）
+#
+# 威胁模型：全端点无鉴权（本地单用户工具，SOUL 边界），因此"谁能给本机发请求"
+# 就是唯一防线。浏览器里两个已知的绕过口子必须堵：
+#   ① DNS rebinding：恶意页面先解析到自己、再重解析到 127.0.0.1，于是对
+#      http://evil.tld:8501 的请求变成"同源"，可读写全部接口。防法是校验 Host
+#      必须是本机地址（TrustedHostMiddleware），rebinding 的 Host 过不去。
+#   ② 无 Origin 校验的写接口：`PUT /api/config` 能整表替换 providers，把已有
+#      provider 的 gateway_urls 改成攻击者地址，随后 `GET /api/models` 就把
+#      .env 里的 API_KEY_<同名> 发给攻击者。FastAPI 不校验 Content-Type，
+#      text/plain 的"简单请求"可绕过 CORS 预检，副作用无需读响应。防法是
+#      拒绝跨源写请求（Origin/Sec-Fetch-Site），并对请求体设上限。
+# 非浏览器客户端（curl/脚本）不带 Origin/Sec-Fetch-Site，照常可用。
+# ---------------------------------------------------------------------------
+_TRUSTED_HOSTS = [h.strip() for h in os.environ.get("ALLOWED_HOSTS", "").split(",")
+                  if h.strip()] or ["127.0.0.1", "localhost", "[::1]", "::1",
+                                    "testserver"]
+_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_MAX_BODY_BYTES = 2 * 1024 * 1024   # 写请求体上限：畸形 50MB cfg 曾被原样广播+落盘
+
+
+def _origin_matches_host(origin: str, host: str) -> bool:
+    """Origin 的 netloc 是否等于 Host（同源）。解析失败一律判不匹配。"""
+    try:
+        netloc = urllib.parse.urlsplit(origin).netloc
+    except ValueError:
+        return False
+    return bool(netloc) and netloc == host
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """启动周期清理任务：RUNS 与事件 history 驻留内存，只在下次 bench_start
+    清理会漏掉"起一轮就不再动"的场景（ADR-0009/0081）。"""
+    task = asyncio.create_task(_purge_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+app = FastAPI(title="LLM-SPEED", lifespan=_lifespan)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=_TRUSTED_HOSTS)
+
+
+@app.middleware("http")
+async def _guard_write_requests(request: Request, call_next):
+    if request.method in _UNSAFE_METHODS:
+        origin = request.headers.get("origin")
+        if origin and not _origin_matches_host(origin, request.headers.get("host", "")):
+            return JSONResponse(
+                {"detail": "跨源写请求被拒绝（本机写接口只接受同源请求；"
+                           "确需跨源请在服务端显式放行）"}, status_code=403)
+        site = request.headers.get("sec-fetch-site")
+        if site and site not in ("same-origin", "none"):
+            return JSONResponse(
+                {"detail": "跨站写请求被拒绝（Sec-Fetch-Site 非 same-origin）"},
+                status_code=403)
+        raw_len = request.headers.get("content-length")
+        if raw_len and raw_len.isdigit() and int(raw_len) > _MAX_BODY_BYTES:
+            return JSONResponse(
+                {"detail": f"请求体过大（上限 {_MAX_BODY_BYTES // 1024} KB）"},
+                status_code=413)
+    return await call_next(request)
+
 
 RUNS: dict[str, BenchRun] = {}
 # _drive 后台任务强引用集：create_task 不保证持有引用，弱引用任务可能被 GC 提前回收
@@ -243,13 +324,16 @@ async def pick_gateway_url(p: dict) -> tuple[str, float | None]:
     """多地址择优：**按配置顺序取第一个可达地址**（用户把内网等优选地址排前，
     可达即绕开隧道等传输中继；不可达自动落到下一个）。并发探测、取可达者中
     顺序最前；全部不可达回退首个（由测速引擎报出真实错误）。
-    返回 (选中地址, 延迟秒)。"""
+    返回 (选中地址, 延迟秒)。
+
+    探测**不带 Authorization**（ADR-0081）：候选里可能混着 http 明文内网地址，
+    旧实现把同一把 key 并发发往全部候选——包括最终不会选中的那些。可达性与
+    是否带凭据无关（无鉴权探测通常得 401，非 404 即视为可达），所以去掉凭据
+    不损失判别力，只把 key 的暴露面收敛到"最终选中的那一个地址"（由引擎下发）。"""
     urls = p.get("gateway_urls") or [p["gateway_url"]]
     if len(urls) == 1:
         return urls[0], None
-    key = provider_key(p)
-    headers = {"Authorization": f"Bearer {key}"} if key else {}
-    lats = await asyncio.gather(*(_probe_url(u, headers) for u in urls))
+    lats = await asyncio.gather(*(_probe_url(u, {}) for u in urls))
     for u, lat in zip(urls, lats):
         if lat is not None:
             return u, lat
@@ -286,26 +370,113 @@ async def get_config():
 # ---------------------------------------------------------------------------
 
 _PROVIDER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# 模型名（历史存档改名端点用）：禁止控制字符与 HTML/属性注入相关字符。
+# 不用"正向白名单字母数字"是因为真实网关模型名含 CJK、点、斜杠、冒号、@ 等，
+# 一律拒绝会挡住正常改名；这里只挡真正会造成展示层/请求头问题的字符。
+_MODEL_NAME_RE = re.compile(r"^[^\x00-\x1f\x7f\"'<>\\&]{1,200}$")
 
 
 def _atomic_write(path: str, text: str, private: bool = False):
-    # 临时文件在目标同目录以 mkstemp 创建（进程 id + 随机唯一名）：固定 .tmp
-    # 路径在多进程部署下会并发互踩；mkstemp 本身 0o600，凭据类新建即收紧
+    """原子写：同目录临时文件 + fsync + os.replace。
+
+    fsync 不是可有可无：只替换不落盘时，掉电后可能留下 0 字节/半截的
+    config.json 或 .env（凭据文件被清空 = 全部 provider 失去 key）。
+    private=True 用于凭据文件（.env）：无论旧文件权限如何都收紧到 0o600——
+    旧实现"沿用原权限"会把 `cp .env.example .env` 带来的 0664 一直传下去，
+    同机其他用户可直接读走 API Key。"""
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
                                prefix=os.path.basename(path) + ".", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        if private:   # 凭据类文件（.env）：沿用原文件权限（新建已 0o600）
-            os.chmod(tmp, stat.S_IMODE(os.stat(path).st_mode)
-                     if os.path.exists(path) else 0o600)
+            f.flush()
+            os.fsync(f.fileno())
+        if private:
+            os.chmod(tmp, 0o600)
         os.replace(tmp, path)   # 原子替换，写坏一半不会毁掉旧配置
+        try:                    # 目录项落盘，rename 本身也需要持久化
+            dfd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            pass
     except BaseException:
         try:
             os.unlink(tmp)      # 失败路径清理临时文件残渣
         except OSError:
             pass
         raise
+
+
+# 历史列表摘要缓存：文件名 → (mtime, size, 摘要)。只缓存列表页真正需要的字段，
+# 不缓存 results（那是 MB 级）；存档被 note/env/rename/retest 改写时 mtime 变，
+# 缓存自然失效。超上限整体清空（列表页最多 50 项，够用且实现最简）。
+_HIST_CACHE: dict[str, tuple[float, int, dict]] = {}
+_HIST_CACHE_MAX = 200
+
+
+def _archive_summary(path: str, name: str) -> dict | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    prev = _HIST_CACHE.get(name)
+    if prev and prev[0] == st.st_mtime and prev[1] == st.st_size:
+        return prev[2]
+    try:
+        with open(path, encoding="utf-8") as fp:
+            d = json.load(fp)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None   # 损坏/半截存档不进列表，也不阻塞其余条目
+    cfg = d.get("cfg", {})
+    summary = {
+        "run_id": d.get("run_id", name), "started_at": d.get("started_at"),
+        "models": cfg.get("models", []),
+        "scenarios": cfg.get("scenarios", []),
+        "ctx_list": cfg.get("ctx_list", []),
+        "concurrencies": cfg.get("concurrencies", []),
+        "agent_cache_ladder": cfg.get("agent_cache_ladder"),
+        "agent_inst_ladder": cfg.get("agent_inst_ladder"),
+        # 旧存档（连续任务链口径）标题展示回退用
+        "agent_turns": cfg.get("agent_turns"),
+        "agent_turns_p1": cfg.get("agent_turns_p1"),
+        "agent_turns_p2": cfg.get("agent_turns_p2"),
+        "agent_cold_ctx": cfg.get("agent_cold_ctx"),
+        "note": cfg.get("note") or "",
+        "n_points": len(d.get("results", [])),
+    }
+    if len(_HIST_CACHE) >= _HIST_CACHE_MAX:
+        _HIST_CACHE.clear()
+    _HIST_CACHE[name] = (st.st_mtime, st.st_size, summary)
+    return summary
+
+
+def _dump_archive(d: dict) -> str:
+    return json.dumps(d, ensure_ascii=False, indent=1) + "\n"
+
+
+async def _read_json(path: str, what: str = "存档") -> dict:
+    """异步读 JSON（线程池执行，ADR-0082）。
+
+    11MB 级存档的 json.load 要占住事件循环数十毫秒，而 TTFT/decode 就是同一
+    循环里的 perf_counter 测量——历史面板一开就能把正在跑的测速读数测歪。
+    缺失/损坏统一 404（与 _load_archive 同口径）。"""
+    def _do():
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    try:
+        return await asyncio.to_thread(_do)
+    except FileNotFoundError:
+        raise HTTPException(404, "not found") from None
+    except json.JSONDecodeError:
+        raise HTTPException(404, f"{what}文件已损坏（JSON 无法解析）") from None
+
+
+async def _write_json(path: str, d: dict) -> None:
+    """异步原子写 JSON（线程池执行）：同步 dumps(11MB) ≈ 66ms 同样会卡住测速。"""
+    await asyncio.to_thread(_atomic_write, path, _dump_archive(d))
 
 
 def _provider_deploy_groups(provider: dict) -> list[str]:
@@ -328,9 +499,15 @@ def _provider_deploy_groups(provider: dict) -> list[str]:
 
 
 def _validate_providers(providers) -> list[dict]:
-    """白名单化前端提交的 providers（config.json 的权威结构），拒绝非法值。"""
-    if not isinstance(providers, list) or not providers:
-        raise HTTPException(400, "providers 不能为空")
+    """白名单化前端提交的 providers（config.json 的权威结构），拒绝非法值。
+
+    允许空数组：文档化的空态（gateway-integration.md / web-config.md）就是
+    "providers 为空 + 前端空态引导新增"。旧实现拒绝空数组，导致用户删掉最后
+    一个 provider 后保存 400、除手改 config.json 无路可走。"""
+    if not isinstance(providers, list):
+        raise HTTPException(400, "providers 必须是数组")
+    if not providers:
+        return []
     out, seen = [], set()
     env_owners: dict[str, str] = {}
     for p in providers:
@@ -495,7 +672,8 @@ async def put_config(body: dict):
         # 解析失败时 d={}：以空底整表覆盖会丢光其他顶层键，拒绝写入（ADR-0001）
         raise HTTPException(409, f"config.json 已损坏，拒绝覆盖写入（{err}），请先手工修复")
     d["providers"] = providers
-    _atomic_write(CONFIG_PATH, json.dumps(d, ensure_ascii=False, indent=2) + "\n")
+    await asyncio.to_thread(_atomic_write, CONFIG_PATH,
+                            json.dumps(d, ensure_ascii=False, indent=2) + "\n")
     return {"ok": True, "providers": len(providers)}
 
 
@@ -513,6 +691,14 @@ async def put_config_key(body: dict):
         raise HTTPException(400, f"provider 不存在: {provider}")
     key = str(body.get("key") or "")
     clear = bool(body.get("clear"))
+    if not clear and key:
+        # 粘贴常带尾随换行/制表符：进了 os.environ 就会拼进 Authorization 头，
+        # httpx 直接抛 LocalProtocolError("Illegal header value")，之后每个请求
+        # 都失败且报错与 key 无关，极难定位；长度上限防畸形超长值撑爆 .env 与头
+        if len(key) > 512:
+            raise HTTPException(400, "API Key 过长（≤512 字符）")
+        if any(c in key for c in "\r\n\x00"):
+            raise HTTPException(400, "API Key 不得包含换行或空字符")
     env_name = _env_key_name(provider)
     env_path = os.path.join(BASE, ".env")
     lines = []
@@ -528,7 +714,7 @@ async def put_config_key(body: dict):
         os.environ[env_name] = key
     else:
         os.environ[env_name] = ""   # 空值回退全局 API_KEY（load_providers 语义）
-    _atomic_write(env_path, "\n".join(lines) + "\n", private=True)
+    await asyncio.to_thread(_atomic_write, env_path, "\n".join(lines) + "\n", True)
     return {"ok": True}
 
 
@@ -570,6 +756,38 @@ async def list_models(provider: str | None = None):
         else:
             ids.append(str(m))
     return {"models": ids}
+
+
+# 测速请求允许客户端提交的配置键（ADR-0081）。其余键（gateway_url/api_key/
+# model_info/model_max_ctx/...）一律由服务端在下面自行注入，不接受客户端指定。
+_BENCH_CFG_KEYS = frozenset({
+    "provider", "models", "scenarios", "ctx_list", "concurrencies",
+    "translate_ladder", "agent_cache_ladder", "agent_inst_ladder",
+    "asr_ladder", "ocr_ladder", "tts_ladder",
+    "max_tokens", "repeats", "timeout_s", "thinking", "reply_mode",
+    "cache", "temperature", "cpt", "note",
+})
+_MODEL_NAME_MAX = 256
+
+
+def _clean_bench_cfg(cfg: dict) -> dict:
+    """按白名单重建测速配置（未知键丢弃），并给自由文本设长度上限。
+
+    不做类型/范围校验（那是 _validate_bench_cfg 的职责），只管"能进来的键"
+    与"字符串能有多长"——模型名会进请求体、SSE 帧、存档与前端 DOM，无上限时
+    一个 10MB 的模型名就能把整条链路撑爆。"""
+    if not isinstance(cfg, dict):
+        raise HTTPException(400, "测速配置必须是对象")
+    clean = {k: cfg[k] for k in _BENCH_CFG_KEYS if k in cfg}
+    models = clean.get("models")
+    if isinstance(models, list) and any(
+            isinstance(m, str) and len(m) > _MODEL_NAME_MAX for m in models):
+        raise HTTPException(400, f"模型名过长（单个 ≤{_MODEL_NAME_MAX} 字符）")
+    if "provider" in clean:
+        if not isinstance(clean["provider"], str):
+            raise HTTPException(400, "provider 须为字符串")
+        clean["provider"] = clean["provider"].strip()[:64]
+    return clean
 
 
 def _validate_bench_cfg(cfg: dict):
@@ -648,6 +866,19 @@ def _validate_bench_cfg(cfg: dict):
     th = cfg.get("thinking")
     if th is not None and th not in ("auto", "enabled", "disabled"):
         raise HTTPException(400, "thinking 须为 auto/enabled/disabled")
+    # 白名单收进来的自由参数也一并钳制：畸形值会直接进请求体发给网关，
+    # 或在引擎里参与构造（ADR-0081 同批）
+    cm = cfg.get("cache")
+    if cm is not None and cm not in ("bust", "stable"):
+        raise HTTPException(400, "cache 须为 bust 或 stable")
+    tv2 = cfg.get("temperature")
+    if tv2 is not None and (not isinstance(tv2, (int, float)) or isinstance(tv2, bool)
+                            or not 0 <= tv2 <= 2):
+        raise HTTPException(400, "temperature 须为 0~2 的数值")
+    cp = cfg.get("cpt")
+    if cp is not None and (not isinstance(cp, (int, float)) or isinstance(cp, bool)
+                           or not 0.3 <= cp <= 20):
+        raise HTTPException(400, "cpt 须为 0.3~20 的数值（chars/token）")
 
 
 def _agent_matrix_max_total(cfg: dict) -> int:
@@ -662,6 +893,10 @@ def _agent_matrix_max_total(cfg: dict) -> int:
 @app.post("/api/bench/start")
 async def bench_start(cfg: dict):
     _purge_finished_runs()
+    # 白名单重建：请求体整份进 RUNS[].cfg，随后被 SSE cfg 帧广播（bench.py
+    # emit）并写入存档。旧实现只校验已知字段、未知键原样保留，于是
+    # `{"junk": "A"*50MB}` 会被常驻内存 + 广播 + 落盘（ADR-0081）。
+    cfg = _clean_bench_cfg(cfg)
     for field in ("models", "scenarios", "concurrencies"):
         if not cfg.get(field):
             raise HTTPException(400, f"缺少配置项: {field}")
@@ -771,14 +1006,29 @@ async def bench_start(cfg: dict):
     RUNS[run.run_id] = run
     t = asyncio.create_task(_drive(run, cfg.get("provider")))
     _BG_TASKS.add(t)                        # 持强引用防 GC 提前回收任务
-    t.add_done_callback(_BG_TASKS.discard)
+    t.add_done_callback(_on_drive_done)
     return {"run_id": run.run_id}
+
+
+def _on_drive_done(task: asyncio.Task):
+    """后台任务收口：必须取回异常。旧实现只 discard 引用，_save 抛错
+    （磁盘满/权限）时异常被静默吞掉——客户端只看到 SSE 流无声结束，
+    服务端也没有任何日志，事后完全无从查起（ADR-0081）。"""
+    _BG_TASKS.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.exception("测速后台任务异常终止", exc_info=exc)
 
 
 async def _drive(run: BenchRun, provider_name: str | None):
     """驱动一次测速，结束后收割网关能力结论（thinking/温度参数支持度），
-    供下次测速免 400 试探。"""
-    await run.run()
+    供下次测速免 400 试探。收尾阶段（存档/日志）自身的异常不得再抛出。"""
+    try:
+        await run.run()
+    except Exception:   # noqa: BLE001  引擎内部已收口为 error 事件，这里只兜底存档/收尾
+        log.exception("测速运行 %s 未捕获异常", run.run_id)
     if provider_name:
         _CAP[provider_name] = {
             "thinking_unsupported": run.thinking_unsupported,
@@ -792,6 +1042,20 @@ def _purge_finished_runs(ttl_s: float = 2 * 3600):
     for rid, r in list(RUNS.items()):
         if r.finished_at and now - r.finished_at > ttl_s:
             RUNS.pop(rid, None)
+
+
+_PURGE_INTERVAL_S = 600
+
+
+async def _purge_loop():
+    """周期清理（lifespan 启动）：不依赖"下一次 bench_start"触发。"""
+    while True:
+        await asyncio.sleep(_PURGE_INTERVAL_S)
+        try:
+            _purge_finished_runs()
+        except Exception:   # noqa: BLE001  清理失败不得拖垮服务
+            log.exception("清理已结束运行失败")
+
 
 
 @app.post("/api/bench/stop/{run_id}")
@@ -866,72 +1130,49 @@ async def bench_active():
 
 @app.get("/api/bench/history")
 async def bench_history():
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    files = sorted((f for f in os.listdir(RESULTS_DIR) if f.endswith(".json")),
-                   reverse=True)[:50]
-    out = []
-    for f in files:
-        try:
-            with open(os.path.join(RESULTS_DIR, f), encoding="utf-8") as fp:
-                d = json.load(fp)
-            cfg = d.get("cfg", {})
-            out.append({"run_id": d.get("run_id", f), "started_at": d.get("started_at"),
-                        "models": cfg.get("models", []),
-                        "scenarios": cfg.get("scenarios", []),
-                        "ctx_list": cfg.get("ctx_list", []),
-                        "concurrencies": cfg.get("concurrencies", []),
-                        "agent_cache_ladder": cfg.get("agent_cache_ladder"),
-                        "agent_inst_ladder": cfg.get("agent_inst_ladder"),
-                        # 旧存档（连续任务链口径）标题展示回退用
-                        "agent_turns": cfg.get("agent_turns"),
-                        "agent_turns_p1": cfg.get("agent_turns_p1"),
-                        "agent_turns_p2": cfg.get("agent_turns_p2"),
-                        "agent_cold_ctx": cfg.get("agent_cold_ctx"),
-                        "note": cfg.get("note") or "",
-                        "n_points": len(d.get("results", []))})
-        except Exception:  # noqa: BLE001
-            continue
-    return {"history": out}
+    """历史列表：只回摘要，且带 (mtime,size) 缓存 + 线程池执行。
+
+    旧实现每次请求都同步 json.load 最多 50 份完整存档（实测单份 11MB、
+    全量 ~70ms 占住事件循环），把"打开历史面板"变成对正在跑的测速的计时干扰
+    （ADR-0082）。摘要缓存让同一份未变动的存档只解析一次。"""
+    def _collect():
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        files = sorted((f for f in os.listdir(RESULTS_DIR) if f.endswith(".json")),
+                       reverse=True)[:50]
+        return [_archive_summary(os.path.join(RESULTS_DIR, f), f) for f in files]
+
+    out = await asyncio.to_thread(_collect)
+    return {"history": [s for s in out if s]}
 
 
 @app.get("/api/bench/history/{run_id}")
 async def bench_history_detail(run_id: str):
-    if any(c in run_id for c in "/\\") or ".." in run_id:   # 与 delete 对称的路径穿越防护
-        raise HTTPException(400, "非法 run_id")
+    _valid_run_id(run_id)
     path = os.path.join(RESULTS_DIR, f"{run_id}.json")
     if not os.path.exists(path):
         raise HTTPException(404, "not found")
-    try:
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except json.JSONDecodeError:
-        # 与「不存在」区分：文件在但内容损坏，提示用户手工修复/删除
-        raise HTTPException(404, "存档文件已损坏（JSON 无法解析），无法读取") from None
+    # 与「不存在」区分：损坏时给可行动提示（_read_json 统一措辞）
+    return await _read_json(path, "存档")
 
 
 @app.post("/api/bench/history/{run_id}/note")
 async def bench_history_note(run_id: str, body: dict):
     """事后修改历史存档的任务备注（写回 cfg.note，与启动时填的同一字段）。"""
-    if any(c in run_id for c in "/\\") or ".." in run_id:
-        raise HTTPException(400, "非法 run_id")
+    _valid_run_id(run_id)
     path = os.path.join(RESULTS_DIR, f"{run_id}.json")
     if not os.path.exists(path):
         raise HTTPException(404, "not found")
     note = body.get("note")
     if not isinstance(note, str):
         raise HTTPException(400, "note 须为字符串")
-    try:
-        with open(path, encoding="utf-8") as f:
-            d = json.load(f)
-    except json.JSONDecodeError:
-        raise HTTPException(404, "存档文件已损坏（JSON 无法解析），无法修改备注") from None
+    d = await _read_json(path, "存档")
     note = note.strip()[:80]
     if note:
         d.setdefault("cfg", {})["note"] = note
     else:
         d.get("cfg", {}).pop("note", None)
     # 原子替换写回：直接覆写会因进程被杀留下写了一半的存档，永久损坏既有测速记录
-    _atomic_write(path, json.dumps(d, ensure_ascii=False, indent=1) + "\n")
+    await _write_json(path, d)
     return {"ok": True, "note": note}
 
 
@@ -943,24 +1184,25 @@ async def bench_history_rename(run_id: str, body: dict):
     temperature_locked 名单、逐测速点 model 字段；并在存档顶层追加
     model_renames 审计留痕（from/to/at），原子写回（与 note 端点同口径）。
     """
-    if any(c in run_id for c in "/\\") or ".." in run_id:
-        raise HTTPException(400, "非法 run_id")
+    _valid_run_id(run_id)
     old = str(body.get("old") or "").strip()
     new = str(body.get("new") or "").strip()
     if not old or not new:
         raise HTTPException(400, "old/new 均须为非空字符串")
     if len(old) > 200 or len(new) > 200:
         raise HTTPException(400, "模型名过长（≤200 字符）")
+    # 模型名会进前端 DOM（含属性/内联事件）与网关请求体：限制为可打印常见字符，
+    # 既避免属性逃逸类注入，也避免控制字符破坏存档与展示
+    if not _MODEL_NAME_RE.fullmatch(new):
+        raise HTTPException(
+            400, "新模型名含非法字符（仅字母/数字/._:@+/-/空格/中文等可打印字符，"
+                 "不得含引号、尖括号、反斜杠与控制字符）")
     if old == new:
         raise HTTPException(400, "新旧模型名相同，无需改名")
     path = os.path.join(RESULTS_DIR, f"{run_id}.json")
     if not os.path.exists(path):
         raise HTTPException(404, "not found")
-    try:
-        with open(path, encoding="utf-8") as f:
-            d = json.load(f)
-    except json.JSONDecodeError:
-        raise HTTPException(404, "存档文件已损坏（JSON 无法解析），无法改名") from None
+    d = await _read_json(path, "存档")
     cfg = d.get("cfg")
     if not isinstance(cfg, dict):
         raise HTTPException(404, "存档缺少 cfg 段（结构不完整），无法改名")
@@ -969,6 +1211,14 @@ async def bench_history_rename(run_id: str, body: dict):
         raise HTTPException(400, f"存档中不存在模型 {old!r}（本次测速模型：{models}）")
     if new in models:
         raise HTTPException(400, f"存档中已存在模型 {new!r}，改名会让两个模型同名混淆")
+    # 目标名已作为快照键存在时一并拒绝：静默覆盖会让新名的部署环境快照被旧名的
+    # 顶掉，卡片上的硬件/量化信息与实际测速条件不再对应
+    for key in ("model_info", "model_kind", "model_kinds", "model_max_ctx"):
+        mp = cfg.get(key)
+        if isinstance(mp, dict) and new in mp:
+            raise HTTPException(
+                400, f"存档的 {key} 中已存在模型 {new!r}，改名会覆盖其快照，"
+                     f"请先清理或改用其他名字")
     cfg["models"] = [new if m == old else m for m in models]
     for key in ("model_info", "model_kind", "model_kinds", "model_max_ctx"):
         mp = cfg.get(key)
@@ -982,9 +1232,24 @@ async def bench_history_rename(run_id: str, body: dict):
         if isinstance(p, dict) and p.get("model") == old:
             p["model"] = new
             n += 1
+    # 审计数组同步改名：retests/deletions/splices 里的 model 是身份五元组的一部分，
+    # 不改会让"改名前留的审计"指向一个已不存在的模型名，后续删除点/复测匹配不上
+    renamed_audit = 0
+    for key in ("retests", "deletions", "splices"):
+        for item in d.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("model") == old:
+                item["model"] = new
+                renamed_audit += 1
+            for rep in item.get("replaced") or []:
+                if isinstance(rep, dict) and rep.get("model") == old:
+                    rep["model"] = new
+                    renamed_audit += 1
     d.setdefault("model_renames", []).append(
-        {"from": old, "to": new, "at": time.strftime("%Y-%m-%d %H:%M:%S")})
-    _atomic_write(path, json.dumps(d, ensure_ascii=False, indent=1) + "\n")
+        {"from": old, "to": new, "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+         "points": n, "audit_entries": renamed_audit})
+    await _write_json(path, d)
     return {"ok": True, "old": old, "new": new, "points": n}
 
 
@@ -997,8 +1262,7 @@ async def bench_history_env(run_id: str, body: dict):
     省略键保留原值 / null 清空 / 正整数落盘），未提交的 kinds 等字段保留不
     抹；旧 quants 数组键只读兼容，重写时移除。
     """
-    if any(c in run_id for c in "/\\") or ".." in run_id:
-        raise HTTPException(400, "非法 run_id")
+    _valid_run_id(run_id)
     path = os.path.join(RESULTS_DIR, f"{run_id}.json")
     if not os.path.exists(path):
         raise HTTPException(404, "not found")
@@ -1008,11 +1272,7 @@ async def bench_history_env(run_id: str, body: dict):
         raise HTTPException(400, "model 须为非空字符串")
     if not isinstance(info, dict):
         raise HTTPException(400, "info 须为对象")
-    try:
-        with open(path, encoding="utf-8") as f:
-            d = json.load(f)
-    except json.JSONDecodeError:
-        raise HTTPException(404, "存档文件已损坏（JSON 无法解析），无法修改环境") from None
+    d = await _read_json(path, "存档")
     cfg = d.get("cfg")
     if not isinstance(cfg, dict):
         raise HTTPException(404, "存档缺少 cfg 段（结构不完整），无法修改环境")
@@ -1069,7 +1329,7 @@ async def bench_history_env(run_id: str, body: dict):
         entry["max_ctx"] = int(mv) if mv is not None else None
     entry.pop("quants", None)   # 旧数组键不再写出（镜像 kinds/kind 先例）
     # 原子替换写回：与 note 端点同口径
-    _atomic_write(path, json.dumps(d, ensure_ascii=False, indent=1) + "\n")
+    await _write_json(path, d)
     return {"ok": True, "model_info": entry}
 
 
@@ -1091,16 +1351,11 @@ async def bench_history_retest(run_id: str, body: dict):
     保留为独立记录。旧版 agent 连续任务链测点（turn 字段）的链上下文无法
     独立重建，不支持复测。
     """
-    if any(c in run_id for c in "/\\") or ".." in run_id:
-        raise HTTPException(400, "非法 run_id")
+    _valid_run_id(run_id)
     path = os.path.join(RESULTS_DIR, f"{run_id}.json")
     if not os.path.exists(path):
         raise HTTPException(404, "not found")
-    try:
-        with open(path, encoding="utf-8") as f:
-            d = json.load(f)
-    except json.JSONDecodeError:
-        raise HTTPException(404, "存档文件已损坏（JSON 无法解析），无法复测") from None
+    d = await _read_json(path, "存档")
     cfg0 = d.get("cfg")
     if not isinstance(cfg0, dict):
         raise HTTPException(404, "存档缺少 cfg 段（结构不完整），无法复测")
@@ -1152,7 +1407,7 @@ async def bench_history_retest(run_id: str, body: dict):
     res = await bench_start(cfg)   # 复用启动链路：provider 解析/校验/告警/登记
     t = asyncio.create_task(_merge_retest(run_id, res["run_id"], ident))
     _BG_TASKS.add(t)
-    t.add_done_callback(_BG_TASKS.discard)
+    t.add_done_callback(_on_drive_done)
     return {"ok": True, "run_id": res["run_id"], "archive": run_id}
 
 
@@ -1173,9 +1428,8 @@ async def _merge_retest(archive_id: str, new_run_id: str, ident: tuple):
         return   # 未产出对应点（停止/超窗跳档等）：复测存档保留为独立记录
     apath = os.path.join(RESULTS_DIR, f"{archive_id}.json")
     try:
-        with open(apath, encoding="utf-8") as f:
-            d = json.load(f)
-    except (OSError, json.JSONDecodeError):
+        d = await _read_json(apath, "存档")
+    except HTTPException:
         return   # 原存档失踪/损坏：不动它，复测存档保留
     results = d.get("results")
     if not isinstance(results, list):
@@ -1191,7 +1445,7 @@ async def _merge_retest(archive_id: str, new_run_id: str, ident: tuple):
                 "new_all_ok": new_point.get("all_ok"),
                 "retest_run_id": new_run_id})
             results[i] = new_point
-            _atomic_write(apath, json.dumps(d, ensure_ascii=False, indent=1) + "\n")
+            await _write_json(apath, d)
             # 合并成功才删复测运行的独立存档；finished_at 先于 _save 置位，
             # 文件可能尚未落盘，短轮询重试
             rpath = os.path.join(RESULTS_DIR, f"{new_run_id}.json")
@@ -1204,24 +1458,185 @@ async def _merge_retest(archive_id: str, new_run_id: str, ident: tuple):
             return
 
 
-@app.delete("/api/bench/history/{run_id}")
-async def bench_history_delete(run_id: str):
-    if any(c in run_id for c in "/\\") or ".." in run_id:
+def _valid_run_id(run_id: str):
+    """run_id 白名单（与生成侧 _run_id 同字符集）：只允许时间戳 + 短随机后缀。
+
+    黑名单式（挡 `/ \\ ..`）够挡穿越，但放开任意字符；白名单更省心——存档
+    路由是全部按 id 落盘/删除的入口，且让"非 run_id 文件名"天然不可达。"""
+    if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", run_id):
         raise HTTPException(400, "非法 run_id")
+
+
+async def _load_archive(run_id: str) -> dict:
+    """读存档（删除点/拼接共用）：缺失或 JSON 损坏统一 404（线程池执行）。"""
+    _valid_run_id(run_id)
     path = os.path.join(RESULTS_DIR, f"{run_id}.json")
     if not os.path.exists(path):
         raise HTTPException(404, "not found")
-    os.remove(path)
+    return await _read_json(path, "存档")
+
+
+def _check_point_ident(body: dict) -> tuple:
+    """测点身份校验（删除点用，口径与复测一致 + turn 消歧）：返回
+    (model, scenario, ctx_target, inst, conc, turn)。turn 用于旧版 agent
+    链测点——同五元组按 turn 区分，缺省 None 匹配矩阵/文本/媒体点。"""
+    model = body.get("model")
+    scenario = body.get("scenario")
+    ctx_target = body.get("ctx_target")
+    conc = body.get("concurrency")
+    inst = body.get("inst_tokens")
+    turn = body.get("turn")
+    if not isinstance(model, str) or not model.strip():
+        raise HTTPException(400, "model 须为非空字符串")
+    if not isinstance(scenario, str) or scenario not in SCENARIOS:
+        raise HTTPException(400, f"scenario 须取自白名单: {sorted(SCENARIOS)}")
+    if (not isinstance(ctx_target, (int, float)) or isinstance(ctx_target, bool)
+            or not 0 <= ctx_target <= 4 * 1048576):
+        raise HTTPException(400, "ctx_target 须为 0~4M 的数值")
+    if not isinstance(conc, int) or isinstance(conc, bool) or not 1 <= conc <= 64:
+        raise HTTPException(400, "concurrency 须为 1~64 的整数")
+    if inst is not None and (not isinstance(inst, int)
+                             or isinstance(inst, bool) or inst < 1):
+        raise HTTPException(400, "inst_tokens 须为正整数或 null")
+    if turn is not None and (not isinstance(turn, int)
+                             or isinstance(turn, bool) or turn < 0):
+        raise HTTPException(400, "turn 须为非负整数或 null")
+    return (model, scenario, int(ctx_target), inst, conc, turn)
+
+
+@app.post("/api/bench/history/{run_id}/delete-point")
+async def bench_history_delete_point(run_id: str, body: dict):
+    """历史存档单点删除：按身份五元组 + turn 移除一个测速点（剔除失败/
+    不可信点位），原子写回并在存档顶层 deletions 审计数组留痕（身份、
+    删除前 all_ok、时间）。删空 results 允许（存档留壳，整档删除走
+    DELETE /api/bench/history/{run_id}）；删除不可恢复，确认由前端兜底。"""
+    d = await _load_archive(run_id)
+    ident = _check_point_ident(body)
+    results = d.get("results")
+    if not isinstance(results, list):
+        raise HTTPException(404, "存档缺少 results 段（结构不完整）")
+    hits = [i for i, p in enumerate(results)
+            if isinstance(p, dict)
+            and _point_identity(p) == ident[:5]
+            and p.get("turn") == ident[5]]
+    if not hits:
+        raise HTTPException(404, "存档中找不到该测试点（模型/场景/档位/并发/turn 不匹配）")
+    if len(hits) > 1:   # 身份六元组仍不唯一：不猜，拒绝并要求人工核查
+        raise HTTPException(409, "身份命中多个测点（存档异常），未删除")
+    old = results.pop(hits[0])
+    d.setdefault("deletions", []).append({
+        "model": ident[0], "scenario": ident[1], "ctx_target": ident[2],
+        "inst_tokens": ident[3], "concurrency": ident[4], "turn": ident[5],
+        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "prev_all_ok": old.get("all_ok")})
+    path = os.path.join(RESULTS_DIR, f"{run_id}.json")
+    await _write_json(path, d)
+    return {"ok": True, "removed": 1, "remaining": len(results)}
+
+
+@app.post("/api/bench/history/{run_id}/splice")
+async def bench_history_splice(run_id: str, body: dict):
+    """历史存档拼接：把来源存档的全部测速点合并进目标存档——同身份点
+    （五元组+turn）以来源覆盖目标、新身份点追加（用途：个别档位在
+    原运行测不出，另跑单点运行后拼回主存档）。拼接点打 spliced_from/
+    spliced_at 溯源标（前端徽标展示），目标存档顶层 splices 审计留痕
+    （来源、新增/覆盖清单、覆盖前后 all_ok）。两边测量口径参数
+    （max_tokens/reply_mode/thinking）不一致不阻断，随响应 warnings
+    返回由前端提示人工判断。"""
+    src = body.get("source_run_id")
+    if not isinstance(src, str) or not src.strip():
+        raise HTTPException(400, "source_run_id 须为非空字符串")
+    src = src.strip()
+    _valid_run_id(src)
+    _valid_run_id(run_id)
+    if src == run_id:
+        raise HTTPException(400, "来源与目标不能是同一存档")
+    d = await _load_archive(run_id)
+    sd = await _load_archive(src)
+    results = d.get("results")
+    sresults = sd.get("results")
+    if not isinstance(results, list):
+        raise HTTPException(404, "目标存档缺少 results 段（结构不完整）")
+    if not isinstance(sresults, list):
+        raise HTTPException(404, "来源存档缺少 results 段（结构不完整）")
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    index = {}   # 身份六元组 → results 下标（重复身份后者覆盖前者，与拼接同口径）
+    for i, p in enumerate(results):
+        if isinstance(p, dict):
+            index[(_point_identity(p), p.get("turn"))] = i
+    added, replaced = 0, []
+    for sp in sresults:
+        if not isinstance(sp, dict):
+            continue
+        np = {**sp, "spliced_from": src, "spliced_at": now}
+        key = (_point_identity(sp), sp.get("turn"))
+        if key in index:
+            old = results[index[key]]
+            replaced.append({
+                "model": sp.get("model"), "scenario": sp.get("scenario"),
+                "ctx_target": sp.get("ctx_target"),
+                "inst_tokens": sp.get("inst_tokens"),
+                "concurrency": sp.get("concurrency"),
+                "turn": sp.get("turn"),
+                "prev_all_ok": old.get("all_ok") if isinstance(old, dict) else None,
+                "new_all_ok": sp.get("all_ok")})
+            results[index[key]] = np
+        else:
+            index[key] = len(results)
+            results.append(np)
+            added += 1
+    d.setdefault("splices", []).append({
+        "source_run_id": src, "at": now, "added": added, "replaced": replaced})
+    path = os.path.join(RESULTS_DIR, f"{run_id}.json")
+    await _write_json(path, d)
+    # 口径参数差异提示（不阻断）：同图混排不同口径的读数由用户裁决。
+    # provider / 部署快照 / 上下文上限必须一起比：把云端点拼进本地存档时，
+    # 点身份五元组里没有 provider，"同模型同档位"看着能合并，但卡片头部的
+    # 部署信息只来自目标存档，会把两套硬件的读数混在一台机器名下。
+    warnings = []
+    cfg, scfg = d.get("cfg") or {}, sd.get("cfg") or {}
+    for k, label in (("max_tokens", "输出预算"), ("reply_mode", "回复模式"),
+                     ("thinking", "思考模式"), ("temperature", "温度")):
+        if cfg.get(k) != scfg.get(k):
+            warnings.append(f"{label}不一致：目标 {cfg.get(k)} / 来源 {scfg.get(k)}")
+    for k, label in (("provider", "provider"), ("provider_label", "provider 名称"),
+                     ("gateway_url", "网关地址"), ("model_max_ctx", "上下文上限")):
+        if cfg.get(k) != scfg.get(k):
+            warnings.append(f"{label}不一致：目标 {cfg.get(k)} / 来源 {scfg.get(k)}")
+    tgt_info, src_info = cfg.get("model_info") or {}, scfg.get("model_info") or {}
+    for m in sorted(set(tgt_info) & set(src_info)):
+        if tgt_info[m] != src_info[m]:
+            warnings.append(f"模型 {m} 的部署快照不一致（硬件/框架/量化/参数），"
+                            f"拼接后卡片按目标存档展示")
+            break
+    return {"ok": True, "added": added, "replaced": len(replaced),
+            "warnings": warnings}
+
+
+@app.delete("/api/bench/history/{run_id}")
+async def bench_history_delete(run_id: str):
+    _valid_run_id(run_id)
+    path = os.path.join(RESULTS_DIR, f"{run_id}.json")
+    if not os.path.exists(path):
+        raise HTTPException(404, "not found")
+    await asyncio.to_thread(os.remove, path)
     return {"ok": True}
 
 
 @app.delete("/api/bench/history")
 async def bench_history_clear():
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    for f in os.listdir(RESULTS_DIR):
-        if f.endswith(".json"):
-            os.remove(os.path.join(RESULTS_DIR, f))
-    return {"ok": True}
+    def _clear():
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        removed = 0
+        for f in os.listdir(RESULTS_DIR):
+            p = os.path.join(RESULTS_DIR, f)
+            # 只删普通文件：目录名恰好以 .json 结尾（或符号链接）时
+            # os.remove 会抛 IsADirectoryError，让整个清空请求 500
+            if f.endswith(".json") and os.path.isfile(p) and not os.path.islink(p):
+                os.remove(p)
+                removed += 1
+        return removed
+    return {"ok": True, "removed": await asyncio.to_thread(_clear)}
 
 
 if __name__ == "__main__":

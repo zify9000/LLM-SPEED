@@ -7,9 +7,14 @@ __pycache__/
 # 敏感配置及数据
 .env
 .env.tmp
+.env.*
+!.env.example
 config.json
 config.json.tmp
 results/
+# 原子写的临时残渣（_atomic_write 用 <名字>.<随机>.tmp；进程被 SIGKILL 时会残留）
+.*.tmp
+*.tmp
 
 # 项目记忆文档：仅本地工作区，不入库、不上云
 AGENTS.md

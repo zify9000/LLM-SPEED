@@ -33,6 +33,8 @@ if not exist .env (
   echo [提示] 已从 .env.example 生成 .env——请先填入各 provider 的 API Key
   echo        （也可以启动后在页面「Provider 管理」抽屉里配置）
 )
+rem 凭据文件权限收紧：默认继承的 ACL 可能让本机其他账户读走全部 API Key
+icacls .env /inheritance:r /grant:r "%USERNAME%:F" >nul 2>nul
 
 if not exist config.json (
   if exist config.json.example (
@@ -41,8 +43,14 @@ if not exist config.json (
   )
 )
 
+if not defined HOST set HOST=127.0.0.1
 if not defined PORT set PORT=8501
-echo [启动] http://127.0.0.1:%PORT%（Ctrl+C 停止）
+if "%HOST%"=="0.0.0.0" (
+  echo [提示] HOST=0.0.0.0：服务对本机之外开放，而全端点无鉴权。
+  echo        写接口有 Host/同源校验，需在 .env 用 ALLOWED_HOSTS=^<访问用的主机名或IP^> 显式放行，
+  echo        否则请求会被拒绝；同时请自行评估局域网内他人可触发测速与删除历史的风险
+)
+echo [启动] http://%HOST%:%PORT%（Ctrl+C 停止）
 python server.py
 pause
 exit /b 0

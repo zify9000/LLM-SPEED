@@ -8,17 +8,17 @@
     },
     {
       "name": "qwen",
-      "label": "Qwen 云端",
-      "gateway_url": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode"
+      "label": "云端兼容网关（示例）",
+      "gateway_url": "https://api.example.com/v1"
     },
     {
-      "name": "kimi",
-      "label": "Kimi 云端",
-      "gateway_url": "https://api.kimi.com/coding",
+      "name": "cloud-long",
+      "label": "云端长上下文（示例）",
+      "gateway_url": "https://api.example.com/v1",
       "deployments": [
         {
-          "label": "Kimi K3",
-          "models": ["k3-256k"],
+          "label": "示例部署",
+          "models": ["your-model-name"],
           "max_ctx": 262144
         }
       ]
@@ -39,7 +39,7 @@
           "kv_quants": ["Q8_0", "Q4_K_M"],
           "hardware": "示例：按实际填写",
           "framework": "llama.cpp",
-          "params": "-c 196608 -b 16384 --cache-type-k/v q8_0",
+          "params": "示例：按实际启动参数填写（上下文长度 / 批大小 / KV 量化）",
           "max_ctx": 196608
         },
         {
