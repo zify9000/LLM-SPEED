@@ -307,7 +307,7 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
         old_early = mock_server.EARLY_STOP
         mock_server.EARLY_STOP = 4   # 首发点请求照常 prefill 后只吐 4 token 即 stop
         task = asyncio.create_task(run.run())
-        points, statuses = [], []
+        points, statuses, toasts = [], [], []
         try:
             while True:
                 ev = await asyncio.wait_for(q.get(), timeout=30)
@@ -317,6 +317,8 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
                     points.append(ev["point"])
                 elif ev.get("type") == "status":
                     statuses.append(ev.get("msg") or "")
+                    if ev.get("toast"):
+                        toasts.append(ev.get("msg") or "")
         finally:
             await task
             mock_server.EARLY_STOP = old_early
@@ -348,6 +350,12 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
                          "最终点位读数来自重测的正常批（usage 64 tokens）")
         self.assertEqual(p["finish"], "stop")
         self.assertTrue(p["all_ok"])
+        # 弃测重测必须弹悬浮岛提醒（2026-09-22 拍板补齐）：此前该 status 未带
+        # toast，用户在页面上只看到实时表多出一行 ✗，不知道「正在重测」——
+        # 重测是改变结果的动作，必须可见。断言走真实事件流，防回归
+        self.assertTrue(any("检测到异常输出" in m and "弃测重测" in m
+                            for m in toasts),
+                        f"弃测重测应随发 status toast:true；实际 toast={toasts}")
         self.assertTrue(p.get("decode_tok_s"), "重测批 decode 读数正常产出")
         self.assertTrue(any("仅输出 4/64 tokens" in s and "弃测重测" in s
                             for s in statuses),
@@ -1104,8 +1112,12 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
         url4, lat4 = await server.pick_gateway_url(p)
         self.assertEqual((url4, lat4), (dead_url, None))
 
-    async def _run_and_collect(self, **cfg_extra):
-        """跑一次最小矩阵（probe 必走），返回 (run, 全部事件列表)。"""
+    async def _run_and_collect(self, skip_probe=False, **cfg_extra):
+        """跑一次最小矩阵（probe 必走），返回 (run, 全部事件列表)。
+
+        skip_probe=True 时预置 cpt 校准跳过探测请求——探测本身也打一次 chat，
+        会消耗 mock 的一次性钩子（FLAKY_FAIL/EMPTY_STREAM_FAIL 等），断言
+        「第 N 发请求」的用例必须跳过它。"""
         run = BenchRun({
             "gateway_url": f"http://127.0.0.1:{self.port}",
             "models": ["mock-llm-7b"], "scenarios": ["creative"],
@@ -1113,6 +1125,8 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
             "max_tokens": 16, "repeats": 1, "timeout_s": 30,
             "thinking": "disabled", **cfg_extra,
         })
+        if skip_probe:
+            run.cpt_calib[("mock-llm-7b", "creative")] = 1.8
         q: asyncio.Queue = asyncio.Queue()
         run.subs.add(q)
         task = asyncio.create_task(run.run())
@@ -1419,6 +1433,57 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
         req = pts[0]["reqs"][0]
         self.assertNotIn("显存超限", req.get("err") or "")
         self.assertNotIn("edge_fallback", req)
+
+    async def test_empty_stream_exhausted_forces_edge_fallback(self):
+        """ADR-0085：**非贴边**档的同文本空流重试耗尽后，必须改 shape 自救。
+
+        复现 2026-09-22 实机故障：Lvllm 服务端按 shape 重建 Triton kernel 时
+        CUDA OOM，对外表现为 200 + 零 token（不体现在 HTTP 状态上）。此时
+        同文本重试是同一 shape、必然重走同一条编译路径，而唯一能改 shape 的
+        贴边回退因档位不贴边（4K 档 vs max_ctx 262144，离门槛差 29 倍）而
+        未军备——原始实现因此反复撞墙直到判失败。
+
+        构造：空流钩子设为 1+EMPTY_STREAM_RETRY_MAX 次（恰好耗尽同文本重试
+        预算），耗尽后服务端恢复——断言引擎经删减回退（改 shape）把该点救回。
+        服务端若持续坏下去（钩子设更大）则任何重试策略都救不回，不在本用例
+        范围（那种情况断言的是错误口径正确，见 test_empty_stream_* 单元用例）。"""
+        mock_server.EMPTY_STREAM_FAIL = 1 + bench.EMPTY_STREAM_RETRY_MAX
+        try:
+            run, events = await self._run_and_collect(
+                skip_probe=True, ctx_list=[4096], max_tokens=16)
+        finally:
+            mock_server.EMPTY_STREAM_FAIL = 0
+        pts = [e["point"] for e in events if e.get("type") == "point"]
+        self.assertEqual(len(pts), 1)
+        # 核心断言：同文本重试耗尽后，改 shape 回退把该点救回
+        self.assertTrue(pts[0]["all_ok"],
+                        f"空流耗尽后应经改 shape 回退救回，实际："
+                        f"{pts[0].get('err')}")
+        req = pts[0]["reqs"][0]
+        self.assertIn("edge_fallback", req,
+                      "改 shape 回退必须留痕（存档据此区分救回路径）")
+        # 非贴边档不得谎报超限（原提示会把排查方向带偏到 max_ctx 上）
+        self.assertNotIn("大概率上下文/显存超限", req.get("err") or "")
+
+    async def test_empty_stream_retry_keeps_ctx_before_fallback(self):
+        """ADR-0085 边界：空流**未**耗尽专属预算时不得抢先改 shape。
+
+        瞬时空流（服务端抖动，同文本重试确实有效）必须保留原语义——先走
+        同文本重试，不得因一次空流就删减语料，否则口径被污染（原契约
+        test_edge_fallback_not_armed_below_ratio 的反面）。"""
+        mock_server.EMPTY_STREAM_FAIL = 1   # 仅首发空流，重试即成功
+        try:
+            run, events = await self._run_and_collect(
+                skip_probe=True, ctx_list=[4096], max_tokens=16)
+        finally:
+            mock_server.EMPTY_STREAM_FAIL = 0
+        pts = [e["point"] for e in events if e.get("type") == "point"]
+        self.assertEqual(len(pts), 1)
+        self.assertTrue(pts[0]["all_ok"])
+        req = pts[0]["reqs"][0]
+        self.assertNotIn("edge_fallback", req,
+                         "同文本重试已自愈时不得改 shape")
+        self.assertEqual(req.get("retried"), 1, "应留空流重试痕")
 
     async def test_ctx_overflow_trim_retry(self):
         """超窗回退：prompt 临近模型窗口上限、首请求被判 context exceeded 时，
@@ -2105,8 +2170,12 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
                             f"decode tick {t['speed']} 未收敛 TG±25%")
 
     async def test_no_content_point_error(self):
-        """MOCK_NO_CONTENT=1（只思考无正文/零输出）：请求 err 含
-        「未收到任何输出 token」、点级 all_ok=False。"""
+        """MOCK_NO_CONTENT=1（零输出：REASON 默认 0，故正文与思考内容均为空，
+        即真空流）→ 请求 err 含「未收到任何输出」、点级 all_ok=False。
+
+        注：本用例配置下是**彻底的空**（非「只思考无正文」——那种形态
+        reasoning_content 非空、会置 first 而不走空流分支；要复现需同时设
+        MOCK_REASON>0）。文案已按此改准（2026-09-22）。"""
         old = mock_server.NO_CONTENT
         mock_server.NO_CONTENT = "1"
         try:
@@ -2117,7 +2186,7 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(points), 1)
         p = points[0]
         self.assertFalse(p["all_ok"], "无正文点必须降级为失败")
-        self.assertIn("未收到任何输出 token", p["reqs"][0]["err"])
+        self.assertIn("未收到任何输出", p["reqs"][0]["err"])
 
     async def test_die_at_request_error(self):
         """裸断连（原始 socket 服务：流出 5 个 SSE 块后 chunked 流不发终止块
@@ -2154,7 +2223,7 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(p["all_ok"], "裸断连点必须降级为失败")
         err = p["reqs"][0]["err"]
         self.assertTrue(err, "裸断连应产生请求级 err")
-        self.assertNotIn("未收到任何输出 token", err,
+        self.assertNotIn("未收到任何输出", err,
                          "已流出 5 个 token，不应走零输出诊断")
 
     async def test_serialize_prefill_no_decode_overlap(self):

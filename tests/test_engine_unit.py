@@ -3335,8 +3335,8 @@ class TestTransientRetry(unittest.IsolatedAsyncioTestCase):
 
     async def test_empty_stream_retried(self):
         """空流（200 但无任何输出 token）：走专属重试预算
-        （EMPTY_STREAM_RETRY_MAX，2026-09-17 拍板——Lvllm「空 EOS」间歇
-        故障每次重试约 50% 自愈），两次空流后第三次成功。"""
+        （EMPTY_STREAM_RETRY_MAX——Lvllm「空 EOS」间歇故障，同消息重试
+        可能自愈），两次空流后第三次成功。"""
         run, events = self._make_run()
         client = self._ChatClient([
             self._Resp(lines=["data: [DONE]"]),
@@ -3353,13 +3353,13 @@ class TestTransientRetry(unittest.IsolatedAsyncioTestCase):
 
     async def test_empty_stream_exhausted(self):
         """空流耗尽专属预算（1+EMPTY_STREAM_RETRY_MAX 次尝试）：返回既有的
-        「未收到任何输出 token」错误口径；专属预算独立于通用瞬时重试
+        「未收到任何输出」错误口径；专属预算独立于通用瞬时重试
         （TRANSIENT_RETRY_MAX）。"""
         run, events = self._make_run()
         client = self._ChatClient([self._Resp(lines=["data: [DONE]"])])
         result = await self._call_one(run, client)
         self.assertEqual(client.calls, 1 + EMPTY_STREAM_RETRY_MAX)
-        self.assertIn("未收到任何输出 token", result["err"])
+        self.assertIn("未收到任何输出", result["err"])
         self.assertNotIn("retried", result)
 
     async def test_stop_flag_aborts_retry(self):

@@ -463,6 +463,18 @@ CTX_RETRY_KEEP = (0.75, 0.5, 0.3)
 # 错误文本追加疑似超限提示
 CTX_EDGE_FB_RATIO = 0.85
 
+# 同文本重试耗尽后的强制军备（ADR-0085，2026-09-22 拍板）：上面按「贴边」军备
+# 的前提是「失败源于上下文/显存超限」——超限确实只发生在贴边档。但服务端还有
+# 一类与档位无关的故障：Lvllm 的 Triton kernel JIT 编译按 shape 触发，编译所需
+# 临时显存撞上已划走的显存池即 OOM，返回 200 但零 token（实测 3080×4 部署机
+# 2026-09-22：27 次 JIT 告警中 6 次伴随 OOM，触发时点与档位无关）。此类故障下
+# 同文本重试是**同一 shape**，必然重走同一条编译路径——反复重试撞同一面墙，
+# 而唯一能改变 shape 的 _edge_fallback 因不贴边而未被军备。判据不需要新增探测：
+# 「同文本重试已耗尽且仍空流」本身就证明「重试」这个动作无效，此时按同一
+# 阶梯删减语料（改 shape）比继续判失败更可能救回该点。仅空流启用——瞬时类
+# （超时/5xx）重试确有自愈价值，不得因耗尽而误改 shape 污染口径
+EMPTY_STREAM_FORCE_EDGE_FB = True
+
 # 上下文构建偏离重测阈值（ADR-0005 嵌套记账盲区的现场补救）：语料流 token
 # 密度不均时，滑动边际估算（cpt_marginal）对「新进入语料段」的密度只能外推
 # ——实测 echo 模式 64K 档偏离 +38.5%（32K→64K 段真实边际 1.83 字符/token，
@@ -517,11 +529,17 @@ ECHO_PREFILL_CHARS = 160
 # 性判定，确定性形态，重试无法改变）
 TRANSIENT_RETRY_MAX = 2       # 额外重试次数（连同首试共 3 次尝试）
 TRANSIENT_RETRY_BASE_S = 1.0  # 线性退避：第 n 次重试前等 n 秒
-# 空流专属重试预算（2026-09-17 拍板）：Lvllm 混合架构部署的「空 EOS」形态
-# （200 正常但零内容、completion≈1、finish=stop）是间歇性服务端状态故障，
-# 实测同消息重试每次约 50% 自愈——独立预算 4 次（连同首试 5 次尝试，
-# 恢复率 ≈94%），不挤占通用瞬时重试预算
-EMPTY_STREAM_RETRY_MAX = 4
+# 空流专属重试预算（ADR-0080 降级、2026-09-22 拍板）：Lvllm 混合架构的
+# 「空 EOS」（200 正常但零内容、completion≈1、finish=stop）是间歇性服务端
+# 状态故障，同消息重试**可能**自愈，故与瞬时类分开计数、不挤占其预算。
+# **次数取 2（与 TRANSIENT_RETRY_MAX 同口径）**：原为 4，依据是「每次约
+# 50% 自愈、4 次恢复率 ≈94%」——该 50% 无实测支撑（ADR-0080 引用的现场
+# 证据只有一条「败、败、过」序列，即 3 次里 1 次自愈，样本量为 1，不足以
+# 支撑任何自愈率）。2026-09-22 复核后按「无依据不臆设恢复率」降为 2：
+# 与通用瞬时重试同档，避免用编造的恢复率换取更长的失败等待（每次空流重试
+# 白烧一次 prefill，32K 档约 80s）。空流仍保留独立预算的意义在于**不挤占**
+# 瞬时重试额度，而非次数更多
+EMPTY_STREAM_RETRY_MAX = 2
 RETRY_AFTER_CAP_S = 5.0       # Retry-After 遵守上限（秒），防超大值拖死测速
 
 # Agent 缓存×指令矩阵参数（ADR-0042 重构，取代旧「连续任务链」口径）：默认
@@ -3111,7 +3129,7 @@ class BenchRun:
                         f"/{max_tokens} tokens，弃测重测 {retries} 次仍"
                         "复现）——读数不可信，按测量失败留档")
                     _void_point_readings(pt, culprit["err"])
-                    await self.emit({"type": "status", "msg":
+                    await self.emit({"type": "status", "toast": True, "msg":
                         f"{model} / {SCENARIOS[scenario]['label']} / "
                         f"上下文 {_fmt_scenario_ctx(scenario, ctx)}："
                         f"重测 {retries} 次仍仅输出 "
@@ -3134,7 +3152,7 @@ class BenchRun:
                 "in_sample": culprit.get("in_sample") or "",
                 "in_text": culprit.get("_in_full") or "",
             })
-            await self.emit({"type": "status", "msg":
+            await self.emit({"type": "status", "toast": True, "msg":
                 (f"检测到异常输出（提前停止：仅输出 {culprit.get('out_tokens')}"
                  f"/{max_tokens} tokens），本轮弃测重测" if kind == "early_stop"
                  else "检测到异常输出（退化重复），本轮弃测重测")
@@ -3310,7 +3328,7 @@ class BenchRun:
                         filler_n, real_mean, ctx, kb_before,
                         msgs_chars - filler_n, cpt)
                     if f_new is not None:
-                        await self.emit({"type": "status", "msg":
+                        await self.emit({"type": "status", "toast": True, "msg":
                             f"{model} / {SCENARIOS[scenario]['label']} "
                             f"{ctx // 1024}K 档构建偏离 {dev * 100:+.1f}%"
                             "（实测/目标），"
@@ -4062,7 +4080,8 @@ class BenchRun:
                             and abs(real_inst - inst) > max(0.1 * inst, 8)):
                         seg_new = max(1, round(seg_n * inst / real_inst))
                         if seg_new != seg_n:
-                            await self.emit({"type": "status", "msg":
+                            await self.emit({"type": "status", "toast": True,
+                                             "msg":
                                 f"{model} / Agent 调用 / 缓存 {fmt(c)} / "
                                 f"指令 {fmt(inst)}：实测指令长度 {real_inst} "
                                 "tokens 偏离目标，按实测密度校正补测一次"})
@@ -4102,7 +4121,8 @@ class BenchRun:
                                 "uncached_tokens": uncached_mean,
                                 "expected_tokens": expected,
                             }]
-                            await self.emit({"type": "status", "msg":
+                            await self.emit({"type": "status", "toast": True,
+                                             "msg":
                                 f"{model} / Agent 调用 / 缓存 {fmt(c)} / "
                                 f"指令 {fmt(inst)}：实测未命中 {uncached_mean} "
                                 f"tokens 与指令档期望 {expected} 偏差过大，"
@@ -4175,7 +4195,8 @@ class BenchRun:
                                     f"/{max_tokens} tokens，弃测重测 "
                                     f"{anom_retries} 次仍复现）——读数不可信，"
                                     "按测量失败留档")
-                                await self.emit({"type": "status", "msg":
+                                await self.emit({"type": "status", "toast": True,
+                                                 "msg":
                                     f"{model} / Agent 调用 / 缓存 {fmt(c)} / "
                                     f"指令 {fmt(inst)}：重测 {anom_retries} "
                                     f"次仍仅输出 "
@@ -4200,7 +4221,7 @@ class BenchRun:
                             "in_sample": culprit.get("in_sample") or "",
                             "in_text": culprit.get("_in_full") or "",
                         }]
-                        await self.emit({"type": "status", "msg":
+                        await self.emit({"type": "status", "toast": True, "msg":
                             f"{model} / Agent 调用 / 缓存 {fmt(c)} / "
                             f"指令 {fmt(inst)}：检测到异常输出"
                             + (f"（提前停止：仅输出 {culprit.get('out_tokens')}"
@@ -4581,8 +4602,15 @@ class BenchRun:
         # 未识别形态的失败可走删减回退。_edge_fb > 0 的重入保持军备——裁减后的
         # est_prompt 会跌出比例区，以裁后尺寸重判会让回退阶梯第二档起失效
         _max_ctx = (self.cfg.get("model_max_ctx") or {}).get(model)
-        edge_armed = _edge_fb > 0 or (bool(_max_ctx) and
+        # 贴边军备（原口径）：仅「失败可能源于上下文/显存超限」时才敢删减语料
+        edge_near_limit = bool(_max_ctx) and (
             est_prompt + max_tokens + CTX_HEADROOM >= _max_ctx * CTX_EDGE_FB_RATIO)
+        # 非贴边军备（EMPTY_STREAM_FORCE_EDGE_FB）：同文本空流重试已耗尽——
+        # 重试这个动作被证伪，改 shape 是本点唯一的自救手段。与贴边无关：
+        # JIT 类故障不看档位（见常量注释）。_edge_fb > 0 的重入一律保持军备
+        # ——裁减后 est_prompt 跌出比例区，若重判会让第二档起失效
+        edge_forced = EMPTY_STREAM_FORCE_EDGE_FB and _empty_retried > 0
+        edge_armed = _edge_fb > 0 or edge_near_limit or edge_forced
 
         async def emit_tick(payload: dict):
             """tick 统一出口：prime 请求打标记（前端据此单独成列、不进 KPI）；
@@ -4679,10 +4707,11 @@ class BenchRun:
                                    _orig_chars=orig_user_chars)
 
         async def _retry_empty(msg: str) -> dict | None:
-            """空流专属重试（EMPTY_STREAM_RETRY_MAX，2026-09-17 拍板）：Lvllm
-            混合架构部署的「空 EOS」（200 正常但零内容、completion≈1）是间歇
-            性服务端状态故障，同消息重试每次约 50% 自愈——独立计数不挤占
-            通用瞬时重试预算，留痕合并进 retried。"""
+            """空流专属重试（EMPTY_STREAM_RETRY_MAX）：Lvllm 混合架构的「空 EOS」
+            （200 正常但零内容、completion≈1）是间歇性服务端状态故障，同消息
+            重试**可能**自愈——独立计数不挤占通用瞬时重试预算，留痕合并进
+            retried。次数与通用瞬时重试同档（2 次）：原 4 次的「约 50% 自愈」
+            依据经复核不成立（见常量注释），已按无依据不臆设恢复率下调。"""
             if self.stop_flag or _empty_retried >= EMPTY_STREAM_RETRY_MAX:
                 return None
             wait = (_empty_retried + 1) * TRANSIENT_RETRY_BASE_S
@@ -4718,10 +4747,17 @@ class BenchRun:
                 return None
             keep = int(orig_user_chars * CTX_RETRY_KEEP[_edge_fb])
             if not quiet:
+                # 播报原因按军备来源区分：贴边档说「疑似超限」（原口径），
+                # 强制军备档不断言超限（JIT/未知服务端故障与档位无关，谎报
+                # 原因会把现场判断带偏）
+                _why = ("临近部署上下文上限（%s tokens），疑似上下文/显存超限"
+                        % _max_ctx) if edge_near_limit else (
+                        "同文本重试耗尽仍空流（疑似服务端按 shape 重建/资源"
+                        "瞬时限缩，非上下文超限）")
                 await self.emit({"type": "status", "toast": True, "msg":
                     f"{model} / {_fmt_scenario_ctx(scenario, ctx)} 请求 r{req_i} 失败"
-                    f"（{msg[:60]}）——临近部署上下文上限（{_max_ctx} tokens），"
-                    f"疑似上下文/显存超限，删减填充语料至约 {keep} 字符回退重试 "
+                    f"（{msg[:60]}）——{_why}，"
+                    f"删减填充语料至约 {keep} 字符回退重试 "
                     f"{_edge_fb + 1}/{len(CTX_RETRY_KEEP)}"})
             r = await self._one(client, model, messages, scenario, req_i, ctx,
                                 conc, cpt, max_tokens, rep=rep, quiet=quiet,
@@ -5095,20 +5131,31 @@ class BenchRun:
 
         t_end = time.perf_counter()
         if first is None:
-            msg = "未收到任何输出 token（思考模式下可能被 reasoning 占满，建议禁用思考或调大 max_tokens）"
-            # 空流多为间歇性服务端状态故障（Lvllm 混合架构「空 EOS」实测每次
-            # 重试约 50% 自愈）：走专属重试预算（EMPTY_STREAM_RETRY_MAX），
-            # 不挤占通用瞬时重试；贴边档空流亦可能是服务端被超长 prompt
-            # 压垮，走删减回退
+            # 措辞按实测逻辑写准（2026-09-22）：走到本分支 = 连 reasoning_content
+            # 都没有（first 由 content 或 reasoning_content 任一非空置位）——是
+            # **彻底的空**，不是「思考占满正文」。旧文案「可能被 reasoning 占满」
+            # 与逻辑不符，会把排查方向带偏到 max_tokens/thinking 上（实测故障
+            # 实为服务端 JIT 重建期 OOM，见 ADR-0085）
+            msg = ("未收到任何输出（正文与思考内容均为空）——非 max_tokens 不足，"
+                   "多为服务端故障或上游截断，建议排查推理服务日志")
+            # 空流多为间歇性服务端状态故障（Lvllm 混合架构「空 EOS」）：走专属
+            # 重试预算（EMPTY_STREAM_RETRY_MAX），不挤占通用瞬时重试；重试
+            # 耗尽后走改 shape 回退（ADR-0085），贴边档空流亦可能是服务端被
+            # 超长 prompt 压垮，同样走删减回退
             retried = await _retry_empty(msg)
             if retried is not None:
                 return retried
             fb = await _edge_fallback(msg)
             if fb is not None:
                 return fb
-            if _edge_fb:   # 回退阶梯耗尽仍失败：补疑似超限提示
-                msg += ("（临近部署 max_ctx 上限，删减回退后仍失败"
-                        "——大概率上下文/显存超限）")
+            if _edge_fb:
+                # 回退阶梯耗尽仍失败：提示按军备来源区分——贴边档才断言疑似
+                # 超限；强制军备档（非贴边空流耗尽）不能谎报超限，否则会把
+                # 「服务端按 shape 重建」类故障误导成上下文问题
+                msg += (("（临近部署 max_ctx 上限，删减回退后仍失败"
+                         "——大概率上下文/显存超限）") if edge_near_limit else
+                        ("（非贴边档，同文本重试与改 shape 删减回退均失败"
+                         "——疑似服务端故障，建议排查推理服务日志）"))
             if not tick_off:
                 await emit_tick({"type": "tick", "tag": tag, "model": model, "scenario": scenario,
                                  "ctx": ctx, "conc": conc, "req": req_i, "phase": "error", "msg": msg})

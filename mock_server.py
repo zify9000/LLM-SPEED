@@ -35,6 +35,7 @@ DeepSeek 风格（chat 端点不带 /v1 前缀）：MOCK_NO_V1=1 python mock_ser
 模拟 TTS 单请求音频时长上限（秒，默认 600；防超大档位把 mock 拖成几小时）：MOCK_TTS_MAX_S=600
 模拟网关瞬时抖动（接下来 N 发 chat 请求直接 HTTP 500，用后归零恢复正常；验证测速端兜底重试）：MOCK_FLAKY_FAIL=1
 模拟未自报超窗的秒拒（prompt+max_tokens 超 N 返回 500，报文不含 context/exceed 超窗关键词——fastllm 显存/KV 不足形态；验证贴边档回退裁减）：MOCK_HARD_FAIL_CTX=4096
+模拟空流（200 正常开流但零内容 token、直接 [DONE]——Lvllm Triton JIT 重建时 CUDA OOM 的对外表现；验证空流耗尽后改 shape 回退，ADR-0085）：MOCK_EMPTY_STREAM_FAIL=N
 """
 import asyncio
 import io
@@ -85,6 +86,7 @@ TTS_XR = float(os.environ.get("MOCK_TTS_XR", "20"))   # 模拟 TTS 合成速度�
 TTS_MAX_S = float(os.environ.get("MOCK_TTS_MAX_S", "600"))  # 单请求合成音频时长上限（秒）
 FLAKY_FAIL = int(os.environ.get("MOCK_FLAKY_FAIL", "0"))  # 置 N 则接下来 N 发 chat 请求一次性 500（模拟网关瞬时抖动，验证测速端兜底重试；脚本化用后归零）
 HARD_FAIL_CTX = int(os.environ.get("MOCK_HARD_FAIL_CTX", "0"))  # 置 N 则 prompt+max_tokens 超 N 返回 500「CUDA out of memory」（未自报超窗的秒拒：报文不含超窗关键词，验证贴边档回退裁减）
+EMPTY_STREAM_FAIL = int(os.environ.get("MOCK_EMPTY_STREAM_FAIL", "0"))  # 置 N 则接下来 N 发 chat 请求返回 200 + 零内容 token（空流：复现 Lvllm JIT/OOM 的对外表现，验证空流耗尽后改 shape 回退）
 _SR = 16000   # 合成/解析音频的采样率
 LAST_CHAT_ROLES: list | None = None   # 最近一次 chat 请求的消息角色序列（e2e 断言回复模式用）
 _REQ_SEQ = 0   # chat 请求计数（TG_PATTERN 轮转取值用）
@@ -195,6 +197,7 @@ async def _prefill_sleep(prompt_tokens: int, cache_read_s: float = 0.0):
 
 async def _chat_impl(req: Request):
     global LAST_CHAT_ROLES, _REQ_SEQ, EARLY_STOP, EARLY_STOP_LONG, FLAKY_FAIL
+    global EMPTY_STREAM_FAIL
     body = await req.json()
     if FLAKY_FAIL > 0:
         # 一次性脚本钩子（瞬时失败兜底重试 e2e 专项）：本请求直接 HTTP 500、
@@ -203,6 +206,15 @@ async def _chat_impl(req: Request):
         FLAKY_FAIL -= 1
         return JSONResponse({"error": {"message":
             "upstream temporarily unavailable (flaky)"}}, status_code=500)
+    if EMPTY_STREAM_FAIL > 0:
+        # 空流钩子（ADR-0085 专项）：HTTP 200 正常开流但**零内容 token**、
+        # 直接 [DONE]——复现 Lvllm Triton JIT 重建时 CUDA OOM 的对外表现
+        # （显存不足不体现在 HTTP 状态上，只有内容层是空的）。用 N 次后归零，
+        # 脚本化「同文本重试持续撞墙」场景，验证测速端改 shape 回退
+        EMPTY_STREAM_FAIL -= 1
+        async def gen_empty():
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(gen_empty(), media_type="text/event-stream")
     tg = TG   # 本请求 decode 速度（TG_PATTERN 置位时逐请求轮转交替）
     if TG_PATTERN:
         tg = TG_PATTERN[_REQ_SEQ % len(TG_PATTERN)]
