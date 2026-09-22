@@ -1,6 +1,6 @@
 name: CI
 
-# 回归门禁：引擎纯逻辑 + mock 端到端 + 接口契约 + SSE 回放 + 前端语法/注入门禁。
+# 回归门禁（四步）：后端 pytest + 前端语法/注入门禁 + 前端纯函数单测 + 前端渲染基准。
 # 前端静态资源本地 vendored（static/vendor/），测试不依赖网络（e2e 全部走 127.0.0.1 的假网关）。
 on:
   push:
@@ -12,14 +12,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
 
