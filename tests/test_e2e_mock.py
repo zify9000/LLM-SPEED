@@ -57,12 +57,44 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _start_raw_die_server(port: int, n_chunks: int = 5) -> socket.socket:
+class _RawServer:
+    """原始 socket 服务句柄：持有监听 socket 与停摆事件。
+
+    socket.socket 是 C 类型、不允许挂自定义属性，故用薄包装把 stop 事件
+    与监听 fd 一起交给调用方（`with` 退出即关停，见 close()）。
+    """
+    def __init__(self, sock: socket.socket, stop: threading.Event):
+        self.sock = sock
+        self.stop = stop
+
+    def close(self) -> None:
+        """先置 stop 唤醒 accept() 轮询线程，再关监听 fd。
+
+        顺序要紧——只 close() 的话线程要等下一次 accept() 抛 OSError 才返回，
+        期间仍持有已关闭 fd，白占一个线程到进程退出。"""
+        self.stop.set()
+        self.sock.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+def _start_raw_die_server(port: int, n_chunks: int = 5) -> _RawServer:
     """原始 socket HTTP 服务（模拟裸断连网关，绕过 ASGI 的干净收口）：
     GET 返回模型列表（RTT 基线与 /v1 前缀探测用）；POST chat 流出 n_chunks 个
     SSE 块后，chunked 流不发终止块直接 FIN——httpx 判「不完整 chunked 读」。
     新版 uvicorn/starlette 会把 StreamingResponse 生成器异常干净收口（客户端
-    视作正常结束），mock 进程内已无法模拟断连，故用原始 socket。"""
+    视作正常结束），mock 进程内已无法模拟断连，故用原始 socket。
+
+    线程收口：accept() 带超时轮询 + stop 事件——旧实现 `while True: accept()`
+    永久阻塞，调用方 close() 后该线程仍停在已关闭 fd 的 accept() 上活到进程
+    退出。**这不是全量测试段错误的主因**（主因见 TestMockEndToEnd.setUpClass
+    的 uvloop 说明），但同样是不该留的收口缺陷：线程要干净退出，不靠进程
+    结束兜底。现在关闭时置 stop 并唤醒，线程在 0.2s 内退出。"""
+    stop = threading.Event()
 
     def _handle(conn: socket.socket):
         with conn:
@@ -95,27 +127,39 @@ def _start_raw_die_server(port: int, n_chunks: int = 5) -> socket.socket:
             # 裸断连：不发 chunked 终止块/[DONE]/usage，with 收口直接关连接
 
     def _loop():
-        while True:
+        while not stop.is_set():
             try:
-                conn, _ = srv.accept()
+                conn, _ = sock.accept()
+            except socket.timeout:
+                continue      # 定期醒来查 stop（不能死等，否则关不掉）
             except OSError:
-                return
+                return        # 监听 socket 已被关闭
             threading.Thread(target=_handle, args=(conn,), daemon=True).start()
 
-    srv = socket.socket()
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", port))
-    srv.listen(8)
+    sock = socket.socket()
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", port))
+    sock.listen(8)
+    sock.settimeout(0.2)       # accept() 轮询周期——关停延迟上限
     threading.Thread(target=_loop, daemon=True).start()
-    return srv
+    return _RawServer(sock, stop)
 
 
 class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
         cls.port = _free_port()
+        # loop="asyncio" 是**必须**的：uvicorn 默认 loop="auto"，在 server.run()
+        # 里调 uvloop.install() 把**全局** EventLoopPolicy 换成 uvloop 的。此后
+        # 本进程内所有 IsolatedAsyncioTestCase 新建的 loop 都成了 uvloop，而
+        # test_engine_unit 的假时钟用例（mock.patch bench.time + await）在这种
+        # 跨线程组合下会让 CPython 在格式化 traceback 时栈行走踩空 → 段错误
+        # （实测：本文件 74 例任意一例先跑 + TestStallFlushOne 后跑 = 必崩；
+        #  loop="asyncio" 全绿；uvloop 0.22.1 / CPython 3.13.13）。
+        # mock 网关只是被本地 httpx 客户端打，用哪个 loop 实现无观测差异。
         cls.server = uvicorn.Server(uvicorn.Config(
-            mock_server.app, host="127.0.0.1", port=cls.port, log_level="warning"))
+            mock_server.app, host="127.0.0.1", port=cls.port, log_level="warning",
+            loop="asyncio"))
         cls.thread = threading.Thread(target=cls.server.run, daemon=True)
         cls.thread.start()
         deadline = time.time() + 10

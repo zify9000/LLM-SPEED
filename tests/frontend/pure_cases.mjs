@@ -367,3 +367,168 @@ test("口径版本：混档时按点判定，不是按整档一刀切", () => {
   const mix = [{metric_version: 1}, {}, {metric_version: 1}, {metric_version: 0}];
   assert.deepEqual(mix.map(isLegacyMetric), [false, true, false, true]);
 });
+
+/* ---------------- 对比叠加图档位对齐（贴边裁减点归一） ---------------- */
+
+test("cmpGearOf：普通点取 ctx_target；贴边裁减点（带 ctx_edge）归到原档位", () => {
+  // 20260914-210120 实档：顶档被部署 max_ctx=262144 裁到 260608
+  assert.equal(cmpGearOf({ctx_target:260608, ctx_edge:262144}), 262144);
+  assert.equal(cmpGearOf({ctx_target:262144}), 262144);
+  // 未裁减的档位不受影响
+  assert.equal(cmpGearOf({ctx_target:131072}), 131072);
+  assert.equal(cmpGearOf({ctx_target:0}), 0);
+  // ctx_edge 为 null / 缺失 / 0 一律按未裁减处理（0 是 falsy，不能误当归一目标）
+  assert.equal(cmpGearOf({ctx_target:4096, ctx_edge:null}), 4096);
+  assert.equal(cmpGearOf({ctx_target:4096}), 4096);
+  assert.equal(cmpGearOf({ctx_target:4096, ctx_edge:0}), 4096);
+  // 防御坏存档：null/undefined 点不抛错
+  assert.equal(cmpGearOf(null), null);
+  assert.equal(cmpGearOf(undefined), null);
+});
+
+test("cmpGearOf：两次运行顶档 260608 vs 262144 归一后并集只剩一格（修复假断点）", () => {
+  // 修复前：并集 = [.., 131072, 260608, 262144] → fmtK 出 254.5K / 256K 两格，
+  // 各次在对方那格出 null，折线在 128K 之后断开（用户报的「128K 有缺失」）
+  const run1 = [{ctx_target:131072}, {ctx_target:260608, ctx_edge:262144}];
+  const run2 = [{ctx_target:131072}, {ctx_target:262144}];
+  const before = [...new Set([...run1, ...run2].map(p => p.ctx_target))].sort((a, b) => a - b);
+  const after = [...new Set([...run1, ...run2].map(cmpGearOf))].sort((a, b) => a - b);
+  assert.deepEqual(before, [131072, 260608, 262144]);   // 修复前：顶档被拆成两格
+  assert.deepEqual(after, [131072, 262144]);            // 修复后：合并为一格
+  // 轴标签同 fmtK 口径（fmtK 在 §pure 区外，此处按同式换算）：131072→128K、262144→256K
+  assert.deepEqual(after.map(x => x >= 1024 ? (x / 1024).toFixed(x % 1024 ? 1 : 0) + "K" : String(x)),
+    ["128K", "256K"]);
+  // 归一后两次运行在顶档都查得到自己的点，不再出 null 断点
+  const findAt = (pts, x) => pts.find(q => cmpGearOf(q) === x);
+  assert.equal(findAt(run1, 262144).ctx_target, 260608);
+  assert.equal(findAt(run2, 262144).ctx_target, 262144);
+});
+
+/* ---------------- 部署环境六字段的生效口径归一（编辑表单预填） ---------------- */
+
+test("depFields：provider 部署条目（quants/kv_quants 数组 + label）全字段可预填", () => {
+  // 实档 config.json 的 fastllm-nvfp4 条目——原 bug：编辑表单只认快照字段名，
+  // 回退到部署条目时 label / kv_quant 全空
+  const dep = {label:"fastllm-nvfp4", models:["Qwen3.8-27B"],
+    hardware:"RTX 2080Ti 22G ×2 with nvlink", framework:"fastllm v1.8.2 合并pr741/749",
+    params:"dflash2草稿4、批块2048、功耗200w", quants:["nvfp4"], kv_quants:["fp8"],
+    max_ctx:262144, active:true, kinds:["llm","ocr"]};
+  assert.deepEqual(depFields(dep), {label:"fastllm-nvfp4", quant:"nvfp4", kvQuant:"fp8",
+    maxCtx:262144, hardware:"RTX 2080Ti 22G ×2 with nvlink",
+    framework:"fastllm v1.8.2 合并pr741/749", params:"dflash2草稿4、批块2048、功耗200w"});
+});
+
+test("depFields：存档快照（deploy_label/quant/kv_quant 单值）同口径可预填", () => {
+  const snap = {deploy_label:"fastllm-27b-mtp", quant:"fp8", kv_quant:"fp8", max_ctx:262144,
+    hardware:"RTX 2080Ti 22G ×2 with nvlink", framework:"fastllm V0.1.8.2",
+    params:"mtp 4、分块 2048", kinds:["llm","ocr"]};
+  assert.deepEqual(depFields(snap), {label:"fastllm-27b-mtp", quant:"fp8", kvQuant:"fp8",
+    maxCtx:262144, hardware:"RTX 2080Ti 22G ×2 with nvlink",
+    framework:"fastllm V0.1.8.2", params:"mtp 4、分块 2048"});
+});
+
+test("depFields：两套形状归一到同一结果（快照 vs 等价部署条目）", () => {
+  const asSnap = {deploy_label:"X", quant:"fp8", kv_quant:"fp8", max_ctx:1000,
+    hardware:"HW", framework:"FW", params:"P"};
+  const asDep  = {label:"X", quants:["fp8"], kv_quants:["fp8"], max_ctx:1000,
+    hardware:"HW", framework:"FW", params:"P"};
+  assert.deepEqual(depFields(asSnap), depFields(asDep));
+});
+
+test("depFields：空条目/半缺条目回退空串而不是 undefined（预填不出现 'undefined'）", () => {
+  assert.deepEqual(depFields(null), {label:"", quant:"", kvQuant:"", maxCtx:null,
+    hardware:"", framework:"", params:""});
+  assert.deepEqual(depFields({}), {label:"", quant:"", kvQuant:"", maxCtx:null,
+    hardware:"", framework:"", params:""});
+  // 只有 label 的老条目：其余为空串，maxCtx 为 null（表单渲染走 `val || ""`）
+  const half = depFields({label:"only-label"});
+  assert.equal(half.label, "only-label");
+  assert.equal(half.quant, "");
+  assert.equal(half.maxCtx, null);
+});
+
+test("depQuant/depKvQuant：数组首项优先，旧单值字段回退，空数组不误取", () => {
+  assert.equal(depQuant({quants:["a","b"], quant:"z"}), "a");     // 数组优先
+  assert.equal(depQuant({quant:"z"}), "z");                        // 无数组时回退单值
+  assert.equal(depQuant({quants:[]}), "");                         // 空数组 → 空
+  assert.equal(depQuant({}), "");
+  assert.equal(depKvQuant({kv_quants:["fp8"], kv_quant:"old"}), "fp8");
+  assert.equal(depKvQuant({kv_quant:"old"}), "old");
+  assert.equal(depKvQuant({kv_quants:[]}), "");
+});
+
+test("depLabel：快照 deploy_label 优先，部署 label 回退，两者都缺为空串", () => {
+  assert.equal(depLabel({deploy_label:"snap", label:"dep"}), "snap");
+  assert.equal(depLabel({label:"dep"}), "dep");
+  assert.equal(depLabel({}), "");
+  assert.equal(depLabel(null), "");
+});
+
+/* ---------------- 对比卡部署信息解析（快照优先 + 按各次运行自己的 provider） ---------------- */
+
+const PROVS = [{name:"local", local:true, deployments:[
+    {label:"fastllm-nvfp4", models:["Qwen3.8-27B"], quants:["nvfp4"], kv_quants:["fp8"],
+     max_ctx:262144, hardware:"RTX 2080Ti 22G ×2 with nvlink",
+     framework:"fastllm v1.8.2 合并pr741/749", params:"dflash2草稿4、批块2048、功耗200w"},
+    {label:"alt", models:["Qwen3.8-27B"], quants:["q8"], active:true},
+    {label:"other", models:["别的模型"], quants:["fp16"]}]},
+  {name:"cloud", local:false, deployments:[{label:"cloud-dep", models:["c1"], max_ctx:4096}]}];
+
+test("depOfModel：快照缺失时回退该次运行 provider 的部署映射（对比卡部署行不再空白）", () => {
+  // 实档 20260922-225510-3982：model_info={} 但配置里有映射 → 必须回退出来
+  const d = depOfModel({modelInfo:{}, providers:PROVS, provider:"local",
+    providerLocal:true, model:"Qwen3.8-27B"});
+  assert.equal(depLabel(d), "alt");          // active 标记优先
+  assert.equal(depQuant(d), "q8");
+});
+
+test("depOfModel：快照存在时优先用快照，不回声部署映射", () => {
+  const snap = {deploy_label:"snap-label", quant:"fp8", kv_quant:"fp8"};
+  const d = depOfModel({modelInfo:{"m":snap}, providers:PROVS, provider:"local",
+    providerLocal:true, model:"m"});
+  assert.equal(d, snap);
+  assert.equal(depLabel(d), "snap-label");
+});
+
+test("depOfModel：未标 active 时回退首个命中（与服务端 _resolve_deployment 同口径）", () => {
+  const d = depOfModel({modelInfo:{}, providers:PROVS, provider:"local",
+    providerLocal:true, model:"Qwen3.8-27B"});
+  assert.equal(depLabel(d), "alt");   // 列表里 alt 带 active；无 active 时取首个命中
+  const d2 = depOfModel({modelInfo:{}, providers:PROVS, provider:"local",
+    providerLocal:true, model:"别的模型"});
+  assert.equal(depLabel(d2), "other");
+});
+
+test("depOfModel：云端 provider 不出部署行（deployments 只承载 max_ctx 钳制）", () => {
+  assert.equal(depOfModel({modelInfo:{}, providers:PROVS, provider:"cloud",
+    providerLocal:false, model:"c1"}), null);
+  // provider_local 缺省（旧存档无该字段）不看 provider 条目的 local=false 也拦：
+  // 显式 false 才拦——缺省时以**provider 条目自己的 local 标记**为准
+  //（与 modelInfo 的 `provider_local ?? currentProvider()?.local ?? true` 同序）
+  assert.equal(depOfModel({modelInfo:{}, providers:PROVS, provider:"cloud",
+    providerLocal:undefined, model:"c1"}), null);      // cloud 条目 local:false
+  assert.notEqual(depOfModel({modelInfo:{}, providers:PROVS, provider:"local",
+    providerLocal:undefined, model:"Qwen3.8-27B"}), null);   // local 条目 local:true
+});
+
+test("depOfModel：跨 provider 对比时按各次运行自己的 provider 解析（不张冠李戴）", () => {
+  // 同一次对比里两次运行可属不同 provider：各查各的，不共用 currentProvider
+  const a = depOfModel({modelInfo:{}, providers:PROVS, provider:"local",
+    providerLocal:true, model:"Qwen3.8-27B"});
+  const b = depOfModel({modelInfo:{}, providers:PROVS, provider:"cloud",
+    providerLocal:false, model:"c1"});
+  assert.equal(depLabel(a), "alt");
+  assert.equal(b, null);
+});
+
+test("depOfModel：模型未映射到任何部署 / provider 不存在 → null（而非抛错）", () => {
+  assert.equal(depOfModel({modelInfo:{}, providers:PROVS, provider:"local",
+    providerLocal:true, model:"Qwen3.8-27B-iq3"}), null);
+  assert.equal(depOfModel({modelInfo:{}, providers:PROVS, provider:"nope",
+    providerLocal:true, model:"Qwen3.8-27B"}), null);
+  assert.equal(depOfModel({modelInfo:{}, providers:undefined, provider:"local",
+    providerLocal:true, model:"Qwen3.8-27B"}), null);
+  // model_info 缺失（整段没下发）仍要能回退——正是本 bug 的修复目标
+  assert.equal(depLabel(depOfModel({modelInfo:undefined, providers:PROVS,
+    provider:"local", providerLocal:true, model:"Qwen3.8-27B"})), "alt");
+});

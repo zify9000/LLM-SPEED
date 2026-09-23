@@ -2973,6 +2973,41 @@ function scenarioStats(pts){
 }
 /* 对比卡跨模型合图，键不带模型；多并发档拆图后键带并发档后缀（单档保持原键） */
 const cmpLegendKey = (sc, metric, conc) => `cmp::${sc}::${metric}${conc != null ? `::${conc}` : ""}`;
+/* 对比叠加图的档位对齐口径：X 轴取「逻辑档位」而非 ctx_target 原值。
+   贴边档会被引擎按部署 max_ctx 裁减（ctx_target=260608 且带 ctx_edge=262144），
+   而没配 max_ctx 的那次不裁、顶档保持 262144——两个值其实是**同一个逻辑档位**，
+   若各占一格就会把顶档拆成相邻两格（254.5K / 256K），叠图时各次在对方那格出
+   null 断点，视觉上成了「某次在 128K 之后线断了」的假缺失。
+   归一口径：带 ctx_edge 的裁减点归到 ctx_edge（原档位），其余保持 ctx_target。
+   只影响叠图的轴/查找键，不改任何读数与明细表（明细表照旧展示实际裁后档位）。
+   命名避开区外的 gearOf（那个是档位**标签**格式化，语义不同）。 */
+const cmpGearOf = p => (p && p.ctx_edge) ? p.ctx_edge : (p ? p.ctx_target : null);
+/* 部署条目六字段的生效口径归一（展示/预填共用；纯函数，无 DOM/state）：
+   mi 可能来自**存档快照**（deploy_label / quant / kv_quant 三个单值字段）
+   或当前 provider 的**部署配置**（label / quants / kv_quants 数组）——两套
+   字段名，归一后调用方不必分叉。缺字段一律回退空串/null。 */
+const depQuant = d => (d?.quants || []).find(Boolean) || d?.quant || "";   // 生效口径 = quants 首项，旧 quant 字符串回退
+const depKvQuant = d => (d?.kv_quants || []).find(Boolean) || d?.kv_quant || "";   // 生效口径 = kv_quants 首项
+const depLabel = d => d?.deploy_label || d?.label || "";
+const depFields = d => ({label: depLabel(d), quant: depQuant(d),
+  kvQuant: depKvQuant(d), maxCtx: d?.max_ctx ?? null,
+  hardware: d?.hardware || "", framework: d?.framework || "", params: d?.params || ""});
+/* 「某模型的部署环境」解析：**存档快照优先，缺失回退该次运行所属 provider 的
+   部署映射**——与单次卡片的 modelInfo()（走 currentProvider()）同口径，但这里
+   显式接收 providers 列表与 provider 名：对比卡片要**按各次运行自己的 provider**
+   解析（多次对比可跨 provider，用当前选中的 provider 会张冠李戴）。
+   快照为空（运行时未命中部署映射）而配置里能命中时，旧实现只认快照 → 对比卡
+   整行部署信息不见，单次卡片却有值，两处自相矛盾。
+   providerLocal 为 false（云端）时不出——云端 deployments 只承载 max_ctx 钳制。 */
+const depOfModel = ({modelInfo, providers, provider, providerLocal, model}) => {
+  if(providerLocal === false) return null;
+  const snap = modelInfo?.[model];
+  if(snap) return snap;
+  const prov = (providers || []).find(p => p.name === provider);
+  if(!prov || !prov.local) return null;
+  const hits = (prov.deployments || []).filter(d => (d.models || []).includes(model));
+  return hits.find(d => d.active) || hits[0] || null;
+};
 /* ===== §pure:end ===== */
 /* 会展示「均 x/批」的点（>=SPEC_MIN_TPC，<门槛本就不显示）；裁定判定用 */
 const tpcWouldShow = p => p.tok_per_chunk != null && p.tok_per_chunk >= SPEC_MIN_TPC;
@@ -3020,10 +3055,19 @@ const ctxDevMarkOf = (target, tokens) => {
   return ` <span style="color:var(--yellow);cursor:help" title="实际 prompt tokens 与目标档位偏差 ${sign}${pct}%（档位 ${fmtK(target)} → 实测 ${fmtK(tokens)}），超出 ±10%——上下文构造与设定不符，横向对比读数时注意口径错位">⚠偏 ${sign}${pct}%</span>`;
 };
 /* 固定字长阶梯场景（translate）：ctx_target 是原文字符口径——档位标签带场景
-   单位（不走 fmtK），且与 prompt_tokens 不同单位、不做偏差判别 */
+   单位（不走 fmtK），且与 prompt_tokens 不同单位、不做偏差判别。
+   贴边裁减点（带 ctx_edge）显示**裁前原档位** + 「✂裁减」角标：裁减只是为
+   放得下输出预算+分词余量而回退的构造量，逻辑档位没变——不归一会出现同一次
+   对比里「254.5K」与「256K」两个标签被读成两个档（实测 0914 顶档 260608 与
+   0922 顶档 262144 即此情形）。原值不丢：角标 title 悬浮给出裁后实测量，
+   下方「上下文长度」列仍按 prompt_tokens 展示真实长度。 */
 const gearOf = p => {
   const m = state.scenMeta[p.scenario];
-  return m?.ladder ? `${p.ctx_target}${m.unit || ""}` : fmtK(p.ctx_target);
+  if(m?.ladder) return `${p.ctx_target}${m.unit || ""}`;
+  if(p.ctx_edge){
+    return `${fmtK(p.ctx_edge)} <span style="color:var(--yellow);cursor:help" title="贴边裁减档：为保住输出预算与分词漂移余量，构造量由 ${fmtK(p.ctx_edge)} 裁到 ${fmtK(p.ctx_target)}（部署 max_ctx 上限）；逻辑档位不变，读数按裁后实测量">✂裁减</span>`;
+  }
+  return fmtK(p.ctx_target);
 };
 const ctxDevMark = (p, tokens) =>
   (p.inst_tokens != null || state.scenMeta[p.scenario]?.ladder) ? "" : ctxDevMarkOf(p.ctx_target, tokens);   // agent 矩阵 prompt = 缓存档 + 指令档，偏差不适用
@@ -4841,10 +4885,10 @@ function cardToolsHTML(hasCharts, extra, isMx){
    （前六含六个单值字符串字段，quant/kv_quant 为生效首项；max_ctx 为上下文
    上限 tokens，正整数或 null 清空，省略键服务端保留原值）；服务端更新存档
    cfg.model_info[model] 并 pop 旧 quants 键，返回 {ok:true, model_info}——
-   以返回值归一化后的条目覆盖本地快照并重渲当前卡片。无快照（旧存档）时切
-   换弹层不出「存档快照」项、编辑表单空白起步（端点会在存档中新建条目） */
-const depQuant = d => (d.quants || []).find(Boolean) || d.quant || "";   // 生效口径 = quants 首项，旧 quant 字符串回退
-const depKvQuant = d => (d.kv_quants || []).find(Boolean) || "";   // 生效口径 = kv_quants 首项
+   以返回值归一化后的条目覆盖本地快照并重渲当前卡片。切换弹层的候选以**存档
+   快照**为准（无快照则不出「存档快照」项，只列当前 provider 的各套部署）；编辑
+   表单的预填走 modelInfo()（快照优先、缺失回退当前 provider 部署映射，与卡片
+   meta 同口径）——两处都缺才空白起步（端点会在存档中新建条目） */
 function envToolsHTML(model){
   return `<button class="btn-ghost sc-cfg-btn" onclick="toggleCardEnv(this)"
       aria-haspopup="dialog" aria-expanded="false" aria-label="切换部署环境"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3l4 4-4 4"/><path d="M3 7h18"/><path d="M7 21l-4-4 4-4"/><path d="M21 17H3"/></svg>切换环境</button>
@@ -4861,26 +4905,23 @@ function toggleCardEnv(btn){
   const prov = state.providers.find(p => p.name === state.cfg.provider);
   const deps = (prov?.local ? (prov.deployments || []) : [])
     .filter(d => (d.models || []).includes(model));
-  // 候选：0 = 存档快照（原样写回，无快照时无此项），其后各套部署（展示/写回
-  // 均取生效口径 = quants 首项 / kv_quants 首项）
-  const items = (mi ? [{snap: true, depLabel: mi.deploy_label,
-      quant: mi.quant || (mi.quants || [])[0] || "", kvQuant: mi.kv_quant || "",
-      maxCtx: mi.max_ctx, hardware: mi.hardware, framework: mi.framework,
-      params: mi.params}] : [])
-    .concat(deps.map(d => ({depLabel: d.label, quant: depQuant(d), kvQuant: depKvQuant(d),
-      maxCtx: d.max_ctx, hardware: d.hardware, framework: d.framework, params: d.params})));
-  const descOf = it => [it.depLabel, it.quant, it.kvQuant ? `KV ${it.kvQuant}` : "",
+  // 候选：0 = 存档快照（原样写回，无快照时无此项），其后各套部署。展示/写回
+  // 统一走 depFields 生效口径归一（快照 deploy_label/quant/kv_quant 单值 vs
+  // 部署 label/quants/kv_quants 数组），快照项另带 snap 标记区分
+  const items = (mi ? [{snap: true, ...depFields(mi)}] : [])
+    .concat(deps.map(d => depFields(d)));
+  const descOf = it => [it.label, it.quant, it.kvQuant ? `KV ${it.kvQuant}` : "",
       it.hardware, it.framework, it.maxCtx ? `ctx ${fmtK(it.maxCtx)}` : ""].filter(Boolean)
     .join(" · ") || "（无部署环境信息）";
   const pop = openEnvPop(btn, "cardEnvPop", `<div class="lg-group"><div class="lg-title">将 ${esc(model)} 的存档环境信息切换为</div>`
     + items.map((it, i) => `<label class="ck ckt"><input type="radio" name="cardEnv" value="${i}" ${it.snap || (!mi && i === 0) ? "checked" : ""}>
-        <span><b>${esc(it.snap ? "存档快照" : it.depLabel || "未命名部署")}</b><br><small>${esc(descOf(it))}</small></span></label>`).join("")
+        <span><b>${esc(it.snap ? "存档快照" : it.label || "未命名部署")}</b><br><small>${esc(descOf(it))}</small></span></label>`).join("")
     + `</div>`, "切换部署环境");
   pop.addEventListener("change", async e => {
     if(e.target.name !== "cardEnv") return;
     const it = items[+e.target.value];
     closeEnvPops();
-    await saveModelEnv(model, {deploy_label: it.depLabel || "", quant: it.quant || "",
+    await saveModelEnv(model, {deploy_label: it.label || "", quant: it.quant || "",
       kv_quant: it.kvQuant || "", max_ctx: it.maxCtx ?? null,
       hardware: it.hardware || "",
       framework: it.framework || "", params: it.params || ""});
@@ -4889,23 +4930,27 @@ function toggleCardEnv(btn){
 function toggleCardEnvEdit(btn){
   if($("#cardEnvEditPop")){ closeEnvPops(); return; }
   const model = btn.closest(".speed-card").dataset.model;
-  const mi = state.cfg?.model_info?.[model];
   if(!state.runId || !state.cfg) return;
-  // 量化按单值文本编辑（生效口径 = 首项），不再逗号解析；无快照空白起步
-  const quant = mi ? (mi.quant || (mi.quants || [])[0] || "") : "";
-  const kvQuant = mi?.kv_quant || "";
+  // 预填口径与卡片 meta 同源：走 modelInfo()（快照优先，快照缺失时回退当前
+  // provider 的部署映射）——存档 model_info 为空（如运行时未命中部署映射）时
+  // 直接读 state.cfg.model_info 会全空，而卡片 meta 却有值，两处自相矛盾
+  const mi = modelInfo(model);
+  // 预填统一走 depFields 生效口径归一：mi 可能是存档快照（deploy_label /
+  // quant / kv_quant 单值）也可能是回退来的 provider 部署条目（label /
+  // quants / kv_quants 数组）——不归一会「快照在时能填、回退时部分空白」
+  const f = depFields(mi);
   const row = (id, name, val, ph) => `<label class="f"><span>${name}</span>
     <input type="text" id="${id}" value="${esc(val || "")}" placeholder="${ph}"></label>`;
   const rowCtx = (id, name, val) => `<label class="f"><span>${name}</span>
     <input type="number" min="1" step="1" id="${id}" value="${esc(val || "")}" placeholder="如 196608"></label>`;
   const pop = openEnvPop(btn, "cardEnvEditPop", `<div class="lg-group"><div class="lg-title">编辑 ${esc(model)} 的存档环境信息</div></div>`
-    + row("envFLabel", "部署标签", mi?.deploy_label, "如：4090 单卡")
-    + row("envFQuant", "模型量化", quant, "如：FP8")
-    + row("envFKvQuant", "KV量化", kvQuant, "如：FP8")
-    + rowCtx("envFMaxCtx", "上下文上限 max_ctx（tokens）", mi?.max_ctx)
-    + row("envFHardware", "硬件环境", mi?.hardware, "如：2× H100 80G")
-    + row("envFFramework", "推理框架", mi?.framework, "如：vLLM 0.6")
-    + row("envFParams", "核心参数", mi?.params, "如：TP=2 · max_ctx=32K")
+    + row("envFLabel", "部署标签", f.label, "如：4090 单卡")
+    + row("envFQuant", "模型量化", f.quant, "如：FP8")
+    + row("envFKvQuant", "KV量化", f.kvQuant, "如：FP8")
+    + rowCtx("envFMaxCtx", "上下文上限 max_ctx（tokens）", f.maxCtx)
+    + row("envFHardware", "硬件环境", f.hardware, "如：2× H100 80G")
+    + row("envFFramework", "推理框架", f.framework, "如：vLLM 0.6")
+    + row("envFParams", "核心参数", f.params, "如：TP=2 · max_ctx=32K")
     + `<div class="env-act"><button type="button" class="btn-ghost sc-cfg-btn" id="envFSave">保存</button></div>`,
     "编辑部署环境");
   pop.querySelector("#envFSave").addEventListener("click", async () => {
@@ -4979,14 +5024,18 @@ async function saveModelEnv(model, info){
    deployments 只承载 max_ctx 钳制，不出此行——与单次卡片 meta 同口径） */
 function cmpRunsStripHTML(runs){
   return `<div class="sc-run-chips">${runs.map(r => {
-    const dep = (r.cfg.provider_local ?? true) ? r.models
-      .map(m => r.cfg.model_info?.[m]).filter(Boolean)
-      .map(mi => {
-        const q = mi.quant || (mi.quants || [])[0] || "";   // 生效口径 = 单值量化，旧数组快照回退取首项
-        return [mi.deploy_label, q, mi.kv_quant ? `KV ${mi.kv_quant}` : "",
-          mi.hardware, mi.framework, mi.params].filter(Boolean).join(" · ");
+    // 各次运行按**自己的** provider 解析（对比可跨 provider）；快照缺失时
+    // 回退该 provider 的部署映射——与单次卡片 meta 同口径（depOfModel 注释）
+    const dep = r.models
+      .map(m => depOfModel({modelInfo: r.cfg.model_info, providers: state.providers,
+        provider: r.cfg.provider, providerLocal: r.cfg.provider_local, model: m}))
+      .filter(Boolean)
+      .map(d => {
+        const f = depFields(d);
+        return [f.label, f.quant, f.kvQuant ? `KV ${f.kvQuant}` : "",
+          f.hardware, f.framework, f.params].filter(Boolean).join(" · ");
       })
-      .filter(Boolean).join(" ｜ ") : "";
+      .filter(Boolean).join(" ｜ ");
     return `<div class="sc-run-chip">
     <span class="sc-run-dot" style="background:${r.color}"></span>
     <div class="sc-run-chip-body">
@@ -5127,13 +5176,14 @@ function buildCmpChartOpt(entries, metric, title, conc){
   const isMedia = kind !== "llm";
   const concStyle = !isMedia && conc > 1;
   const hasPeak = ents.some(e => e.pts.some(p => p.decode_peak_tok_s != null));
-  const xs = [...new Set(ents.flatMap(e => e.pts.map(p => p.ctx_target)))].sort((a, b) => a - b);
+  // X 轴用逻辑档位（cmpGearOf 归一贴边裁减点，见 §pure），避免同一档位被拆成两格
+  const xs = [...new Set(ents.flatMap(e => e.pts.map(cmpGearOf)))].sort((a, b) => a - b);
   const unit = isMedia ? (state.scenMeta[ents[0].pts[0].scenario]?.unit || "") : "";
   const cats = xs.map(x => isMedia ? (unit ? `${x}${unit}` : String(x)) : fmtK(x));
   const series = [];
   for(const e of ents){
     const tag = e.tag;
-    const findAt = x => e.pts.find(q => q.ctx_target === x);
+    const findAt = x => e.pts.find(q => cmpGearOf(q) === x);
     const mk = (getv, name, lt, yAxisIndex) => series.push({
       name, type:"line", symbolSize:7, symbol: "circle",
       lineStyle:{width:2, type: lt || "solid"}, itemStyle:{color: e.color},
@@ -5198,7 +5248,8 @@ function buildCmpAgentMxChartOpt(entries, metric, title, conc){
               prefill: preOf, decode: decNetOf};
   const getv = MX[metric] || MX.ttft;
   const insts = [...new Set(ents.flatMap(e => e.pts.map(p => p.inst_tokens)))].sort((a, b) => a - b);
-  const caches = [...new Set(ents.flatMap(e => e.pts.map(p => p.ctx_target)))].sort((a, b) => a - b);
+  // 缓存档同走 cmpGearOf 归一（贴边裁减点归到原档位），与 buildCmpChartOpt 同口径
+  const caches = [...new Set(ents.flatMap(e => e.pts.map(cmpGearOf)))].sort((a, b) => a - b);
   const cats = insts.map(i => fmtK(i));
   // 缓存档按序号取线型/符号（与 buildChartOpt 并发档分线型同手法）
   const ltOf = x => ["solid", "dashed", "dotted"][caches.indexOf(x) % 3];
@@ -5206,14 +5257,14 @@ function buildCmpAgentMxChartOpt(entries, metric, title, conc){
   const series = [];
   for(const e of ents){
     // 该运行没有的缓存档不出系列（否则全 null 空线占位图例）
-    const eCaches = caches.filter(x => e.pts.some(q => q.ctx_target === x));
+    const eCaches = caches.filter(x => e.pts.some(q => cmpGearOf(q) === x));
     for(const x of eCaches){
       series.push({
         name: `${e.tag} 缓存 ${fmtK(x)}`,
         type:"line", symbolSize:7, symbol: symOf(x),
         lineStyle:{width:2, type: ltOf(x)}, itemStyle:{color: e.color},
         data: insts.map(i => {
-          const p = e.pts.find(q => q.inst_tokens === i && q.ctx_target === x);
+          const p = e.pts.find(q => q.inst_tokens === i && cmpGearOf(q) === x);
           return p ? (getv(p) ?? null) : null;
         }),
       });
