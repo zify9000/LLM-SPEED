@@ -29,7 +29,7 @@ from bench import (AGENT_CACHE_RANGE, AGENT_INST_RANGE, AGENT_LADDER_MAX,
                    ANOMALY_TEXT_SUFFIX, ASR_LADDER_RANGE, BenchRun, CTX_HEADROOM,
                    DEFAULT_CONCURRENCIES, DEFAULT_CTX_LIST,
                    MEDIA_LADDER_MAX, OCR_LADDER_RANGE, SCENARIOS,
-                   TTS_LADDER_RANGE, iter_in_text_holders)
+                   TIMEOUT_S_MAX, TTS_LADDER_RANGE, iter_in_text_holders)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(BASE, "results")
@@ -309,8 +309,11 @@ async def _probe_url(url: str, headers: dict, timeout: float = 3.0) -> float | N
     """探测候选网关地址的可达性与延迟（GET /models，/v1 两种前缀都试）。
     返回秒级延迟；不可达/服务端错误返回 None。"""
     try:
+        # trust_env=False：网关地址由用户显式指定（多为内网），不得被桌面会话
+        # 注入的代理环境变量劫持（GNOME 系统代理会导出 ALL_PROXY=socks://…，
+        # httpx 直接抛 Unknown scheme，且 no_proxy 的 CIDR 客户端不认）
         async with httpx.AsyncClient(
-                base_url=url.rstrip("/"), headers=headers,
+                base_url=url.rstrip("/"), headers=headers, trust_env=False,
                 timeout=httpx.Timeout(connect=timeout, read=timeout,
                                       write=timeout, pool=timeout)) as c:
             t = time.perf_counter()
@@ -741,7 +744,8 @@ async def list_models(provider: str | None = None):
     if key:
         headers["Authorization"] = f"Bearer {key}"
     try:
-        async with httpx.AsyncClient(timeout=8) as client:
+        # trust_env=False：同上，网关连通性探测不走桌面代理环境变量
+        async with httpx.AsyncClient(timeout=8, trust_env=False) as client:
             base = base_url.rstrip("/")
             r = None
             for path in ("/v1/models", "/models"):   # LiteLLM 用 /v1，DeepSeek 无前缀
@@ -870,8 +874,12 @@ def _validate_bench_cfg(cfg: dict):
         raise HTTPException(400, "repeats 须为 1~5 的整数")
     tv = cfg.get("timeout_s")
     if tv is not None and (not isinstance(tv, (int, float)) or isinstance(tv, bool)
-                           or not 0 < tv <= 3600):
-        raise HTTPException(400, "timeout_s 须为 1~3600 的数值（秒）")
+                           or not 0 < tv <= TIMEOUT_S_MAX):
+        # 文案写准语义：本字段是「连续无输出多久判为断开」，不是总时长——旧文案
+        # 只说「单请求超时」，实测被当成总时长预算填，长档位 prefill 静默被误掐
+        raise HTTPException(400,
+                            f"timeout_s 须为 1~{TIMEOUT_S_MAX} 的数值（秒，"
+                            "含义为连续无输出的判断时长，非单请求总时长）")
     mt = cfg.get("max_tokens")
     if mt is not None and (not isinstance(mt, int) or isinstance(mt, bool)
                            or not 1 <= mt <= 32768):
@@ -1424,6 +1432,15 @@ async def bench_history_retest(run_id: str, body: dict):
     # 档位下发，引擎重新走贴边逻辑（max_ctx 以当前部署配置为准重新解析）
     cfg = dict(cfg0)
     cfg.pop("note", None)   # 复测运行不继承任务备注（其存档合并后即删除）
+    # 存档里的 timeout_s 不经 _validate_bench_cfg（本函数是复制历史 cfg，不走
+    # 入口校验那条路），而存档跨版本存在——旧口径写下的越界值会原样喂给引擎。
+    # 这里按当前口径钳一次；非数值/bool 一律回落默认（引擎也会自钳，但复测
+    # 静默改写口径该留个由头，不靠下游兜底）
+    tv = cfg.get("timeout_s")
+    if isinstance(tv, (int, float)) and not isinstance(tv, bool) and tv > 0:
+        cfg["timeout_s"] = min(float(tv), float(TIMEOUT_S_MAX))
+    else:
+        cfg.pop("timeout_s", None)
     cfg["models"] = [model]
     cfg["scenarios"] = [scenario]
     cfg["concurrencies"] = [conc]

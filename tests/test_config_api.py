@@ -12,7 +12,7 @@ from unittest import mock
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from bench import SCENARIOS
+from bench import SCENARIOS, TIMEOUT_S_MAX
 import server
 
 
@@ -350,11 +350,15 @@ class TestValidateBenchCfg(unittest.TestCase):
     def test_repeats_timeout_max_tokens_thinking_validated(self):
         """repeats/timeout_s/max_tokens/thinking 白名单：bench_start 直接透传
         引擎，非法值一律 400——repeats 1~5（对齐引擎钳制）、timeout_s 正数
-        ≤3600s、max_tokens 正整数 ≤32768、thinking 取引擎三值枚举。"""
+        ≤TIMEOUT_S_MAX、max_tokens 正整数 ≤32768、thinking 取引擎三值枚举。
+
+        timeout_s 上界取自 bench.TIMEOUT_S_MAX（不写死数字）：该字段是「连续无
+        输出多久判为断开」的 idle 超时，超长上下文 prefill 会长时间零输出，
+        上界必须够宽（2026-09-24 256K 档事故：按总时长直觉填 1200 会误掐）。"""
         bad = [
             self._cfg(repeats=0), self._cfg(repeats=6),
             self._cfg(repeats=True),                       # bool 冒充整数
-            self._cfg(timeout_s=0), self._cfg(timeout_s=3601),
+            self._cfg(timeout_s=0), self._cfg(timeout_s=TIMEOUT_S_MAX + 1),
             self._cfg(timeout_s="600"),
             self._cfg(max_tokens=0), self._cfg(max_tokens=32769),
             self._cfg(max_tokens="512"),
@@ -364,10 +368,18 @@ class TestValidateBenchCfg(unittest.TestCase):
             with self.assertRaises(HTTPException) as cm:
                 server._validate_bench_cfg(cfg)
             self.assertEqual(cm.exception.status_code, 400, cfg)
-        server._validate_bench_cfg(self._cfg(repeats=5, timeout_s=3600,
+        server._validate_bench_cfg(self._cfg(repeats=5,
+                                             timeout_s=TIMEOUT_S_MAX,
                                              max_tokens=32768))
         for th in ("auto", "enabled", "disabled"):
             server._validate_bench_cfg(self._cfg(thinking=th))
+
+    def test_timeout_s_allows_long_idle_for_big_ctx(self):
+        """上界必须容得下超长档位的 prefill 静默：旧硬顶 3600 让 512K/1M 档
+        （prefill 静默可超 1 小时）无从配置；同时拒绝把 3600 当成新上界。"""
+        self.assertGreater(server.TIMEOUT_S_MAX, 3600)
+        server._validate_bench_cfg(self._cfg(timeout_s=3601))   # 旧顶曾拒
+        server._validate_bench_cfg(self._cfg(timeout_s=7200))
 
 
 class _FakeBenchRun:

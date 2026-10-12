@@ -91,6 +91,28 @@ class TestRetestApi(unittest.TestCase):
         self.assertEqual(cfg["max_tokens"], 512)
         self.assertNotIn("note", cfg)                # 任务备注不继承
 
+    def test_timeout_s_clamped_from_archive(self):
+        """复测沿用存档 cfg，而这条路不经 _validate_bench_cfg：存档里的越界
+        timeout_s 必须按当前口径钳制，否则旧口径的存档能把越界值直接喂给引擎
+        （上界见 bench.TIMEOUT_S_MAX）。"""
+        body = {"model": "m1", "scenario": "code", "ctx_target": 4096,
+                "concurrency": 1, "inst_tokens": None}
+        # 越界 → 钳到上界
+        rid = self._archive([_archive_point()], timeout_s=999999)
+        _, bs = self._post(rid, body)
+        self.assertEqual(bs.call_args.args[0]["timeout_s"],
+                         float(server.TIMEOUT_S_MAX))
+        # 界内 → 原样沿用（复测不改用户口径）
+        rid = self._archive([_archive_point()], timeout_s=1500)
+        _, bs = self._post(rid, body)
+        self.assertEqual(bs.call_args.args[0]["timeout_s"], 1500.0)
+        # 非数值/非正 → 丢弃该键，由引擎回退默认（不得把垃圾值透传下去）
+        for junk in ("600", 0, -5, True):
+            rid = self._archive([_archive_point()], timeout_s=junk)
+            _, bs = self._post(rid, body)
+            self.assertNotIn("timeout_s", bs.call_args.args[0],
+                             f"非法存档值应丢弃: {junk!r}")
+
     def test_edge_point_retests_original_rung(self):
         """贴边裁减点（ctx_target=260608、ctx_edge=262144）按裁前原档位下发，
         引擎重新走贴边逻辑。"""
