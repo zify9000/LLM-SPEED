@@ -5,38 +5,46 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LLM-SPEED · LLM 测速台</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23EEF2FF'/%3E%3Cpolygon points='34.7 5.3 8 37.3 32 37.3 29.3 58.7 56 26.7 32 26.7' fill='%234F46E5'/%3E%3C/svg%3E">
-<!-- 图表/卡片库**本地 vendored**（版本与哈希见 static/vendor/README.md）：离线
-     可用、无第三方运行时依赖，也不再需要 SRI（同源自带）。字体走系统栈，
-     同样不请求外部。升级时同步 vendor 文件 + 版本哈希 + 无外部资源门禁。 -->
-<script src="/static/vendor/echarts.min.js"></script>
-<script src="/static/vendor/html2canvas.min.js"></script>
+<!-- 图表库 echarts 本地 vendored + defer：不阻塞首屏解析（init 改到
+     DOMContentLoaded 后跑，时序由 defer 保证先于 DOMContentLoaded 完成）。
+     html2canvas 仅导出 PNG 时用到，改为首次点击时按需注入（见 loadHtml2canvas）。
+     两库版本与哈希见 static/vendor/README.md；字体走系统栈，不请求外部。 -->
+<script src="/static/vendor/echarts.min.js" defer></script>
 <style>
 /* ============ 设计令牌（浅色 BI 风格） ============ */
 :root{
-  /* 文字色令牌按 WCAG AA 正文 4.5:1 定标，卡的是各自最差的 tinted 底色：
-     --ink-3/--ink-4 压 --primary-soft(4.32)、--red 压 --red-soft(4.41)、
-     --green 压 --green-soft(3.15)。#5F6775 / #CE2020 / #15803D 是满足
-     该约束下最浅的取值，别再调浅（--ink-3 与 --ink-4 同值，必须同步改） */
+  /* 文字色令牌按 WCAG AA 正文 4.5:1 定标，卡的是各自最差的 tinted 底色（实测：
+     --ink-3/--ink-4 压 --primary-soft ≈5.10、--red 压 --red-soft ≈4.98、
+     --green 压 --green-soft ≈4.79）。#5F6775 / #CE2020 / #15803D 是满足
+     该约束下最浅的取值，别再调浅（--ink-4 别名 --ink-3，单一取值源） */
   --bg:#F9FAFB;
   --card:#FFFFFF;
   --border:#E5E7EB;
   --border-2:#D1D5DB;
+  --border-3:#F3F4F6;    /* 更浅一级分隔：表格行线等 */
+  --hover:#EFF1F5;       /* 悬停底色：比 --bg 深半档，白卡上可感知 */
   --ink:#111827;
   --ink-2:#374151;
   --ink-3:#5F6775;
-  --ink-4:#5F6775;
+  --ink-4:var(--ink-3);
   --primary:#4F46E5;
   --primary-hover:#4338CA;
   --primary-soft:#EEF2FF;
-  --green:#15803D; --green-soft:#F0FDF4;
-  --yellow:#92400E; --yellow-soft:#FEFCE8;
-  --red:#CE2020;   --red-soft:#FEF2F2;
-  --blue-soft:#EFF6FF;
-  --violet:#9333EA;
+  --green:#15803D; --green-soft:#F0FDF4; --green-border:#BBF7D0;
+  --yellow:#92400E; --yellow-soft:#FEFCE8; --yellow-border:#FDE68A;
+  --red:#CE2020;   --red-soft:#FEF2F2;   --red-border:#FECACA;
+  --blue:#2563EB;  --blue-soft:#EFF6FF;
+  --violet:#9333EA; --violet-soft:#F5F3FF;
   --font:"Inter","PingFang SC","Microsoft YaHei","Noto Sans CJK SC",system-ui,-apple-system,"Segoe UI",sans-serif;
   --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
   --shadow:0 1px 2px rgba(0,0,0,.05);
 }
+/* 语义标注与控件变体（替代 JS 模板里的内联样式重复） */
+.flag-warn{color:var(--yellow); cursor:help}
+.flag-muted{color:var(--ink-4); cursor:help}
+.btn-xs{padding:0 6px; font-size:12px}
+.note-muted{color:var(--ink-4)}
+.note-warn{color:var(--yellow)}
 *{box-sizing:border-box; margin:0; padding:0}
 body{background:var(--bg); color:var(--ink); font:14px/1.6 var(--font)}
 button{font-family:inherit; cursor:pointer}
@@ -46,11 +54,21 @@ input,select,textarea{font-family:inherit}
   *,*::before,*::after{animation-duration:.01ms!important; transition-duration:.01ms!important}
 }
 [hidden]{display:none!important}
+/* 跳到主内容：默认屏外，聚焦时浮现（键盘用户绕过导航） */
+.skip-link{position:absolute; left:-9999px; top:8px; z-index:140; background:var(--card);
+  color:var(--primary); border:1px solid var(--border-2); border-radius:8px;
+  padding:8px 14px; font-size:13px; text-decoration:none}
+.skip-link:focus-visible{left:12px}
 
 /* ============ 顶部导航 ============ */
 nav{background:var(--card); border-bottom:1px solid var(--border); padding:12px 24px;
   position:sticky; top:0; z-index:50}
 .nav-inner{max-width:1440px; margin:0 auto; display:flex; align-items:center; gap:12px}
+/* 窄屏：tag 是纯装饰先隐藏，其余折行兜底（导航是唯一无断点的容器，360px 必溢出） */
+@media (max-width:560px){
+  .nav-inner{flex-wrap:wrap}
+  .nav-inner .tag{display:none}
+}
 .brand-ic{width:32px; height:32px; border-radius:8px; background:var(--primary-soft);
   color:var(--primary); display:flex; align-items:center; justify-content:center; flex:none}
 nav h1{font-size:15px; font-weight:600}
@@ -60,9 +78,9 @@ nav .tag{font-size:12px; color:var(--ink-4)}
   background:var(--card); color:var(--ink-3); border:1px solid var(--border-2);
   transition:color .2s, border-color .2s}
 #statusPill .dot{width:8px; height:8px; border-radius:50%; background:var(--border-2); flex:none}
-#statusPill.run{color:var(--green); border-color:#BBF7D0; background:var(--green-soft)}
+#statusPill.run{color:var(--green); border-color:var(--green-border); background:var(--green-soft)}
 #statusPill.run .dot{background:var(--green); animation:pulse 1.6s ease-in-out infinite}
-#statusPill.err{color:var(--red); border-color:#FECACA; background:var(--red-soft)}
+#statusPill.err{color:var(--red); border-color:var(--red-border); background:var(--red-soft)}
 #statusPill.err .dot{background:var(--red)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 
@@ -77,8 +95,11 @@ nav .tag{font-size:12px; color:var(--ink-4)}
 .head-actions select{width:auto; min-width:150px; padding:7px 10px; font-size:13px}
 #statusMsg{color:var(--ink-3); font-size:12.5px; min-height:20px; margin-bottom:12px; transition:color .15s}
 #statusMsg.err{color:var(--red)}
-/* 超窗跳过的常驻提示：status 行是瞬态的，跳过原因须留痕（point_skipped.msg） */
-#skipNotes{margin-top:8px; font-size:12px; line-height:1.7; color:var(--yellow)}
+/* 运行事件常驻留痕（跳档/重试/失败）：status 行是瞬态的、toast 会自动消失，
+   须留痕的事件追加到这里（point_skipped.msg、toast 状态事件） */
+#skipNotes{margin-top:8px; font-size:12px; line-height:1.7; color:var(--yellow);
+  max-height:120px; overflow-y:auto}
+#skipNotes .note-fail{color:var(--red)}
 
 /* ============ KPI 卡片行 ============ */
 .kpis{display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px}
@@ -135,8 +156,8 @@ textarea{resize:vertical; min-height:auto}
 .deploy-item .kv{display:flex; gap:8px; margin-top:6px; font-size:12.5px}
 .deploy-item .kv .k{color:var(--ink-4); flex:none; min-width:60px}
 .deploy-item .kv .v{color:var(--ink-2); word-break:break-all}
-/* 图末详细数据表：agent 逐点输入构成（旧链轮次/矩阵缓存×指令 × 输入/命中/TTFT/TPS），
-   通用场景逐档位读数（档位 × 输入/TTFT/Prefill/净Decode/输出）——共用样式 */
+/* 图末详细数据表：agent 逐点输入构成（旧链轮次/矩阵缓存×指令 × 输入/命中/TTFT/Prefill/Decode 净速），
+   通用场景逐档位读数（档位 × 输入/TTFT/Prefill/Decode 净速/输出）——共用样式 */
 .turntable{margin-top:10px; border:1px solid var(--border); border-radius:10px; overflow:hidden}
 .turntable table{font-size:12.5px}
 .turntable th, .turntable td{padding:7px 12px}
@@ -160,11 +181,11 @@ label.f.m-sep{margin-top:16px; padding-top:14px; border-top:1px solid var(--bord
 .ck{display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--ink-2);
   padding:4px 14px 4px 6px; cursor:pointer; user-select:none; border-radius:6px;
   transition:background .12s}
-.ck:hover{background:var(--bg)}
+.ck:hover{background:var(--hover)}
 .ck input{accent-color:var(--primary); width:14px; height:14px; cursor:pointer}
 /* 自定义上下文档位：包裹行承载删除按钮（内置档无包裹、不可删） */
 .ckwrap{display:inline-flex; align-items:center; border-radius:6px; transition:background .12s}
-.ckwrap:hover{background:var(--bg)}
+.ckwrap:hover{background:var(--hover)}
 .ckwrap .ck:hover{background:transparent}
 /* 模型选择器按类型分组（llm 不加标题保持原样，媒体组带小标题） */
 .ckgroup{width:100%; font-size:12px; font-weight:600; color:var(--ink-4);
@@ -187,15 +208,18 @@ label.f.m-sep{margin-top:16px; padding-top:14px; border-top:1px solid var(--bord
   transition:transform .28s cubic-bezier(.32,.72,.05,1), visibility 0s .28s}
 #drawerRoot.open #drawerScrim{opacity:1}
 #drawerRoot.open #cfgDrawer{transform:none; visibility:visible; transition-delay:0s, 0s}
-/* 历史删除/对比/改名/拼接弹窗：居中对话框，复用抽屉的遮罩/头/底样式 */
-#delModalRoot, #cmpModalRoot, #renModalRoot, #spliceModalRoot{position:fixed; inset:0; z-index:110}
-#delModalScrim, #cmpModalScrim, #renModalScrim, #spliceModalScrim{position:absolute; inset:0; background:rgba(17,24,39,.45)}
+/* 历史删除/对比/改名/拼接/通用确认弹窗：居中对话框，复用抽屉的遮罩/头/底样式 */
+#delModalRoot, #cmpModalRoot, #renModalRoot, #spliceModalRoot, #uiDialogRoot{position:fixed; inset:0; z-index:110}
+#delModalScrim, #cmpModalScrim, #renModalScrim, #spliceModalScrim, #uiDialogScrim{position:absolute; inset:0; background:rgba(17,24,39,.45)}
 /* 先写 vh 再写 dvh：不认 dvh 的浏览器落回 vh（至少不塌成 0 高），
    认的浏览器用后一条覆盖（移动端地址栏伸缩时不会被裁掉半截） */
-#delModal, #cmpModal, #renModal, #spliceModal{position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+#delModal, #cmpModal, #renModal, #spliceModal, #uiDialog{position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
   width:min(640px, calc(100vw - 32px)); max-height:80vh; max-height:80dvh; display:flex; flex-direction:column;
   background:var(--bg); border:1px solid var(--border); border-radius:14px;
   box-shadow:0 16px 48px rgba(17,24,39,.18)}
+/* 通用确认弹窗体量小一档 */
+#uiDialog{width:min(460px, calc(100vw - 32px))}
+#uiDialogInput{width:100%}
 .del-toolbar{display:flex; align-items:center; gap:8px; padding:10px 20px;
   background:var(--card); border-bottom:1px solid var(--border); flex:none}
 #delList .ck, #cmpList .ck, #spliceList .ck{display:flex; padding:8px 10px; border-radius:8px}
@@ -223,7 +247,11 @@ label.f.m-sep{margin-top:16px; padding-top:14px; border-top:1px solid var(--bord
 .url-row input{flex:1; min-width:0}
 .dep-head{display:flex; align-items:center; gap:8px; padding:9px 8px 9px 12px;
   cursor:pointer; user-select:none; border-radius:10px}
-.dep-head .chev{transition:transform .18s ease; color:var(--ink-4)}
+/* 折叠按钮：键盘可达的真按钮（Enter/Space 触发），视觉仍是原来的 chevron */
+.dep-fold{display:inline-flex; flex:none; padding:2px; margin:-2px; border:none;
+  background:transparent; color:var(--ink-4); cursor:pointer; border-radius:4px}
+.dep-fold:hover{color:var(--ink-2); background:var(--hover)}
+.dep-head .chev{transition:transform .18s ease; color:inherit}
 .dep-edit.collapsed .chev{transform:rotate(-90deg)}
 .dep-head .t{flex:1; min-width:0; font-size:13px; font-weight:600; color:var(--ink-2);
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
@@ -246,12 +274,12 @@ label.f.m-sep{margin-top:16px; padding-top:14px; border-top:1px solid var(--bord
 /* 拖动手柄：加大触发区（padding 4px 6px + 负 margin 补偿），行布局不变、默认色更显眼 */
 .g-head .g-grip, .dgrip{cursor:grab; color:var(--ink-2); display:inline-flex; flex:none;
   padding:4px 6px; margin:-2px -4px; border-radius:4px; transition:background .12s}
-.g-head .g-grip:hover, .dgrip:hover{color:var(--ink); background:var(--bg)}
+.g-head .g-grip:hover, .dgrip:hover{color:var(--ink); background:var(--hover)}
 .g-head .g-grip:active, .dgrip:active{cursor:grabbing}
 .g-head .g-name{flex:0 1 auto; min-width:0; width:auto; min-height:0; border:none;
   background:transparent; padding:2px 4px; font-size:13px; font-weight:600;
   color:var(--ink-2); border-radius:6px; box-shadow:none}
-.g-head .g-name:hover{background:var(--bg)}
+.g-head .g-name:hover{background:var(--hover)}
 .g-head .g-name:focus{background:var(--card); box-shadow:0 0 0 2px rgba(79,70,229,.2)}
 .g-head .g-name:disabled{cursor:default; color:var(--ink-4)}
 .g-head .g-count{font-size:11.5px; color:var(--ink-4); flex:none}
@@ -290,14 +318,14 @@ button:disabled{opacity:.45; cursor:not-allowed}
 .btn-primary{background:var(--primary); color:#fff}
 .btn-primary:hover:not(:disabled){background:var(--primary-hover)}
 .btn-ghost{background:var(--card); border:1px solid var(--border-2); color:var(--ink-2)}
-.btn-ghost:hover:not(:disabled){background:var(--bg)}
+.btn-ghost:hover:not(:disabled){background:var(--hover)}
 /* 危险动作：幽灵按钮红色化（删除/清空/清除 Key），与主操作视觉分离 */
-.btn-ghost.danger:hover:not(:disabled){border-color:#FECACA; color:var(--red); background:var(--red-soft)}
+.btn-ghost.danger:hover:not(:disabled){border-color:var(--red-border); color:var(--red); background:var(--red-soft)}
 /* 顶栏小按钮与图标按钮（抽屉关闭/部署删除等） */
 .btn-ghost.nav-btn{padding:7px 12px; font-size:12.5px}
 .icon-btn{width:34px; height:34px; padding:0; justify-content:center; flex:none;
   background:transparent; border-radius:8px; color:var(--ink-3)}
-.icon-btn:hover:not(:disabled){background:var(--bg); color:var(--ink-2)}
+.icon-btn:hover:not(:disabled){background:var(--hover); color:var(--ink-2)}
 .icon-btn.danger:hover:not(:disabled){background:var(--red-soft); color:var(--red)}
 .btnrow{display:flex; gap:8px; margin-top:16px; flex-wrap:wrap}
 
@@ -310,7 +338,7 @@ button:disabled{opacity:.45; cursor:not-allowed}
 table{width:100%; border-collapse:collapse; font-size:13px}
 th{color:var(--ink-3); font-weight:500; text-align:left; padding:10px 12px;
   border-bottom:1px solid var(--border); white-space:nowrap; font-size:12px}
-td{padding:10px 12px; border-bottom:1px solid #F3F4F6; white-space:nowrap;
+td{padding:10px 12px; border-bottom:1px solid var(--border-3); white-space:nowrap;
   font-variant-numeric:tabular-nums; color:var(--ink-2)}
 #liveTable td:nth-child(n+7), .resultTable td:nth-child(n+4){font-family:var(--mono); font-size:12.5px}
 .rt-scen{border:1px solid var(--border); border-radius:10px; overflow:hidden}
@@ -347,7 +375,7 @@ td{padding:10px 12px; border-bottom:1px solid #F3F4F6; white-space:nowrap;
 .sc-tt{width:100%; border-collapse:collapse; font-size:13px}
 .sc-tt th{color:var(--ink-4); font-weight:600; font-size:11.5px; letter-spacing:.03em;
   text-align:left; padding:4px 8px 8px; border-bottom:1px solid var(--border)}
-.sc-tt td{padding:6px 8px; border-bottom:1px solid #F3F4F6; font-family:var(--mono);
+.sc-tt td{padding:6px 8px; border-bottom:1px solid var(--border-3); font-family:var(--mono);
   font-size:13px; color:var(--ink-2)}
 .sc-tt td:first-child{font-family:inherit; color:var(--ink)}
 .sc-tt tr:last-child td{border-bottom:none}
@@ -363,12 +391,12 @@ td{padding:10px 12px; border-bottom:1px solid #F3F4F6; white-space:nowrap;
   background:var(--bg); font-weight:600; color:var(--ink)}
 .sc-tt-mx td:first-child{border-right:1px solid var(--border)}
 tbody tr{transition:background .12s}
-tbody tr:hover{background:var(--bg)}
+tbody tr:hover{background:var(--hover)}
 tr.err td{color:var(--red)}
 tr.fade td{opacity:.45}
 .empty-row td{color:var(--ink-4); text-align:center; padding:28px}
 /* 进行中的测速任务（多标签页入口） */
-.arun{display:flex; align-items:center; gap:10px; border:1px solid #BBF7D0;
+.arun{display:flex; align-items:center; gap:10px; border:1px solid var(--green-border);
   background:var(--green-soft); border-radius:10px; padding:10px 14px;
   font-size:13px; margin-bottom:10px}
 .arun .dot{width:8px; height:8px; border-radius:50%; background:var(--green);
@@ -421,10 +449,10 @@ tr.fade td{opacity:.45}
 .sc-stat .n small{font-size:11px; font-weight:600}
 .sc-stat .t{font-size:11px; color:var(--ink-4); margin-top:3px}
 .sc-stat.s1{background:var(--primary-soft)} .sc-stat.s1 .n{color:var(--primary)}
-.sc-stat.s2{background:var(--blue-soft)}   .sc-stat.s2 .n{color:#2563EB}
+.sc-stat.s2{background:var(--blue-soft)}   .sc-stat.s2 .n{color:var(--blue)}
 .sc-stat.s3{background:var(--green-soft)}  .sc-stat.s3 .n{color:var(--green)}
 .sc-stat.s4{background:var(--yellow-soft)} .sc-stat.s4 .n{color:var(--yellow)}
-.sc-stat.s5{background:#F5F3FF}         .sc-stat.s5 .n{color:var(--violet)}
+.sc-stat.s5{background:var(--violet-soft)}         .sc-stat.s5 .n{color:var(--violet)}
 .sc-charts{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:10px}
 /* 图表块与其后的矩阵表之间留距（卡片组件的标准 12px 节奏，对齐 .sc-tt-grid） */
 .sc-charts + .sc-tt-wrap{margin-top:12px}
@@ -490,8 +518,9 @@ tr.fade td{opacity:.45}
 /* ============ 失败顶部悬浮提醒（toast） ============
    引擎随 status 事件 toast:true 下发（兜底重试调度 + 请求最终失败，ADR-0052）：
    顶部居中横幅（手机推送式），下滑进入、~2.6s 自动上滚消失，可 × 提前关闭；
-   容器不挡交互（pointer-events 只落横幅本体），z-index 低于配置抽屉 #drawerRoot(100) */
-#toastRoot{position:fixed; top:12px; left:50%; transform:translateX(-50%); z-index:90;
+   容器不挡交互（pointer-events 只落横幅本体）。z-index 压过抽屉/弹窗：失败
+   提醒被遮罩压暗、2.6s 后消失等于没报——告警可见性优先于抽屉视觉完整 */
+#toastRoot{position:fixed; top:12px; left:50%; transform:translateX(-50%); z-index:130;
   display:flex; flex-direction:column; align-items:center; gap:8px; pointer-events:none}
 .toast{display:flex; align-items:flex-start; gap:8px; min-width:240px; max-width:min(480px,86vw);
   padding:10px 12px; border:1px solid var(--border-2); border-left:3px solid var(--yellow);
@@ -504,14 +533,15 @@ tr.fade td{opacity:.45}
 .toast .t-close{flex:none; width:18px; height:18px; padding:0; border-radius:4px;
   color:var(--ink-4); font-size:14px; line-height:18px;
   transition:background .12s, color .12s}
-.toast .t-close:hover{background:var(--bg); color:var(--ink-2)}
+.toast .t-close:hover{background:var(--hover); color:var(--ink-2)}
 </style>
 </head>
 <body>
+<a class="skip-link" href="#configPanel">跳到主内容</a>
 <!-- 无 JS 时页面等于白屏（配置面板/表格/图表全靠脚本渲染）：这是唯一能在
      脚本完全不执行时出现的提示，所以只能用静态 HTML + 内联样式，不依赖脚本 -->
 <noscript>
-  <div role="alert" style="background:var(--yellow-soft); color:var(--yellow); border:1px solid #FDE68A;
+  <div role="alert" style="background:var(--yellow-soft); color:var(--yellow); border:1px solid var(--yellow-border);
        border-radius:8px; padding:8px 12px; margin:12px 24px 0; font-size:13px">
     ⚠ 本页面需要 JavaScript：脚本被禁用或未能加载，配置面板、测速控制台与图表都不会显示。请启用 JavaScript 后刷新。
   </div>
@@ -534,26 +564,30 @@ tr.fade td{opacity:.45}
   <div class="page-head">
     <div>
       <h2>测速控制台</h2>
-      <p class="sub">prefill / decode × 上下文长度（0K~1M）× 并发 · 创意写作 / 代码生成 / Agent 调用</p>
+      <p class="sub">Prefill / Decode × 上下文（0K~1M）× 并发 · 文本 / 翻译 / Agent / 语音 / 图像</p>
     </div>
     <div class="head-actions">
-      <button class="btn-ghost" id="btnToggleCfg" onclick="toggleConfig()">
+      <button class="btn-ghost" id="btnToggleCfg" onclick="toggleConfig()" aria-expanded="true" aria-controls="configPanel">
         <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         <span id="btnToggleCfgText">收起配置</span></button>
       <button id="btnStart" class="btn-primary" onclick="startRun()">
         <svg class="ic" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><polygon points="6 3 20 12 6 21 6 3"/></svg>开始测速</button>
-      <button id="btnStop" class="btn-ghost" onclick="stopRun()" hidden>
+      <button id="btnStop" class="btn-ghost" onclick="stopRun()" hidden
+        title="终止本次测速；已完成的测点保留在服务端，可从历史记录载入查看">
         <svg class="ic" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg><span>停止</span></button>
     </div>
   </div>
   <div id="statusMsg" aria-live="polite"></div>
   <div id="cdnWarn" role="alert" hidden
-       style="background:var(--red-soft); color:var(--red); border:1px solid #FECACA;
+       style="background:var(--red-soft); color:var(--red); border:1px solid var(--red-border);
               border-radius:8px; padding:8px 12px; margin-bottom:16px; font-size:13px"></div>
 
   <!-- ========== 配置区（始终位于控制台上方：空闲时平铺展示；测速/完成后自动隐藏，
        「展开配置」唤回时也悬于 KPI/实时表/图表之上，不嵌入主区） ========== -->
-  <aside id="configPanel">
+  <section id="configPanel" aria-label="测速配置">
+    <!-- 测速中/完成后唤回的配置面板语义提示：改动不作用于当前任务，只写入
+       「上次选择」记忆（saveMatrixCfg）——不说清极易误以为「改了就生效」 -->
+    <div class="hint" id="cfgRunNote" hidden style="margin:0 0 10px">配置修改不影响进行中的任务，将作为下次启动的默认配置</div>
     <div class="cfg-grid">
       <div class="card">
         <div class="card-head"><h3>Provider 与模型</h3></div>
@@ -564,7 +598,7 @@ tr.fade td{opacity:.45}
           <div class="btnrow" style="margin-top:10px">
             <button class="btn-ghost" onclick="refreshModels()">
               <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>刷新模型列表</button>
-            <button class="btn-ghost" onclick="openCfgDrawer()">管理 Provider / 部署…</button>
+            <button class="btn-ghost" onclick="openCfgDrawer()">Provider 管理…</button>
           </div>
           <!-- 组标签（label.f）与容器显式关联：容器是一组复选框而非单个控件，
                用 role="group" + aria-labelledby 让读屏在进入每组时报出组名 -->
@@ -586,7 +620,7 @@ tr.fade td{opacity:.45}
             <label class="f" id="lbCtxList">上下文长度（目标输入 tokens）</label>
             <div id="ctxList" class="ckrow" role="group" aria-labelledby="lbCtxList"></div>
             <div class="btnrow" style="margin:6px 0 0">
-              <input type="text" id="fCustomCtx" placeholder="自定义档位，如 192K" style="width:150px"
+              <input type="text" id="fCustomCtx" aria-label="自定义上下文档位" placeholder="自定义档位，如 192K" style="width:150px"
                      onkeydown="if(event.key==='Enter')addCustomCtx()">
               <button class="btn-ghost" onclick="addCustomCtx()">添加</button>
             </div>
@@ -597,7 +631,7 @@ tr.fade td{opacity:.45}
             <label class="f" id="lbTranslateList">翻译档位（原文字数）</label>
             <div id="translateList" class="ckrow" role="group" aria-labelledby="lbTranslateList"></div>
             <div class="btnrow" style="margin:6px 0 0">
-              <input type="text" id="fCustomTranslate" placeholder="自定义档位字数，如 2400" style="width:150px"
+              <input type="text" id="fCustomTranslate" aria-label="自定义翻译档位" placeholder="自定义档位字数，如 2400" style="width:150px"
                      onkeydown="if(event.key==='Enter')addCustomTranslate()">
               <button class="btn-ghost" onclick="addCustomTranslate()">添加</button>
             </div>
@@ -622,14 +656,14 @@ tr.fade td{opacity:.45}
               <label class="f" id="lbAgentCacheList">已缓存上下文（tokens，每档先预热写入前缀缓存）</label>
               <div id="agentCacheList" class="ckrow" role="group" aria-labelledby="lbAgentCacheList"></div>
               <div class="btnrow" style="margin:6px 0 0">
-                <input type="text" id="fCustomAgentCache" placeholder="自定义缓存档，如 192K" style="width:150px"
+                <input type="text" id="fCustomAgentCache" aria-label="自定义 Agent 缓存档" placeholder="自定义缓存档，如 192K" style="width:150px"
                        onkeydown="if(event.key==='Enter')addCustomAgentCache()">
                 <button class="btn-ghost" onclick="addCustomAgentCache()">添加</button>
               </div>
               <label class="f" id="lbAgentInstList">指令长度（tokens，缓存基础上的单步新输入）</label>
               <div id="agentInstList" class="ckrow" role="group" aria-labelledby="lbAgentInstList"></div>
               <div class="btnrow" style="margin:6px 0 0">
-                <input type="text" id="fCustomAgentInst" placeholder="自定义指令档，如 3072" style="width:150px"
+                <input type="text" id="fCustomAgentInst" aria-label="自定义 Agent 指令档" placeholder="自定义指令档，如 3072（或 3K）" style="width:170px"
                        onkeydown="if(event.key==='Enter')addCustomAgentInst()">
                 <button class="btn-ghost" onclick="addCustomAgentInst()">添加</button>
               </div>
@@ -646,7 +680,7 @@ tr.fade td{opacity:.45}
               <label class="f" id="mediaLadderLabel">档位</label>
               <div id="mediaList" class="ckrow" role="group" aria-labelledby="mediaLadderLabel"></div>
               <div class="btnrow" style="margin:6px 0 0">
-                <input type="text" id="fCustomMediaLadder" placeholder="自定义档位" style="width:150px"
+                <input type="text" id="fCustomMediaLadder" aria-label="自定义媒体场景档位" placeholder="自定义档位" style="width:150px"
                        onkeydown="if(event.key==='Enter')addCustomMediaLadder()">
                 <button class="btn-ghost" onclick="addCustomMediaLadder()">添加</button>
               </div>
@@ -669,11 +703,16 @@ tr.fade td{opacity:.45}
                 <option value="512">512</option>
                 <option value="1024" selected>1024</option>
               </select></div>
-            <div><label class="f" for="fRepeats">每点重复次数（取均值）</label><input type="number" id="fRepeats" value="1" min="1" max="5"></div>
+            <div><label class="f" for="fRepeats">每点重复次数（取均值）</label><input type="number" id="fRepeats" value="1" min="1" max="5"><div class="hint" id="repeatsHint" hidden></div></div>
           </div>
           <div class="hint">云端读数有调度抖动，关键点建议 3 次取均值；本地稳定环境保持 1 即可</div>
-          <label class="f" for="fTimeout">单请求超时（秒）</label>
-          <input type="number" id="fTimeout" value="1200">
+          <label class="f" for="fTimeout">单请求无输出超时（秒）</label>
+          <input type="number" id="fTimeout" value="1200" min="1" max="7200" step="1">
+          <!-- 越界提示：number 输入的 min/max **不拦键盘输入、也不标红**（只作用在
+               spinner 与表单校验上，而本控件不在 form 内），手打超限值毫无反馈。
+               故留一个提示位：输入越界时显式说明「已按上限生效」——提交侧本就
+               自钳（collectCfg），提示与真实行为必须一致，不能写「已拒绝」 -->
+          <div class="hint" id="timeoutHint" hidden></div>
           <label class="f" for="fThinking">思考模式</label>
           <select id="fThinking">
             <option value="auto" selected>跟随服务端默认</option>
@@ -693,39 +732,20 @@ tr.fade td{opacity:.45}
         <div class="card-body" id="deployList"></div>
       </div>
     </div>
-  </aside>
-
-  <!-- ================= 历史记录（与参数配置同级，可载入/删除/清空） ================= -->
-  <section id="historyPanel">
-    <div class="card">
-      <div class="card-head"><h3>历史记录</h3><small>自动保存于 results/ · mock 运行不入库</small></div>
-      <div class="card-body">
-        <div id="activeRuns"></div>
-        <div style="display:flex; gap:8px; flex-wrap:wrap">
-          <select id="historySel" style="flex:1; min-width:240px" aria-label="历史测速记录"></select>
-          <button class="btn-ghost" onclick="loadHistory()">载入</button>
-          <button class="btn-ghost" onclick="openCmpModal()" title="勾选 ≥2 条记录，按模型合并生成对比卡片">对比…</button>
-          <button class="btn-ghost" onclick="editHistoryNote()">备注</button>
-          <button class="btn-ghost" onclick="openRenameModal()" title="本地部署模型改名后，把该存档中的旧模型名改写为新名（变更测速点与部署快照等全部引用）">改名…</button>
-          <button class="btn-ghost" onclick="openSpliceModal()" title="把另一条存档的测速点拼接进选中存档：同身份点以来源覆盖、新点追加（如个别档位测不出时另跑单点拼回）">拼接…</button>
-          <button class="btn-ghost danger" onclick="openDelModal()">删除…</button>
-        </div>
-      </div>
-    </div>
   </section>
 
   <!-- KPI 行 -->
   <div class="kpis">
     <div class="kpi prefill">
-      <p class="k">最新 Prefill 速度</p>
+      <p class="k">实时 Prefill 速度</p>
       <p class="v" id="kpiPrefill">– <small>tok/s</small></p>
-      <p class="d">全量：prompt tokens ÷（TTFT − RTT）· agent 缓存档为增量口径（（prompt − 前缀命中）÷ TTFT）</p>
+      <p class="d">全量：prompt tokens ÷（TTFT − RTT）；Agent 缓存档为增量口径：（prompt − 前缀命中）÷ TTFT</p>
       <div class="progbar" id="prefillBarWrap" hidden><div id="prefillBarFill"></div></div>
     </div>
     <div class="kpi decode">
       <p class="k">实时 Decode 速度</p>
       <p class="v" id="kpiDecode">– <small>tok/s</small></p>
-      <p class="d">流式解码最新读数</p>
+      <p class="d">随 token 流持续刷新</p>
       <div class="progbar" id="decodeBarWrap" hidden><div id="decodeBarFill"></div></div>
     </div>
     <div class="kpi">
@@ -737,18 +757,19 @@ tr.fade td{opacity:.45}
       <p class="k">已完成测试点</p>
       <p class="v" id="kpiPoints">0 <small>/ 0</small></p>
       <p class="d">模型 × 场景 × 上下文/轮次 × 并发</p>
-      <div class="progbar" id="progWrap" hidden><div id="progFill"></div></div>
-      <div id="skipNotes" hidden></div>
+      <div class="progbar" id="progWrap" role="progressbar" aria-label="测速进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><div id="progFill"></div></div>
+      <div id="skipNotes" aria-live="polite" hidden></div>
+      <div class="hint" id="runElapsed" hidden></div>
     </div>
   </div>
 
   <!-- ================= 主区 ================= -->
   <section id="mainCol">
       <div class="card" id="liveCard" hidden>
-        <div class="card-head"><h3>实时测速</h3><small>prefill 等待期 1s、decode 期 0.4s 刷新</small></div>
+        <div class="card-head"><h3>实时测速</h3><small>Prefill 等待期 1s、Decode 期 0.4s 刷新</small></div>
         <div class="tablewrap">
         <table id="liveTable">
-          <thead><tr><th>模型</th><th>场景</th><th>上下文</th><th>并发</th><th>请求</th><th>阶段</th><th>TTFT</th><th>已出 tokens</th><th>实时速度</th><th>耗时</th></tr></thead>
+          <thead><tr><th scope="col">模型</th><th scope="col">场景</th><th scope="col">上下文</th><th scope="col">并发</th><th scope="col" title="r = 请求序号；每点重复次数 >1 时带 ·repN 轮次后缀">请求</th><th scope="col">阶段</th><th scope="col">TTFT</th><th scope="col">输出 tokens</th><th scope="col">实时速度</th><th scope="col">耗时</th></tr></thead>
           <tbody></tbody>
         </table>
         </div>
@@ -778,12 +799,32 @@ tr.fade td{opacity:.45}
             <button class="btn-ghost" onclick="genCards()">
               <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>生成卡片</button>
             <button class="btn-ghost" onclick="downloadCard()" id="btnDl" disabled>
-              <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>下载 PNG</button>
+              <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span>下载 PNG</span></button>
           </div>
           <div id="cardWrap"></div>
         </div>
       </div>
   </section>
+
+  <!-- ================= 历史记录（与参数配置同级，可载入/对比/备注/改名/拼接/删除） ================= -->
+  <section id="historyPanel">
+    <div class="card">
+      <div class="card-head"><h3>历史记录</h3><small>自动保存于 results/ · 模拟运行不入库</small></div>
+      <div class="card-body">
+        <div id="activeRuns"></div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap">
+          <select id="historySel" style="flex:1; min-width:240px" aria-label="历史测速记录"></select>
+          <button class="btn-ghost" onclick="loadHistory()">载入</button>
+          <button class="btn-ghost" onclick="openCmpModal()" title="勾选 ≥2 条记录，按模型合并生成对比卡片">对比…</button>
+          <button class="btn-ghost" onclick="editHistoryNote()">备注</button>
+          <button class="btn-ghost" onclick="openRenameModal()" title="本地部署模型改名后，把该存档中的旧模型名改写为新名（变更测速点与部署快照等全部引用）">改名…</button>
+          <button class="btn-ghost" onclick="openSpliceModal()" title="把另一条存档的测速点拼接进选中存档：同身份点以来源覆盖、新点追加（如个别档位测不出时另跑单点拼回）">拼接…</button>
+          <button class="btn-ghost danger" onclick="openDelModal()">删除…</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
 </div>
 <!-- ========== Provider / 部署配置抽屉：页面级配置，与测速配置分离（ADR-0011） ========== -->
 <div id="drawerRoot" hidden>
@@ -791,7 +832,7 @@ tr.fade td{opacity:.45}
   <aside id="cfgDrawer" role="dialog" aria-modal="true" aria-labelledby="cfgDrawerTitle">
     <header class="dr-head">
       <div style="flex:1; min-width:0">
-        <h3 id="cfgDrawerTitle">Provider / 部署配置</h3>
+        <h3 id="cfgDrawerTitle">Provider 管理</h3>
         <p class="dr-sub">写入服务端 config.json 与 .env · 保存后即时生效，无需重启</p>
       </div>
       <button class="icon-btn" onclick="closeCfgDrawer()" aria-label="关闭配置抽屉">
@@ -824,7 +865,7 @@ tr.fade td{opacity:.45}
       <div class="dsec">
         <div class="ds-t">API KEY</div>
         <div class="btnrow" style="margin:0">
-          <input type="password" id="ceKey" style="flex:1" placeholder="已配置或留空则保持不变" autocomplete="off">
+          <input type="password" id="ceKey" style="flex:1" aria-label="API Key" placeholder="已配置；留空保持不变" autocomplete="off">
           <button class="btn-ghost danger" onclick="ceClearKey()">清除 Key</button>
         </div>
         <div class="hint">只写入服务端 .env，页面永不回显；留空保持不变</div>
@@ -946,6 +987,29 @@ tr.fade td{opacity:.45}
   </div>
 </div>
 
+<!-- ========== 通用确认/输入弹窗（uiDialog()）：原生 confirm/prompt 的体系内替代，
+     与抽屉/历史弹窗同骨架（遮罩/头/体/底），焦点圈定复用共享实现 ========== -->
+<div id="uiDialogRoot" hidden tabindex="-1">
+  <div id="uiDialogScrim"></div>
+  <div id="uiDialog" role="dialog" aria-modal="true" aria-labelledby="uiDialogTitle">
+    <header class="dr-head">
+      <div style="flex:1; min-width:0">
+        <h3 id="uiDialogTitle"></h3>
+        <p class="dr-sub" id="uiDialogSub" hidden></p>
+      </div>
+    </header>
+    <div class="dr-body">
+      <div id="uiDialogBody" style="font-size:13.5px; color:var(--ink-2); line-height:1.7; white-space:pre-line"></div>
+      <input type="text" id="uiDialogInput" hidden>
+      <div class="hint" id="uiDialogHint" hidden></div>
+    </div>
+    <footer class="dr-foot">
+      <button class="btn-ghost" id="uiDialogCancel">取消</button>
+      <button class="btn-primary" id="uiDialogOk">确定</button>
+    </footer>
+  </div>
+</div>
+
 <div id="offChartBox" aria-hidden="true"><div id="offChart"></div></div>
 
 <script>
@@ -1000,7 +1064,11 @@ const state = {points:new Map(), es:null, runId:null, running:false, cfg:null, m
   mediaLadderScen:null,    // 档位区当前展示的媒体场景键（一次运行限一种 kind，同时只展示一个）
   modelKinds:{},           // 模型名→能力集 kinds 数组映射（当前 provider 的 deployments 推出，缺省 [llm]）
   cardLegend:{},           // 卡片图例选择（cardLegendKey → 系列→隐藏标记，只存隐藏项；仅内存不持久化）
-  cardTable:"none",        // 卡片数据档位：none|agg|full；agent 矩阵卡另用 "mx-" + 按固定顺序 join 的矩阵指标集合多选（如 mx-ttft-decode；"mx-" 空集 = 不出矩阵；仅内存不持久化）
+  // 卡片数据档位（仅内存不持久化）：tier = none|agg|full（明细表档位）；
+  // mx = 矩阵指标集合（null = 未自定义，矩阵卡按默认 [ttft, decode]；空数组 =
+  // 不出矩阵表）。选 tier 会把 mx 重置 null、选 mx 会把 tier 重置 none——
+  // 与原 "mx-" 单字符串编码的互斥行为一致
+  cardTable:{tier:"none", mx:null},
   cmp:null,                // 多次对比态：{runs:[{id,tag,color,started_at,note,provider_label,cfg,results}]}；非 null 时卡片区渲染对比卡片
   retestArchive:null,      // 单点复测来源存档 id（复测运行结束后自动重载该存档）
   charts:[]};   // 平铺图表的 echarts 实例（重建/resize 用）
@@ -1052,7 +1120,7 @@ async function init(){
   state.defAgentInst = agentMeta?.inst_ladder || [];
   renderAgentCacheList();
   renderAgentInstList();
-  $("#concList").innerHTML = cfg.concurrencies.map(v => ckHtml("conc", v, v+" 并发", Number(v)===1)).join("");
+  $("#concList").innerHTML = cfg.concurrencies.map(v => ckHtml("conc", v, "并发 "+v, Number(v)===1)).join("");
   restoreMatrixCfg();   // 恢复上次矩阵选择（渲染默认勾选之后覆盖）
   syncMatrixForm();
   // 矩阵变更即持久化（增删自定义档不走 change，在其处理器里单独存）
@@ -1062,20 +1130,33 @@ async function init(){
     $(sel).addEventListener("change", saveMatrixCfg);
   for(const [id] of MATRIX_INPUTS)
     $(id).addEventListener("change", saveMatrixCfg);
+  // 超时越界提示（input 事件：手打过程中即反馈，不等失焦）
+  $("#fTimeout").addEventListener("input", syncTimeoutHint);
+  syncTimeoutHint();
+  // 重复次数越界提示（同 fTimeout 机制）
+  $("#fRepeats").addEventListener("input", syncRepeatsHint);
+  syncRepeatsHint();
+  // 测速中关标签页：告知式提示（任务仍在服务端进行、可多标签接管），非阻拦
+  window.addEventListener("beforeunload", e => { if(state.running){ e.preventDefault(); e.returnValue = ""; } });
   onProviderChange();
   setPhase("idle");   // 刚启动：平铺全部配置，不展示测速组件
-  // 图表库降级：两个库已本地 vendored（static/vendor/），缺失只可能是部署问题
-  // （文件被删/静态挂载不可用）。仍显式告警不静默半死——测速、配置与历史不受影响
-  const cdnMiss = [!window.echarts && "ECharts（速度曲线/卡片内嵌图表）",
-                   !window.html2canvas && "html2canvas（卡片 PNG 导出）"].filter(Boolean);
-  if(cdnMiss.length){
+  // 图表库降级：echarts 已本地 vendored（static/vendor/），缺失只可能是部署问题
+  // （文件被删/静态挂载不可用）。仍显式告警不静默半死——测速、配置与历史不受影响。
+  // html2canvas 改按需加载（loadHtml2canvas），不在启动检查之列
+  if(!window.echarts){
     const w = $("#cdnWarn");
-    w.textContent = "⚠ 本地图表库未加载：" + cdnMiss.join("、") + " 不可用；"
+    w.textContent = "⚠ 本地图表库未加载：ECharts（速度曲线/卡片内嵌图表）不可用；"
       + "测速、配置与历史记录不受影响（检查 static/vendor/ 是否完整、/static 是否可访问）";
     w.hidden = false;
   }
+  syncChartTheme();   // 图表主题色从 CSS 令牌现读（界面灰与图表灰同源）
   offChart = window.echarts ? echarts.init($("#offChart")) : null;
-  window.addEventListener("resize", () => state.charts.forEach(c => c.resize()));
+  // 窗口拖拽缩放高频触发：rAF 合帧，每帧至多一次全图表 resize
+  let _resizeRaf = 0;
+  window.addEventListener("resize", () => {
+    if(_resizeRaf) return;
+    _resizeRaf = requestAnimationFrame(() => { _resizeRaf = 0; state.charts.forEach(c => c.resize()); });
+  });
   $("#modelList").addEventListener("change", () => { saveModelSel(); syncDeployCard(); syncScenByKind(); });   // 勾选模型→记忆选择+联动部署环境展示+场景按 kind 过滤
   // 单请求最大输出 tokens：选项式（256/512/1024），记忆最近一次选择
   const savedMt = loadMaxTokens();
@@ -1086,8 +1167,12 @@ async function init(){
   refreshModels();
   loadHistoryList();
   // 页面空闲时轮询其他标签页/会话发起的进行中任务（重绘入口条）；
-  // 本页 run 进行中不轮询——SSE 事件流即权威事实
-  setInterval(() => { if(!state.running) renderActiveRuns(); }, 20000);
+  // 本页 run 进行中不轮询——SSE 事件流即权威事实；标签页隐藏时不发请求，
+  // 恢复可见时立即补一次
+  const pollActive = () => { if(!document.hidden && !state.running) renderActiveRuns(); };
+  setInterval(pollActive, 20000);
+  setInterval(tickElapsed, 1000);   // 运行时长/ETA 心跳（非运行态自动隐藏，近零成本）
+  document.addEventListener("visibilitychange", () => { if(!document.hidden) pollActive(); });
 }
 function ckHtml(group, val, label, on){
   // 模型名等外部字符串统一转义：网关响应、历史存档均可控面之外
@@ -1189,110 +1274,129 @@ function parseCtx(s){
   const u = m[2].toLowerCase();
   return Math.round(parseFloat(m[1]) * (u==="k" ? 1024 : u==="m" ? 1048576 : 1));
 }
-/* 自定义上下文档位：部署上限非标准 2 的幂（如 192K）时补档，localStorage 记忆。
-   渲染时与内置档合并按数值升序插入原序列（不再一律甩到末尾），自定义档带 × 删除 */
-function customCtxList(){
-  let saved = [];
-  try{ saved = JSON.parse(localStorage.getItem("llmspeed.customCtx") || "[]"); }catch(e){}
-  return [...new Set(saved.filter(v => Number.isInteger(v) && v > 0
-      && v <= 4*1048576 && !state.defCtx.includes(v)))].sort((a,b)=>a-b);
+/* 自定义档位编辑器工厂：上下文/翻译/媒体（asr/ocr/tts）/Agent 缓存/Agent 指令
+   五套阶梯同一机制——默认档 + localStorage 自定义档（按数值升序插入原序列、
+   自定义档带 × 删除、增删后勾选保持）。差异全部收敛进配置：存储读写、解析、
+   格式化、值域/数量校验、默认勾选规则（此前五套各约 90 行近复制，改一处漏
+   其余的缺陷已实际发生过；新增阶梯 = 一份配置） */
+function makeLadderEditor(cfg){
+  /* cfg = {defaults(), readCustoms(), writeCustoms(arr), listSel, group, delClass,
+     fmt(v), parse(s)→0=失败, parseHint, validate(v)→err|null, maxCount?,
+     defaultOn(v,isCustom), afterRender?(all,sel), active?()（媒体按场景分时用）} */
+  const listEl = () => $(cfg.listSel);
+  function render(checked){
+    const customs = new Set(cfg.readCustoms());
+    const all = [...new Set([...cfg.defaults(), ...customs])].sort((a,b)=>a-b);
+    const sel = checked ? [...checked].filter(v => all.includes(v)) : null;
+    listEl().innerHTML = all.map(v => {
+      const on = sel ? sel.includes(v) : cfg.defaultOn(v, customs.has(v));
+      const ck = ckHtml(cfg.group, v, cfg.fmt(v), on);
+      return customs.has(v)
+        ? `<span class="ckwrap">${ck}<button type="button" class="${cfg.delClass}" data-v="${v}" title="删除自定义档位" aria-label="删除自定义档位 ${cfg.fmt(v)}">×</button></span>`
+        : ck;
+    }).join("");
+    cfg.afterRender?.(all, (sel || all).slice().sort((a,b)=>a-b));
+  }
+  /* 删除自定义档（事件委托；按钮在 label 外的包裹行里，不会误触勾选） */
+  listEl().addEventListener("click", e => {
+    const del = e.target.closest("." + cfg.delClass);
+    if(!del || (cfg.active && !cfg.active())) return;
+    e.preventDefault();
+    const v = +del.dataset.v;
+    const checked = new Set(checkedVals(cfg.group).map(Number));
+    checked.delete(v);
+    cfg.writeCustoms(cfg.readCustoms().filter(x => x !== v));
+    render(checked);
+    saveMatrixCfg();
+    setPill(`已删除自定义档位 ${cfg.fmt(v)}`, "");
+  });
+  function add(inputEl){
+    if(cfg.active && !cfg.active()) return;
+    const v = cfg.parse(inputEl.value);
+    if(!v) return setPill(cfg.parseHint, "err");
+    const err = cfg.validate?.(v);
+    if(err) return setPill(err, "err");
+    if([...listEl().querySelectorAll(`.ck input[data-g=${cfg.group}]`)].some(i => +i.value === v))
+      return setPill(`档位 ${cfg.fmt(v)} 已存在`, "err");
+    const checked = new Set(checkedVals(cfg.group).map(Number));
+    checked.add(v);
+    if(cfg.maxCount && checked.size > cfg.maxCount)
+      return setPill(`档位数量超上限（最多 ${cfg.maxCount} 档）`, "err");
+    cfg.writeCustoms([...cfg.readCustoms(), v].sort((a,b)=>a-b));
+    render(checked);
+    saveMatrixCfg();
+    inputEl.value = "";
+    setPill(`已添加自定义档位 ${cfg.fmt(v)}`, "");
+  }
+  return {render, add};
 }
-/* 重绘上下文档序列；checked 为要保留勾选状态的数值集合（增删档后调用），
-   缺省按初始规则（内置 ≤32K、自定义档全选） */
-function renderCtxList(checked){
-  const customs = new Set(customCtxList());
-  const all = [...new Set([...state.defCtx, ...customs])].sort((a,b)=>a-b);
-  $("#ctxList").innerHTML = all.map(v => {
-    const on = checked ? checked.has(v) : (customs.has(v) || v <= 32768);
-    const ck = ckHtml("ctx", v, fmtK(v), on);
-    return customs.has(v)
-      ? `<span class="ckwrap">${ck}<button type="button" class="ctx-del" data-v="${v}" title="删除自定义档位" aria-label="删除自定义档位 ${fmtK(v)}">×</button></span>`
-      : ck;
-  }).join("");
+/* localStorage 自定义档读写样板（扁平数组形态；媒体按场景分键，见下方） */
+function loadCustomArr(key){
+  let a = [];
+  try{ a = JSON.parse(localStorage.getItem(key) || "[]"); }catch(e){}
+  return Array.isArray(a) ? a : [];
 }
-/* 删除自定义档（事件委托；按钮在 label 外的包裹行里，不会误触勾选） */
-$("#ctxList").addEventListener("click", e => {
-  const del = e.target.closest(".ctx-del");
-  if(!del) return;
-  e.preventDefault();
-  const v = +del.dataset.v;
-  const checked = new Set(checkedVals("ctx").map(Number));
-  checked.delete(v);
-  try{ localStorage.setItem("llmspeed.customCtx",
-    JSON.stringify(customCtxList().filter(x => x !== v))); }catch(e){}
-  renderCtxList(checked);
-  saveMatrixCfg();
-  setPill(`已删除自定义档位 ${fmtK(v)}`, "");
+function saveCustomArr(key, arr){
+  try{ localStorage.setItem(key, JSON.stringify(arr)); }catch(e){}
+}
+/* 自定义上下文档位：部署上限非标准 2 的幂（如 192K）时补档。初始勾选规则：
+   内置档 ≤32K、自定义档全选 */
+const ctxEd = makeLadderEditor({
+  defaults: () => state.defCtx || [],
+  readCustoms: () => [...new Set(loadCustomArr("llmspeed.customCtx")
+    .filter(v => Number.isInteger(v) && v > 0 && v <= 4*1048576
+      && !(state.defCtx || []).includes(v)))].sort((a,b)=>a-b),
+  writeCustoms: arr => saveCustomArr("llmspeed.customCtx", arr),
+  listSel: "#ctxList", group: "ctx", delClass: "ctx-del",
+  fmt: fmtK, parse: parseCtx,
+  parseHint: "自定义档位格式无效：支持 196608 / 192K / 1M",
+  validate: v => v > 4*1048576 ? "自定义档位过大（上限 4M）" : null,
+  defaultOn: (v, isCustom) => isCustom || v <= 32768,
 });
-function addCustomCtx(){
-  const v = parseCtx($("#fCustomCtx").value);
-  if(!v) return setPill("自定义档位格式无效：支持 196608 / 192K / 1M", "err");
-  if(v > 4*1048576) return setPill("自定义档位过大（上限 4M）", "err");
-  if([...document.querySelectorAll('.ck input[data-g=ctx]')].some(i => +i.value === v))
-    return setPill(`档位 ${fmtK(v)} 已存在`, "err");
-  const checked = new Set(checkedVals("ctx").map(Number));
-  checked.add(v);
-  try{ localStorage.setItem("llmspeed.customCtx",
-    JSON.stringify([...customCtxList(), v].sort((a,b)=>a-b))); }catch(e){}
-  renderCtxList(checked);
-  saveMatrixCfg();
-  $("#fCustomCtx").value = "";
-  setPill(`已添加自定义档位 ${fmtK(v)}`, "");
-}
-/* 翻译档位（原文字数）：与上下文档位同机制——默认值来自场景 ladder，
-   自定义档 localStorage 记忆（llmspeed.customTranslate）、按数值升序插入、
-   带 × 删除；上限 65536 字（与服务端 _validate_bench_cfg 同口径） */
-function customTranslateList(){
-  let saved = [];
-  try{ saved = JSON.parse(localStorage.getItem("llmspeed.customTranslate") || "[]"); }catch(e){}
-  return [...new Set(saved.filter(v => Number.isInteger(v) && v > 0
-      && v <= 65536 && !state.defTranslate.includes(v)))].sort((a,b)=>a-b);
-}
-/* 重绘翻译档序列；checked 为要保留勾选状态的数值集合（增删档后调用），
-   缺省全选（默认档 + 自定义档） */
-function renderTranslateList(checked){
-  const customs = new Set(customTranslateList());
-  const all = [...new Set([...state.defTranslate, ...customs])].sort((a,b)=>a-b);
-  $("#translateList").innerHTML = all.map(v => {
-    const on = checked ? checked.has(v) : true;
-    const ck = ckHtml("tladder", v, `${v} 字`, on);
-    return customs.has(v)
-      ? `<span class="ckwrap">${ck}<button type="button" class="tl-del" data-v="${v}" title="删除自定义档位" aria-label="删除自定义档位 ${v} 字">×</button></span>`
-      : ck;
-  }).join("");
-}
-$("#translateList").addEventListener("click", e => {
-  const del = e.target.closest(".tl-del");
-  if(!del) return;
-  e.preventDefault();
-  const v = +del.dataset.v;
-  const checked = new Set(checkedVals("tladder").map(Number));
-  checked.delete(v);
-  try{ localStorage.setItem("llmspeed.customTranslate",
-    JSON.stringify(customTranslateList().filter(x => x !== v))); }catch(e){}
-  renderTranslateList(checked);
-  saveMatrixCfg();
-  setPill(`已删除自定义翻译档位 ${v} 字`, "");
+const renderCtxList = checked => ctxEd.render(checked);
+const addCustomCtx = () => ctxEd.add($("#fCustomCtx"));
+/* 翻译档位（原文字数）：默认档全选；上限 65536 字（与服务端 _validate_bench_cfg 同口径） */
+const translateEd = makeLadderEditor({
+  defaults: () => state.defTranslate || [],
+  readCustoms: () => [...new Set(loadCustomArr("llmspeed.customTranslate")
+    .filter(v => Number.isInteger(v) && v > 0 && v <= 65536
+      && !(state.defTranslate || []).includes(v)))].sort((a,b)=>a-b),
+  writeCustoms: arr => saveCustomArr("llmspeed.customTranslate", arr),
+  listSel: "#translateList", group: "tladder", delClass: "tl-del",
+  fmt: v => `${v} 字`, parse: parseCtx,
+  parseHint: "自定义翻译档位格式无效：支持 2400 / 4K",
+  validate: v => v > 65536 ? "自定义翻译档位过大（上限 65536 字）" : null,
+  defaultOn: () => true,
 });
-function addCustomTranslate(){
-  const v = parseCtx($("#fCustomTranslate").value);
-  if(!v) return setPill("自定义翻译档位格式无效：支持 2400 / 4K", "err");
-  if(v > 65536) return setPill("自定义翻译档位过大（上限 65536 字）", "err");
-  if([...document.querySelectorAll('.ck input[data-g=tladder]')].some(i => +i.value === v))
-    return setPill(`翻译档位 ${v} 字 已存在`, "err");
-  const checked = new Set(checkedVals("tladder").map(Number));
-  checked.add(v);
-  try{ localStorage.setItem("llmspeed.customTranslate",
-    JSON.stringify([...customTranslateList(), v].sort((a,b)=>a-b))); }catch(e){}
-  renderTranslateList(checked);
-  saveMatrixCfg();
-  $("#fCustomTranslate").value = "";
-  setPill(`已添加自定义翻译档位 ${v} 字`, "");
+const renderTranslateList = checked => translateEd.render(checked);
+const addCustomTranslate = () => translateEd.add($("#fCustomTranslate"));
+/* fTimeout 越界提示：number 输入的 min/max 不拦键盘输入、也不标红（只作用在
+   spinner 与表单校验上，本控件不在 form 内），手打 99999 毫无反馈。故输入时
+   显式说明实际生效值。判定逻辑 timeoutClampNote() 在 §pure 区（纯函数单测），
+   这里只做 DOM 写入；措辞必须与 collectCfg 的自钳行为一致（钳制生效，不是
+   拒绝提交） */
+function syncTimeoutHint(){
+  const el = $("#timeoutHint");
+  if(!el) return;
+  const { clamped, effective } = timeoutClampNote($("#fTimeout").value);
+  el.hidden = !clamped;
+  if(clamped) el.textContent = `超出可填范围，按 ${effective} 秒生效（可填 1~${TIMEOUT_S_MAX}）`;
 }
-/* 媒体场景（asr/ocr/tts）档位：与翻译档位同机制——默认值来自场景 ladder，
-   自定义档 localStorage 记忆（llmspeed.customMediaLadder，结构 {asr:[],ocr:[],tts:[]}）、
-   升序插入、带 × 删除；一次运行限一种 kind，档位区同时只展示一个场景的档位行。
-   值范围/数量上限与服务端 _validate_bench_cfg 同口径（bench.py 常量） */
+/* fRepeats 越界提示：与 fTimeout 同机制（min/max 不拦键盘输入），提交侧
+   collectCfg 自钳 1~5——输入时即说明实际生效值，两处口径一致 */
+function syncRepeatsHint(){
+  const el = $("#repeatsHint");
+  if(!el) return;
+  const raw = +$("#fRepeats").value || 1;
+  const eff = Math.min(5, Math.max(1, raw));
+  el.hidden = eff === raw;
+  if(eff !== raw) el.textContent = `超出可填范围，按 ${eff} 次生效（可填 1~5）`;
+}
+/* 媒体场景（asr/ocr/tts）档位：默认值来自场景 ladder，自定义档 localStorage
+   记忆（llmspeed.customMediaLadder，结构 {asr:[],ocr:[],tts:[]}）；一次运行限
+   一种 kind，档位区同时只展示一个场景的档位行，三个 profile 共享同一 DOM
+   （active 守卫只让当前场景的编辑器响应）。值范围/数量上限与服务端
+   _validate_bench_cfg 同口径（bench.py 常量） */
 const MEDIA_LADDER_MAX = 16;   // 档位数量上限
 const MEDIA_LADDER_RANGE = {asr:[1,3600], ocr:[1,64], tts:[1,65536]};   // 秒 / 张 / 字
 const MEDIA_UNIT_WORD = {asr:"秒", ocr:"张", tts:"字"};
@@ -1334,64 +1438,33 @@ function parseMediaLadder(scen, s){
   if(scen === "ocr") return m[2] ? 0 : +m[1];
   return m[2].toLowerCase() === "m" ? +m[1] * 60 : +m[1];
 }
-/* 重绘媒体档序列（scen 为当前展示的场景键）；checked 为要保留勾选状态的数值
-   集合（增删档后调用），缺省全选（默认档 + 自定义档）；渲染即记录该场景的
-   当前勾选，供 collectCfg 在档位行未展示时取值 */
+const MEDIA_EDITORS = Object.fromEntries(["asr", "ocr", "tts"].map(scen => [scen, makeLadderEditor({
+  defaults: () => state.defMediaLadder[scen] || [],
+  readCustoms: () => customMediaList(scen),
+  writeCustoms: arr => saveCustomMediaAll({...readCustomMediaAll(), [scen]: arr}),
+  listSel: "#mediaList", group: "mladder", delClass: "ml-del",
+  fmt: MEDIA_RUNG_FMT[scen], parse: s => parseMediaLadder(scen, s),
+  parseHint: MEDIA_PARSE_HINT[scen],
+  validate: v => {
+    const [lo, hi] = MEDIA_LADDER_RANGE[scen];
+    return (v < lo || v > hi) ? `自定义档位超出范围（${lo}~${hi} ${MEDIA_UNIT_WORD[scen]}）` : null;
+  },
+  maxCount: MEDIA_LADDER_MAX,
+  defaultOn: () => true,
+  active: () => state.mediaLadderScen === scen,
+  /* 渲染即记录该场景的当前勾选，供 collectCfg 在档位行未展示时取值 */
+  afterRender: (all, sel) => { state.mladSel[scen] = sel; },
+})]));
+/* 重绘当前媒体场景的档位行（标签/占位符随场景切换）；checked 为要保留勾选
+   状态的数值集合（增删档后调用），缺省全选（默认档 + 自定义档） */
 function renderMediaLadderList(scen, checked){
-  const def = state.defMediaLadder[scen] || [];
-  const customs = new Set(customMediaList(scen));
-  const all = [...new Set([...def, ...customs])].sort((a,b)=>a-b);
-  const fmt = MEDIA_RUNG_FMT[scen];
   const meta = state.scenMeta[scen] || {};
-  $("#mediaLadderLabel").textContent = `${meta.label || scen}档位（${meta.unit || ""}）`;
+  $("#mediaLadderLabel").textContent = `${meta.label || scen}档位${meta.unit ? `（${meta.unit}）` : ""}`;
   $("#fCustomMediaLadder").placeholder = MEDIA_PLACEHOLDER[scen];
-  const sel = checked ? [...checked].filter(v => all.includes(v)) : all;
-  $("#mediaList").innerHTML = all.map(v => {
-    const ck = ckHtml("mladder", v, fmt(v), sel.includes(v));
-    return customs.has(v)
-      ? `<span class="ckwrap">${ck}<button type="button" class="ml-del" data-v="${v}" title="删除自定义档位" aria-label="删除自定义档位 ${fmt(v)}">×</button></span>`
-      : ck;
-  }).join("");
-  state.mladSel[scen] = sel.sort((a,b)=>a-b);
+  MEDIA_EDITORS[scen].render(checked);
 }
-/* 删除自定义档（事件委托；按钮在 label 外的包裹行里，不会误触勾选） */
-$("#mediaList").addEventListener("click", e => {
-  const del = e.target.closest(".ml-del");
-  if(!del) return;
-  e.preventDefault();
-  const scen = state.mediaLadderScen;
-  if(!scen) return;
-  const v = +del.dataset.v;
-  const checked = new Set(checkedVals("mladder").map(Number));
-  checked.delete(v);
-  saveCustomMediaAll({...readCustomMediaAll(),
-    [scen]: customMediaList(scen).filter(x => x !== v)});
-  renderMediaLadderList(scen, checked);
-  saveMatrixCfg();
-  setPill(`已删除自定义档位 ${MEDIA_RUNG_FMT[scen](v)}`, "");
-});
 function addCustomMediaLadder(){
-  const scen = state.mediaLadderScen;
-  if(!scen) return;
-  const fmt = MEDIA_RUNG_FMT[scen];
-  const v = parseMediaLadder(scen, $("#fCustomMediaLadder").value);
-  if(!v) return setPill(MEDIA_PARSE_HINT[scen], "err");
-  const [lo, hi] = MEDIA_LADDER_RANGE[scen];
-  if(v < lo || v > hi)
-    return setPill(`自定义档位超出范围（${lo}~${hi} ${MEDIA_UNIT_WORD[scen]}）`, "err");
-  if([...document.querySelectorAll('.ck input[data-g=mladder]')].some(i => +i.value === v))
-    return setPill(`档位 ${fmt(v)} 已存在`, "err");
-  // 上限按下发档位数算：只统计当前勾选值（含默认档与自定义档）
-  const checked = new Set(checkedVals("mladder").map(Number));
-  checked.add(v);
-  if(checked.size > MEDIA_LADDER_MAX)
-    return setPill(`档位数量超上限（最多 ${MEDIA_LADDER_MAX} 档）`, "err");
-  saveCustomMediaAll({...readCustomMediaAll(),
-    [scen]: [...customMediaList(scen), v].sort((a,b)=>a-b)});
-  renderMediaLadderList(scen, checked);
-  saveMatrixCfg();
-  $("#fCustomMediaLadder").value = "";
-  setPill(`已添加自定义档位 ${fmt(v)}`, "");
+  if(state.mediaLadderScen) MEDIA_EDITORS[state.mediaLadderScen].add($("#fCustomMediaLadder"));
 }
 /* collectCfg 取某媒体场景的档位：勾选了才取（档位行未展示的场景取最近一次
    记录的勾选），未勾选发 []（引擎回退场景默认 ladder） */
@@ -1399,99 +1472,37 @@ function mediaLadderOut(scens, scen){
   if(!scens.includes(scen)) return [];
   return (state.mladSel[scen] || []).map(Number).sort((a,b)=>a-b);
 }
-/* Agent 缓存×指令阶梯：与翻译档位同机制（默认档全选、自定义档 localStorage
-   记忆、× 删除）。缓存档上限对齐自定义上下文档位（4M），指令档 16~65536 */
-function customAgentCacheList(){
-  let saved = [];
-  try{ saved = JSON.parse(localStorage.getItem("llmspeed.customAgentCache") || "[]"); }catch(e){}
-  return [...new Set(saved.filter(v => Number.isInteger(v) && v > 0
-      && v <= 4*1048576 && !state.defAgentCache.includes(v)))].sort((a,b)=>a-b);
-}
-function customAgentInstList(){
-  let saved = [];
-  try{ saved = JSON.parse(localStorage.getItem("llmspeed.customAgentInst") || "[]"); }catch(e){}
-  return [...new Set(saved.filter(v => Number.isInteger(v) && v >= 16 && v <= 65536
-      && !state.defAgentInst.includes(v)))].sort((a,b)=>a-b);
-}
-/* 重绘 Agent 阶梯；checked 为要保留勾选状态的数值集合（增删档后调用），缺省全选 */
-function renderAgentCacheList(checked){
-  const customs = new Set(customAgentCacheList());
-  const all = [...new Set([...state.defAgentCache, ...customs])].sort((a,b)=>a-b);
-  $("#agentCacheList").innerHTML = all.map(v => {
-    const on = checked ? checked.has(v) : true;
-    const ck = ckHtml("acache", v, fmtK(v), on);
-    return customs.has(v)
-      ? `<span class="ckwrap">${ck}<button type="button" class="ac-del" data-v="${v}" title="删除自定义缓存档" aria-label="删除自定义缓存档 ${fmtK(v)}">×</button></span>`
-      : ck;
-  }).join("");
-}
-function renderAgentInstList(checked){
-  const customs = new Set(customAgentInstList());
-  const all = [...new Set([...state.defAgentInst, ...customs])].sort((a,b)=>a-b);
-  $("#agentInstList").innerHTML = all.map(v => {
-    const on = checked ? checked.has(v) : true;
-    const ck = ckHtml("ainst", v, fmtK(v), on);
-    return customs.has(v)
-      ? `<span class="ckwrap">${ck}<button type="button" class="ai-del" data-v="${v}" title="删除自定义指令档" aria-label="删除自定义指令档 ${fmtK(v)}">×</button></span>`
-      : ck;
-  }).join("");
-}
-$("#agentCacheList").addEventListener("click", e => {
-  const del = e.target.closest(".ac-del");
-  if(!del) return;
-  e.preventDefault();
-  const v = +del.dataset.v;
-  const checked = new Set(checkedVals("acache").map(Number));
-  checked.delete(v);
-  try{ localStorage.setItem("llmspeed.customAgentCache",
-    JSON.stringify(customAgentCacheList().filter(x => x !== v))); }catch(e){}
-  renderAgentCacheList(checked);
-  saveMatrixCfg();
-  setPill(`已删除自定义缓存档 ${fmtK(v)}`, "");
+/* Agent 缓存×指令阶梯：默认档全选。缓存档上限对齐自定义上下文档位（4M），
+   指令档 16~65536 */
+const agentCacheEd = makeLadderEditor({
+  defaults: () => state.defAgentCache || [],
+  readCustoms: () => [...new Set(loadCustomArr("llmspeed.customAgentCache")
+    .filter(v => Number.isInteger(v) && v > 0 && v <= 4*1048576
+      && !(state.defAgentCache || []).includes(v)))].sort((a,b)=>a-b),
+  writeCustoms: arr => saveCustomArr("llmspeed.customAgentCache", arr),
+  listSel: "#agentCacheList", group: "acache", delClass: "ac-del",
+  fmt: fmtK, parse: parseCtx,
+  parseHint: "自定义缓存档格式无效：支持 196608 / 192K",
+  validate: v => v > 4*1048576 ? "自定义缓存档过大（上限 4M tokens）" : null,
+  defaultOn: () => true,
 });
-$("#agentInstList").addEventListener("click", e => {
-  const del = e.target.closest(".ai-del");
-  if(!del) return;
-  e.preventDefault();
-  const v = +del.dataset.v;
-  const checked = new Set(checkedVals("ainst").map(Number));
-  checked.delete(v);
-  try{ localStorage.setItem("llmspeed.customAgentInst",
-    JSON.stringify(customAgentInstList().filter(x => x !== v))); }catch(e){}
-  renderAgentInstList(checked);
-  saveMatrixCfg();
-  setPill(`已删除自定义指令档 ${fmtK(v)}`, "");
+const agentInstEd = makeLadderEditor({
+  defaults: () => state.defAgentInst || [],
+  readCustoms: () => [...new Set(loadCustomArr("llmspeed.customAgentInst")
+    .filter(v => Number.isInteger(v) && v >= 16 && v <= 65536
+      && !(state.defAgentInst || []).includes(v)))].sort((a,b)=>a-b),
+  writeCustoms: arr => saveCustomArr("llmspeed.customAgentInst", arr),
+  listSel: "#agentInstList", group: "ainst", delClass: "ai-del",
+  fmt: fmtK, parse: parseCtx,
+  parseHint: "自定义指令档格式无效：支持 3072 / 3K",
+  validate: v => (v < 16 || v > 65536) ? "自定义指令档须在 16~65536 tokens 之间" : null,
+  defaultOn: () => true,
 });
-function addCustomAgentCache(){
-  const v = parseCtx($("#fCustomAgentCache").value);
-  if(!v) return setPill("自定义缓存档格式无效：支持 196608 / 192K", "err");
-  if(v > 4*1048576) return setPill("自定义缓存档过大（上限 4M tokens）", "err");
-  if([...document.querySelectorAll('.ck input[data-g=acache]')].some(i => +i.value === v))
-    return setPill(`缓存档 ${fmtK(v)} 已存在`, "err");
-  const checked = new Set(checkedVals("acache").map(Number));
-  checked.add(v);
-  try{ localStorage.setItem("llmspeed.customAgentCache",
-    JSON.stringify([...customAgentCacheList(), v].sort((a,b)=>a-b))); }catch(e){}
-  renderAgentCacheList(checked);
-  saveMatrixCfg();
-  $("#fCustomAgentCache").value = "";
-  setPill(`已添加自定义缓存档 ${fmtK(v)}`, "");
-}
-function addCustomAgentInst(){
-  const v = parseCtx($("#fCustomAgentInst").value);
-  if(!v) return setPill("自定义指令档格式无效：支持 3072 / 3K", "err");
-  if(v < 16 || v > 65536) return setPill("自定义指令档须在 16~65536 tokens 之间", "err");
-  if([...document.querySelectorAll('.ck input[data-g=ainst]')].some(i => +i.value === v))
-    return setPill(`指令档 ${fmtK(v)} 已存在`, "err");
-  const checked = new Set(checkedVals("ainst").map(Number));
-  checked.add(v);
-  try{ localStorage.setItem("llmspeed.customAgentInst",
-    JSON.stringify([...customAgentInstList(), v].sort((a,b)=>a-b))); }catch(e){}
-  renderAgentInstList(checked);
-  saveMatrixCfg();
-  $("#fCustomAgentInst").value = "";
-  setPill(`已添加自定义指令档 ${fmtK(v)}`, "");
-}
+const renderAgentCacheList = checked => agentCacheEd.render(checked);
+const renderAgentInstList = checked => agentInstEd.render(checked);
+const addCustomAgentCache = () => agentCacheEd.add($("#fCustomAgentCache"));
+const addCustomAgentInst = () => agentInstEd.add($("#fCustomAgentInst"));
+
 function currentProvider(){ return state.providers.find(p => p.name === $("#fProvider").value); }
 /* provider 选择记忆（与模型勾选记忆同级）：用户显式切换时持久化，
    下次进页面默认选回；localStorage 不可用时静默降级为不记忆 */
@@ -1518,7 +1529,7 @@ function onProviderChange(){
     ? `尚未配置 Provider —— 点击右上角「Provider 管理」新增（写入服务端 config.json 与 .env，即时生效）`
     : (p.has_key
     ? `API Key 已由服务端 .env 提供（${esc(p.name)}）`
-    : `该 provider 未配置 API Key（.env 的 API_KEY_${esc(p.name.toUpperCase())}），云端模型将无法认证`);
+    : `该 Provider 未配置 API Key（.env 的 API_KEY_${esc(p.name.toUpperCase())}），云端模型将无法认证`);
   syncDeployCard();
   syncConcurrencyUI();
   refreshModels();
@@ -1685,6 +1696,21 @@ function wrapTabWithin(root, e){
 /* 弹窗焦点圈定：trap 时记下 opener（关闭后把焦点还回去，键盘用户不丢位），
    release 时摘监听 + 还原焦点。用 WeakMap 兼作幂等标记：同一个根节点重复
    trap 直接短路，避免同一 keydown 注册两次（一次 Tab 跳两格）。 */
+/* 浮层打开时锁背景滚动：计数器防嵌套（抽屉上再开确认弹窗/弹窗叠弹窗），
+   补偿滚动条消失造成的布局抖动 */
+let _scrollLocks = 0;
+function lockScroll(){
+  if(++_scrollLocks > 1) return;
+  const sbw = innerWidth - document.documentElement.clientWidth;
+  document.body.style.overflow = "hidden";
+  if(sbw > 0) document.body.style.paddingRight = sbw + "px";
+}
+function unlockScroll(){
+  if(--_scrollLocks > 0) return;
+  _scrollLocks = 0;
+  document.body.style.overflow = "";
+  document.body.style.paddingRight = "";
+}
 const _modalTraps = new WeakMap();   // root -> {onKey, opener}
 let _activeTrapRoot = null;          // 当前生效的弹窗根：用于踢掉未正常关闭的旧圈定
 function trapModalFocus(root){
@@ -1698,6 +1724,7 @@ function trapModalFocus(root){
   _modalTraps.set(root, {onKey, opener: document.activeElement});
   _activeTrapRoot = root;
   document.addEventListener("keydown", onKey);
+  lockScroll();
   const f = focusableWithin(root);
   if(f.length) f[0].focus();
   else { root.tabIndex = -1; root.focus(); }
@@ -1708,8 +1735,69 @@ function releaseModalFocus(root){
   document.removeEventListener("keydown", st.onKey);
   _modalTraps.delete(root);
   if(_activeTrapRoot === root) _activeTrapRoot = null;
+  unlockScroll();
   // opener 可能已被重渲换掉（历史列表按钮随轮询重建）：只还给还在文档里的
   if(st.opener && st.opener.isConnected) st.opener.focus();
+}
+/* 通用确认/输入弹窗：原生 confirm/prompt 的体系内替代——与抽屉/历史弹窗同骨架、
+   焦点圈定/还原复用共享实现，支持说明正文（可富文本）、危险态按钮、单行输入
+   （maxlength + Enter 提交 + validate 即时校验）。Promise 返回：确认 = 输入值
+   或 true；取消/ESC/遮罩 = false */
+let _uiDialogDone = null;   // 当前弹窗的收口函数：重入时必须走完整清理（摘 ESC
+                            // 监听/释放焦点圈定/解锁滚动），仅 resolve 会留下旧 capture
+                            // 监听，下一次 ESC 由旧闭包把新弹窗关掉
+function uiDialog({title, sub, body, okText = "确定", cancelText = "取消", danger = false, input = null}){
+  return new Promise(resolve => {
+    const root = $("#uiDialogRoot");
+    if(_uiDialogDone){ const d = _uiDialogDone; _uiDialogDone = null; d(false); }
+    $("#uiDialogTitle").textContent = title;
+    const subEl = $("#uiDialogSub");
+    subEl.textContent = sub || ""; subEl.hidden = !sub;
+    const bodyEl = $("#uiDialogBody");
+    bodyEl.textContent = body || ""; bodyEl.hidden = !body;
+    const inp = $("#uiDialogInput");
+    inp.hidden = !input;
+    if(input){
+      inp.value = input.value || "";
+      inp.placeholder = input.placeholder || "";
+      inp.maxLength = input.maxlength || 200;
+    }
+    const hint = $("#uiDialogHint");
+    hint.hidden = true;
+    const okBtn = $("#uiDialogOk"), cancelBtn = $("#uiDialogCancel");
+    okBtn.textContent = okText;
+    okBtn.className = danger ? "btn-ghost danger" : "btn-primary";
+    cancelBtn.hidden = !cancelText;
+    root.hidden = false;
+    const onKey = e => {
+      if(e.key !== "Escape") return;
+      e.stopPropagation();   // 抽屉等先注册的 bubble 监听不再收到这次 ESC
+      done(false);
+    };
+    const done = val => {
+      document.removeEventListener("keydown", onKey, true);
+      root.hidden = true;
+      releaseModalFocus(root);
+      if(_uiDialogDone === done) _uiDialogDone = null;
+      resolve(val);
+    };
+    const submit = () => {
+      if(input && input.validate){
+        const msg = input.validate(inp.value);
+        if(msg){ hint.textContent = msg; hint.hidden = false; inp.focus(); return; }
+      }
+      done(input ? inp.value.trim() : true);
+    };
+    okBtn.onclick = submit;
+    cancelBtn.onclick = () => done(false);
+    $("#uiDialogScrim").onclick = () => done(false);
+    inp.onkeydown = e => { if(e.key === "Enter"){ e.preventDefault(); submit(); } };
+    _uiDialogDone = done;
+    document.addEventListener("keydown", onKey, true);
+    trapModalFocus(root);   // Tab 圈定 + 关闭后焦点还原
+    if(input){ inp.focus(); inp.select(); }
+    else okBtn.focus();   // 确认弹窗默认聚焦主按钮（与原生 confirm 一致）
+  });
 }
 /* 抽屉开合：浮于所有阶段之上；未保存改动关闭前确认；ESC / 遮罩点击可关 */
 let drawerHideTimer = null;   // 关 drawer 的 300ms 退场计时：重开时须撤销，否则动画中途被 hidden
@@ -1721,14 +1809,18 @@ function openCfgDrawer(){
   clearTimeout(drawerHideTimer);
   const root = $("#drawerRoot");
   root.hidden = false;
+  lockScroll();
   requestAnimationFrame(() => requestAnimationFrame(() => root.classList.add("open")));
   document.addEventListener("keydown", onDrawerKey);
   $("#ceProv").focus();
 }
-function closeCfgDrawer(){
+async function closeCfgDrawer(){
   if(state.cfgEdit.dirty &&
-     !confirm("配置有未保存的修改，确定关闭？（只有「保存配置」才会写入服务端）")) return;
+     !await uiDialog({title:"关闭 Provider 管理？",
+       body:"配置有未保存的修改，关闭后将丢弃（只有「保存配置」才会写入服务端）。",
+       okText:"丢弃并关闭", danger:true})) return;
   document.removeEventListener("keydown", onDrawerKey);
+  unlockScroll();
   const root = $("#drawerRoot");
   root.classList.remove("open");
   drawerHideTimer = setTimeout(() => { root.hidden = true; }, 300);
@@ -1756,9 +1848,11 @@ function ceAdd(){
   renderCeProv(name);
   $("#ceName").focus();
 }
-function ceDel(){
+async function ceDel(){
   const p = ceCurrent();
-  if(!p || !confirm(`删除 provider「${p.label || p.name}」？对应 .env 的 Key 行不会自动删除，可先「清除 Key」。`)) return;
+  if(!p || !await uiDialog({title:`删除 Provider「${p.label || p.name}」？`,
+    body:"对应 .env 的 Key 行不会自动删除，可先「清除 Key」。",
+    okText:"删除", danger:true})) return;
   state.cfgEdit.providers = state.cfgEdit.providers.filter(x => x.name !== p.name);
   state.cfgEdit.dirty = true;
   renderCeProv(state.cfgEdit.providers[0]?.name);
@@ -1776,7 +1870,9 @@ function depHTML(d, i){
       <span class="dgrip" draggable="true" tabindex="0" role="button"
         aria-label="部署「${esc(d.label || `部署环境 ${i+1}`)}」：上下键组内移动，左右键换组"
         title="拖动排序（组内）；键盘：↑↓ 组内移动，←→ 换到相邻分组"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5h6M9 12h6M9 19h6"/></svg></span>
-      <svg class="ic chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+      <button type="button" class="dep-fold" aria-expanded="${d._collapsed ? "false" : "true"}" aria-label="展开或折叠部署「${esc(d.label || `部署环境 ${i+1}`)}」的字段">
+        <svg class="ic chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
       <span class="t"><span class="tt">${esc(d.label || `部署环境 ${i+1}`)}</span>${(d.models||[]).length ? `<small>　${esc(d.models.join("、"))}</small>` : ""}</span>
       <label class="ck dep-active" title="同一模型映射多套部署环境时，仅激活的一套生效（测速卡片 meta 与 max_ctx 钳制）；与其模型重叠的其他部署会自动取消激活">
         <input type="checkbox" class="d-active" ${d.active ? "checked" : ""}> 激活
@@ -1790,20 +1886,20 @@ function depHTML(d, i){
     </div>
     <div class="dep-body">
       <div class="grid2">
-        <div><label class="f">部署标签</label><input type="text" class="d-label" value="${esc(d.label||"")}"></div>
-        <div><label class="f">适用模型（可多选，逗号分隔）</label><input type="text" class="d-models" value="${esc((d.models||[]).join(", "))}"></div>
+        <div><label class="f" for="dep-${i}-label">部署标签</label><input type="text" id="dep-${i}-label" class="d-label" value="${esc(d.label||"")}"></div>
+        <div><label class="f" for="dep-${i}-models">适用模型（可多选，逗号分隔）</label><input type="text" id="dep-${i}-models" class="d-models" value="${esc((d.models||[]).join(", "))}"></div>
       </div>
       <div class="grid2">
-        <div><label class="f">模型量化（可多选，逗号分隔，首个生效）</label><input type="text" class="d-quants" value="${esc((d.quants||[]).length ? d.quants.join(", ") : (d.quant||""))}"></div>
-        <div><label class="f">KV 量化（可多选，逗号分隔，首个生效）</label><input type="text" class="d-kv-quants" value="${esc((d.kv_quants||[]).join(", "))}"></div>
+        <div><label class="f" for="dep-${i}-quants">模型量化（可多选，逗号分隔，首个生效）</label><input type="text" id="dep-${i}-quants" class="d-quants" value="${esc((d.quants||[]).length ? d.quants.join(", ") : (d.quant||""))}"></div>
+        <div><label class="f" for="dep-${i}-kvq">KV 量化（可多选，逗号分隔，首个生效）</label><input type="text" id="dep-${i}-kvq" class="d-kv-quants" value="${esc((d.kv_quants||[]).join(", "))}"></div>
       </div>
-      <label class="f">上下文上限 max_ctx（tokens）</label><input type="number" class="d-maxctx" value="${esc(d.max_ctx||"")}" placeholder="如 196608">
-      <label class="f">模型类型（可多选）</label>
-      <div class="ckrow d-kinds">${KIND_ORDER.map(v =>
+      <label class="f" for="dep-${i}-maxctx">上下文上限 max_ctx（tokens）</label><input type="number" id="dep-${i}-maxctx" class="d-maxctx" value="${esc(d.max_ctx||"")}" placeholder="如 196608">
+      <label class="f" id="dep-${i}-kinds-lb">模型类型（可多选）</label>
+      <div class="ckrow d-kinds" role="group" aria-labelledby="dep-${i}-kinds-lb">${KIND_ORDER.map(v =>
         `<label class="ck"><input type="checkbox" class="d-kind" value="${v}"${depKinds(d).includes(v) ? " checked" : ""}> ${esc(KIND_LABEL[v])}${v === "llm" ? "（默认）" : ""}</label>`).join("")}</div>
-      <label class="f">硬件环境</label><input type="text" class="d-hardware" value="${esc(d.hardware||"")}">
-      <label class="f">推理框架</label><input type="text" class="d-framework" value="${esc(d.framework||"")}">
-      <label class="f">核心参数</label><input type="text" class="d-params" value="${esc(d.params||"")}">
+      <label class="f" for="dep-${i}-hw">硬件环境</label><input type="text" id="dep-${i}-hw" class="d-hardware" value="${esc(d.hardware||"")}">
+      <label class="f" for="dep-${i}-fw">推理框架</label><input type="text" id="dep-${i}-fw" class="d-framework" value="${esc(d.framework||"")}">
+      <label class="f" for="dep-${i}-params">核心参数</label><input type="text" id="dep-${i}-params" class="d-params" value="${esc(d.params||"")}">
     </div>
   </div>`;
 }
@@ -1887,10 +1983,23 @@ $("#ceDeps").addEventListener("click", e => {
     renderCeDeps();
     return;
   }
+  const fold = e.target.closest(".dep-fold");
+  if(fold){ depFoldToggle(fold.closest(".dep-edit")); return; }
   if(e.target.closest(".dep-active") || e.target.closest(".dgrip")) return;   // 激活复选框/拖动手柄不触发折叠
   const head = e.target.closest(".dep-head");
-  if(head) head.closest(".dep-edit").classList.toggle("collapsed");
+  if(head) depFoldToggle(head.closest(".dep-edit"));
 });
+/* 折叠切换三处同步：class（视觉）+ aria-expanded（读屏）+ 数据对象 _collapsed
+   （后续重渲——改名/拖拽/增删——保持折叠态，不回弹）。不整树重渲，键盘焦点不丢 */
+function depFoldToggle(edit){
+  if(!edit) return;
+  const collapsed = edit.classList.toggle("collapsed");
+  edit.querySelector(".dep-fold")?.setAttribute("aria-expanded", String(!collapsed));
+  const p = ceCurrent();
+  const idx = [...document.querySelectorAll("#ceDeps .dep-edit")].indexOf(edit);
+  const d = p?.deployments?.[idx];
+  if(d) d._collapsed = collapsed;
+}
 /* 激活是「按模型互斥」的开关：勾选某套部署时，与其模型重叠的其他部署自动
    取消激活（一个模型任一时刻只有一套生效环境）；取消勾选允许全部不激活
    （生效口径回退首个命中） */
@@ -1968,11 +2077,11 @@ function ceRenameGroup(grpEl, newName){
   renderCeDeps();
 }
 /* 删除分组：仅空组可删（有成员时按钮 disabled）；防御性把组内成员改回未分组 */
-function ceDelGroup(grpEl){
+async function ceDelGroup(grpEl){
   const p = ceCurrent();
   const g = grpEl.dataset.group;
   if(!g) return;
-  if(!confirm(`删除分组「${g}」？`)) return;
+  if(!await uiDialog({title:`删除分组「${g}」？`, okText:"删除", danger:true})) return;
   ceStash();
   (p.deployments||[]).forEach(d => { if((d.group||"").trim() === g) d.group = undefined; });
   p.deployment_groups = (p.deployment_groups||[]).filter(x => x !== g);
@@ -2170,7 +2279,7 @@ function ceStash(){
   // 会静默串写），保持原名并回填输入框
   if(prevName !== p.name){
     if(state.cfgEdit.providers.some(q => q !== p && q.name === p.name)){
-      setPill(`重命名失败：provider「${p.name}」已存在，保持原名`, "err");
+      setPill(`重命名失败：Provider「${p.name}」已存在，保持原名`, "err");
       p.name = prevName;
       $("#ceName").value = prevName;
       return;
@@ -2183,11 +2292,11 @@ function ceStash(){
 async function ceSave(){
   ceStash();
   const p = ceCurrent();
-  if(!p || !p.name || !(p.gateway_urls || []).length){ setPill("provider 名称与网关地址不能为空", "err"); return; }
+  if(!p || !p.name || !(p.gateway_urls || []).length){ setPill("Provider 名称与网关地址不能为空", "err"); return; }
   // 重名预检（与 server.py _validate_providers 的 400 口径一致）：前端先拦，
   // 不把必然失败的保存发出去
   if(state.cfgEdit.providers.some(q => q !== p && q.name === p.name)){
-    setPill(`保存失败：provider「${p.name}」已存在，请改名后再保存`, "err");
+    setPill(`保存失败：Provider「${p.name}」已存在，请改名后再保存`, "err");
     return;
   }
   const keyVal = $("#ceKey").value.trim();
@@ -2245,7 +2354,7 @@ async function reloadConfig(keepName){
   const cp = currentProvider();
   $("#keyHint").innerHTML = !cp ? "" : (cp.has_key
     ? `API Key 已由服务端 .env 提供（${esc(cp.name)}）`
-    : `该 provider 未配置 API Key（.env 的 API_KEY_${esc(cp.name.toUpperCase())}），云端模型将无法认证`);
+    : `该 Provider 未配置 API Key（.env 的 API_KEY_${esc(cp.name.toUpperCase())}），云端模型将无法认证`);
   saveProviderSel();   // 保持记忆与实际选中一致（编辑对象被删除等回退场景自愈）
   syncDeployCard();
   syncConcurrencyUI();
@@ -2271,6 +2380,10 @@ function setPhase(phase){
   unhide($("#configPanel"), idle || document.body.classList.contains("config-force"));
   unhide($(".kpis"), !idle);
   unhide($("#liveCard"), phase === "run");
+  // KPI 标签随阶段收敛：进行中标「实时」，完成/载入历史后为终态权威值改标「最终」
+  const final_ = phase === "done";
+  document.querySelector(".kpi.prefill .k").textContent = final_ ? "最终 Prefill 速度" : "实时 Prefill 速度";
+  document.querySelector(".kpi.decode .k").textContent = final_ ? "最终 Decode 速度" : "实时 Decode 速度";
   updateToggleText();
   showDataSections();
   // 阶段切换是权威视图切换：若 addPoint 的合帧重绘仍在排队，此刻立即落地
@@ -2285,8 +2398,12 @@ function toggleConfig(){
   updateToggleText();
 }
 function updateToggleText(){
-  $("#btnToggleCfgText").textContent =
-    document.body.classList.contains("config-force") ? "收起配置" : "展开配置";
+  const forced = document.body.classList.contains("config-force");
+  $("#btnToggleCfgText").textContent = forced ? "收起配置" : "展开配置";
+  // aria-expanded 反映配置面板实际可见性（idle 阶段恒可见；run/done 由 config-force 决定）
+  $("#btnToggleCfg").setAttribute("aria-expanded", String(!$("#configPanel").hidden));
+  // 测速中唤回的配置面板挂语义提示（改动不影响当前任务）；idle 平铺态不需要
+  $("#cfgRunNote").hidden = !(forced && state.phase !== "idle");
 }
 
 /* ---------------- 模型列表 ---------------- */
@@ -2379,7 +2496,9 @@ function collectCfg(){
       ? checkedVals("conc").map(Number).sort((a,b)=>a-b) : [1],
     max_tokens: +$("#fMaxTokens").value || 1024,
     repeats: Math.min(5, Math.max(1, +$("#fRepeats").value || 1)),
-    timeout_s: +$("#fTimeout").value || 1200,
+    // 提交侧自钳走 timeoutClampNote()（与输入框越界提示同一个口径，两处不会
+    // 漂移）：浏览器 min/max 只管 UI（改 DOM 或老浏览器可绕过），故仍要钳
+    timeout_s: timeoutClampNote($("#fTimeout").value).effective,
     thinking: $("#fThinking").value,
     reply_mode: $("#fReplyMode").value,
     note: $("#fNote").value.trim(),
@@ -2408,19 +2527,24 @@ async function startRun(){
   const mediaSc = cfg.scenarios.find(s => { const k = state.scenMeta[s]?.kind;
     return k && k !== "llm"; }) || null;
   const mediaEmpty = mediaSc && !cfg[`${mediaSc}_ladder`]?.length;
-  if(!cfg.models.length || !cfg.scenarios.length || (needCtx && !cfg.ctx_list.length)
-      || (needTl && !cfg.translate_ladder.length) || !cfg.concurrencies.length
-      || (needAgent && (!cfg.agent_cache_ladder.length || !cfg.agent_inst_ladder.length))
-      || mediaEmpty){
-    setPill("模型/场景/并发不能为空" + (needCtx ? "，上下文档位至少选一项" : "")
-      + (needTl && !cfg.translate_ladder.length ? "，翻译档位至少选一项" : "")
-      + (needAgent ? "，Agent 缓存档与指令档各至少选一项" : "")
-      + (mediaEmpty ? `，${state.scenMeta[mediaSc]?.label || mediaSc}档位至少选一项` : ""), "err");
-    if(state.phase !== "idle"){   // 校验失败时展开配置便于修改
+  // 按实际缺失项动态拼文案（哪个空说哪个），不再恒挂「模型/场景/并发不能为空」前缀
+  const missing = [];
+  if(!cfg.models.length) missing.push("模型至少选一项");
+  if(!cfg.scenarios.length) missing.push("场景至少选一项");
+  if(needCtx && !cfg.ctx_list.length) missing.push("上下文档位至少选一项");
+  if(needTl && !cfg.translate_ladder.length) missing.push("翻译档位至少选一项");
+  if(!cfg.concurrencies.length) missing.push("并发档至少选一项");
+  if(needAgent && (!cfg.agent_cache_ladder.length || !cfg.agent_inst_ladder.length))
+    missing.push("Agent 缓存档与指令档各至少选一项");
+  if(mediaEmpty) missing.push(`${state.scenMeta[mediaSc]?.label || mediaSc}档位至少选一项`);
+  if(missing.length){
+    setPill("无法开始测速：" + missing.join("；"), "err");
+    if(state.phase !== "idle"){   // 校验失败时展开配置并滚到配置区便于修改
       document.body.classList.add("config-force");
       unhide($("#configPanel"), true);
       updateToggleText();
     }
+    $("#configPanel").scrollIntoView({behavior:"smooth", block:"start"});
     return;
   }
   state.points.clear(); state.maxSeq = -1; state.activeReqs.clear();
@@ -2461,6 +2585,7 @@ async function startRun(){
   try{ d = await r.json(); }
   catch(e){ $("#btnStart").disabled = false; setPill("启动响应解析失败：" + e.message, "err"); return; }
   state.runId = d.run_id; state.running = true;
+  state.runStartTs = Date.now();   // 运行时长/ETA 起点
   // 本地先记一份（cfg 事件到达后即被服务端权威配置覆盖）
   const cp = currentProvider();
   state.cfg = {...cfg, provider_label: cp?.label, provider_local: cp?.local,
@@ -2559,12 +2684,18 @@ function clearSkipNotes(){
   const box = $("#skipNotes");
   box.innerHTML = ""; box.hidden = true;
 }
-function addSkipNote(msg){
+/* 运行事件留痕（skipNotes 的泛化）：超窗跳档/弃测重试/请求失败等需要回溯的
+   事件常驻追加——status 行是瞬态的、toast 2.6s 即消失，无人值守长跑回来
+   一眼可回溯。kind "fail" 红色 ✗（引擎 level=error 的明确失败），其余 ⚠。
+   上限 60 条超出挤最旧，防超长运行无限膨胀 */
+function addRunNote(msg, kind){
   const box = $("#skipNotes");
   box.hidden = false;
   const div = document.createElement("div");
-  div.textContent = "⚠ " + msg;
+  if(kind === "fail") div.className = "note-fail";
+  div.textContent = (kind === "fail" ? "✗ " : "⚠ ") + msg;
   box.appendChild(div);
+  while(box.children.length > 60) box.firstChild.remove();
 }
 
 /* ---------------- 失败顶部悬浮提醒（toast） ----------------
@@ -2614,12 +2745,16 @@ function onEvent(ev){
     case "cfg": state.cfg = {...(ev.cfg || {}), started_at: ev.started_at}; break;
     case "status":
       if(state.running){
-        $("#statusMsg").textContent = "▶ " + ev.msg;   // 状态日志行行为保持不变
-        if(ev.toast) showToast(ev.msg);   // 兜底重试等瞬时事件额外弹顶部横幅提醒
+        const m = $("#statusMsg");
+        if(m.className !== "err") m.textContent = "▶ " + ev.msg;   // err 态不被瞬态日志覆盖（新 run 的 setPill 才清除）
+        if(ev.toast){
+          showToast(ev.msg);   // 兜底重试等瞬时事件额外弹顶部横幅提醒
+          addRunNote(ev.msg, ev.level === "error" ? "fail" : "warn");   // 同事件常驻留痕（toast 2.6s 即消失）
+        }
       }
       break;
     case "point_skipped": state.donePoints += ev.count || 1; bumpProgress();
-      if(ev.msg) addSkipNote(ev.msg);   // 超窗跳过原因常驻展示，不再被瞬态状态行吞没
+      if(ev.msg) addRunNote(ev.msg, "skip");   // 超窗跳过原因常驻展示，不再被瞬态状态行吞没
       break;
     case "tick": updateLive(ev); break;
     case "point": addPoint(ev.point); markLiveDone(ev.point); break;
@@ -2665,9 +2800,29 @@ function resetKpis(){
   $("#kpiPoints").innerHTML = `0 <small>/ ${state.totalPoints}</small>`;
 }
 function updateKpis(){ $("#kpiReqs").innerHTML = `${state.activeReqs.size} <small>个</small>`; }
+/* 运行时长 / 粗估 ETA：N 点数无法换算「还要等多久」——用已完成点的平均耗时
+   外推（档位间耗时差异巨大，标「约」；接管他人任务时起点为本页接管时刻） */
+const fmtDur = s => { s = Math.round(s); return s < 60 ? s+"s" : `${Math.floor(s/60)}m${String(s%60).padStart(2,"0")}s`; };
+function tickElapsed(){
+  const el = $("#runElapsed");
+  if(!el) return;
+  if(!state.running || !state.runStartTs){ el.hidden = true; return; }
+  const run = (Date.now() - state.runStartTs) / 1000;
+  let eta = "";
+  if(state.donePoints >= 2 && state.totalPoints > state.donePoints)
+    eta = ` · 约余 ${fmtDur(run / state.donePoints * (state.totalPoints - state.donePoints))}`;
+  el.textContent = `已运行 ${fmtDur(run)}${eta}`;
+  el.hidden = false;
+}
 function bumpProgress(){
-  $("#kpiPoints").innerHTML = `${state.donePoints} <small>/ ${state.totalPoints}</small>`;
-  if(state.totalPoints) $("#progFill").style.width = Math.min(100, state.donePoints/state.totalPoints*100) + "%";   // point_skipped 可让 donePoints 超过 totalPoints，宽度封顶 100%
+  // point_skipped 可让 donePoints 超过 totalPoints：宽度与数字同步封顶，不出「5 / 3」
+  const shown = Math.min(state.donePoints, state.totalPoints);
+  $("#kpiPoints").innerHTML = `${shown} <small>/ ${state.totalPoints}</small>`;
+  if(state.totalPoints){
+    const pct = Math.min(100, state.donePoints/state.totalPoints*100);
+    $("#progFill").style.width = pct + "%";
+    $("#progWrap").setAttribute("aria-valuenow", Math.round(pct));
+  }
 }
 
 /* KPI 主数值=最新读数，峰值隐示于进度条（宽=最新/峰值，title 悬浮展示） */
@@ -2690,8 +2845,10 @@ function kpiPushEst(vSel, val){
 }
 
 /* ---------------- 实时表格 ---------------- */
-/* tick tag = model|scen|ctx|conc|repN|rN（bench.py）：前 4 段即点标识 */
-const livePointKey = tag => tag.split("|").slice(0, 4).join("|");
+/* tick tag = model|scen|ctx|conc|repN|rN（bench.py）：点标识取前 4 段 + 指令档
+   （agent 矩阵 tick 附 inst 字段——同缓存档不同指令档是不同测点，不并入同 key，
+   否则前一指令档出实测后后续指令档的 KPI 估值帧全被抑制） */
+const livePointKey = t => t.tag.split("|").slice(0, 4).join("|") + "|" + (t.inst ?? "");
 function updateLive(t){
   const tb = $("#liveTable tbody");
   // 预热/探测请求 tick（bench.py _one prime=True）：单独成行（req 序号与测量
@@ -2719,20 +2876,25 @@ function updateLive(t){
   c[0].textContent = t.model;
   c[1].textContent = SCEN_LABEL[t.scenario] || t.scenario;
   const meta = state.scenMeta[t.scenario];
+  // agent 矩阵 tick 附 inst：上下文列展示「缓存 × 指令」组合（ctx 只是缓存档）；
   // 固定阶梯场景（媒体、翻译）档位带场景单位；通用 llm 场景 fmtK
-  c[2].textContent = (isMedia || meta?.ladder) ? `${t.ctx}${meta?.unit || ""}` : fmtK(t.ctx);
+  c[2].textContent = t.inst != null ? `缓存 ${fmtK(t.ctx)} × 指令 ${fmtK(t.inst)}`
+    : (isMedia || meta?.ladder) ? `${t.ctx} ${meta?.unit || ""}`.trim() : fmtK(t.ctx);
   c[3].textContent = t.conc;
-  c[4].textContent = "r" + t.req;
+  // tag 第 5 段 repN：repeats>1 时同 req 序号有多轮行，带 rep 后缀区分（与
+  // bench.py tag 编号一致，rep0 为首轮不标注）
+  const repSeg = (t.tag || "").split("|")[4] || "";
+  c[4].textContent = "r" + t.req + (repSeg && repSeg !== "rep0" ? "·" + repSeg : "");
   if(t.phase === "prefill"){
-    c[5].textContent = isPrime ? "预热中" : isMedia ? "请求中" : "prefill 中";
-    c[5].style.color = isPrime ? "#2563EB" : "var(--yellow)"; c[5].style.fontWeight = "500";
+    c[5].textContent = isPrime ? "预热中" : isMedia ? "请求中" : "Prefill 中";
+    c[5].style.color = isPrime ? "var(--blue)" : "var(--yellow)"; c[5].style.fontWeight = "500";
     if(t.ttft != null){
       // 首 token 到达：prefill 实测读数（请求级），即刻刷新 KPI 与实时表
       // （覆盖等待期的 ≈ 估值），不等整点完成（ADR-0007）；预热帧只上表不进 KPI
       if(t.speed){
         if(!isPrime){
           kpiPush("#kpiPrefill", "#prefillBarWrap", "#prefillBarFill", t.speed, "最快 Prefill");
-          state.preMeasured.add(livePointKey(t.tag));   // 本点已有实测：后续估值帧不再回退 KPI
+          state.preMeasured.add(livePointKey(t));   // 本点已有实测：后续估值帧不再回退 KPI
         }
         c[8].textContent = t.speed + " tok/s";
       }
@@ -2741,12 +2903,12 @@ function updateLive(t){
       // 首 token 实测帧到达后 KPI 切换为实测值（ADR-0007）
       c[8].textContent = "≈" + t.speed + " tok/s";
       // conc≥2 时 r0 已出实测而 r1 仍在等待：估值帧不把 KPI 主数值退回「≈」
-      if(!isPrime && !state.preMeasured.has(livePointKey(t.tag))) kpiPushEst("#kpiPrefill", t.speed);
+      if(!isPrime && !state.preMeasured.has(livePointKey(t))) kpiPushEst("#kpiPrefill", t.speed);
     }
   }
   else if(t.phase === "decode"){
-    c[5].textContent = isPrime ? "预热中" : t.thinking ? "decode·含思考" : (isMedia ? (k === "tts" ? "合成中" : "转写中") : "decode");
-    c[5].style.color = isPrime ? "#2563EB" : "var(--green)"; c[5].style.fontWeight = "500";
+    c[5].textContent = isPrime ? "预热中" : t.thinking ? "Decode·含思考" : (isMedia ? (k === "tts" ? "合成中" : "转写中") : "Decode");
+    c[5].style.color = isPrime ? "var(--blue)" : "var(--green)"; c[5].style.fontWeight = "500";
     state.activeReqs.add(rowKey); updateKpis();
     if(isMedia){
       // 媒体 decode 帧：tokens = 音频秒（asr/tts 完成帧）或已收 KB（tts 中途），
@@ -2758,13 +2920,15 @@ function updateLive(t){
   }
   else if(t.phase === "error"){
     c[5].textContent = "出错"; c[5].style.color = "var(--red)"; c[5].style.fontWeight = "500";
-    c[9].textContent = (t.msg||"").slice(0,40); tr.classList.add("err");
+    c[9].textContent = (t.msg||"").slice(0,40);
+    c[9].title = t.msg || "";   // 错误全文留痕：40 字符截断仅作显示
+    tr.classList.add("err");
     state.activeReqs.delete(rowKey); updateKpis();
   }
   if(t.ttft != null) c[6].textContent = t.ttft + "s";
   if(t.tokens != null) c[7].textContent = isMedia && k === "tts" ? t.tokens + " KB" : Math.round(t.tokens);
   if(!isMedia && t.phase === "decode" && t.speed != null) c[8].textContent = t.speed + " tok/s";
-  if(t.elapsed != null) c[9].textContent = t.elapsed + "s";
+  if(t.elapsed != null && t.phase !== "error") c[9].textContent = t.elapsed + "s";   // 错误文本不被耗时覆盖
 }
 function markLiveDone(p){
   const prefix = `${p.model}|${p.scenario}|${p.ctx_target}|${p.concurrency}|`;
@@ -2795,8 +2959,8 @@ const decTotalTipOf = p => p.decode_conc_tok_s != null
   ? ` title="${esc(`总吞吐为空窗校正口径：输出 tokens ÷（总输出窗口 − 各请求停滞累计）；原窗口口径 ${p.decode_total_tok_s} tok/s（含调度停滞空窗）`)}"` : "";
 /* 结束原因映射：并发下各请求 finish_reason 可能不同，引擎产出 "length,stop"
    等逗号组合值（bench.py uniq>1 时 join）——按段拆开逐段映射再拼接，
-   未知段原样转义（单值口径与旧版一致：只翻译截断/断流两类异常态） */
-const FINISH_LABEL = {length:"截断", client_cut:"断流"};
+   未知段原样转义（stop 译「完成」与实时表状态词一致；截断/断流为异常态） */
+const FINISH_LABEL = {length:"截断", client_cut:"断流", stop:"完成"};
 const finishTxt = f => f == null ? "-" : String(f).split(",").map(s => {
   s = s.trim();
   return s ? (FINISH_LABEL[s] || esc(s)) : "-";
@@ -2816,6 +2980,10 @@ const round1 = v => Math.round(v*10)/10;
 
 // Prefill 展示口径：优先扣 RTT 的净值（ADR-0006），旧存档无该字段时回退毛值
 const preOf = p => p.prefill_net_tok_s ?? p.prefill_tok_s;
+// Prefill 批级毛口径均速：与明细表/卡片多并发「Prefill 均速」列同字段
+//（Σprompt tokens ÷ prefill 总耗时），图表系列与表格同名同值可互验；
+// 旧存档无该字段回退净口径 preOf
+const preGrossOf = p => p.prefill_tok_s ?? preOf(p);
 // Decode 双口径：
 // 净口径（扣停滞）：相邻内容块间隔 >1s 的部分逐段封顶后重算窗口（decode_tok_s_adj），
 // 剔除传输/调度停滞拖尾，更接近服务端真实节奏；旧存档无 adj 字段时回退均口径。
@@ -2863,16 +3031,17 @@ const decTotalOf = p => p.decode_conc_tok_s ?? p.decode_total_tok_s_adj ?? p.dec
 const hasMultiConc = pts => pts.some(p => p.concurrency > 1);
 const hiConcOf = pts => { const mx = pts.reduce((m,p)=>Math.max(m, p.concurrency||0), 0); return mx > 1 ? mx : null; };
 
-/* 结果口径版本（ADR-0083，常量与版本表见 bench.py METRIC_VERSION）：
-   存档顶层与点级都写 metric_version；**缺字段 = 本机制引入前的遗留口径**，
-   前端仍走上面各访问器的隐式三级回退（语义与 v1 相同），只是必须显式标注，
-   否则旧档读数会被当成当前口径直接与新档混比。 */
+/* 结果口径版本（ADR-0093，常量与版本表见 bench.py METRIC_VERSION）：
+   存档顶层与点级都写 metric_version；**低于当前版本（含缺字段的 0）= 旧口径**，
+   前端仍走上面各访问器的隐式三级回退，只是必须显式标注，否则旧档读数会被
+   当成当前口径直接与新档混比。注：构造侧改进（ADR-0089/0090）**不**递增
+   版本——偏离校正重测会把点位替换成有效档位读数，落档读数的含义未变。 */
 const CURRENT_METRIC_VERSION = 1;
 const metricVersionOf = p => (p && p.metric_version != null ? p.metric_version : 0);
 const isLegacyMetric = p => metricVersionOf(p) < CURRENT_METRIC_VERSION;
 const metricVersionTxt = v => (v ? `v${v}` : "遗留");
 
-// Prefill 物理速率闸（tok/s）：常规硬件 prefill 上限远低于此，读数超出视为
+// Prefill 物理速率闸(tok/s)：常规硬件 prefill 上限远低于此，读数超出视为
 // 物理上不可能（多为网关吞掉请求后伪报成功/异常回传），从卡片均值/范围统计剔除
 const PRE_PHYS_GATE = 50000;
 // 「均 x/批」（tok_per_chunk）显示门槛：与后端 SPEC_MIN_TPC 同口径，<1.15 为
@@ -3008,6 +3177,29 @@ const depOfModel = ({modelInfo, providers, provider, providerLocal, model}) => {
   const hits = (prov.deployments || []).filter(d => (d.models || []).includes(model));
   return hits.find(d => d.active) || hits[0] || null;
 };
+/* 单请求超时的取值上界，与后端 bench.TIMEOUT_S_MAX 同值（前端无法 import，
+   故同名常量镜像；改后端那个必须同步这里）。语义提醒：该框填的是「连续无输出
+   多少秒判为断开」（idle，收到输出归零），不是「单请求最多能跑多久」——超长
+   上下文的 prefill 会长时间零输出，按总时长直觉填小值会误掐长档位。
+   随 timeoutClampNote 一并放在 §pure 区：该区的提取是独立模块，引用区外
+   符号会 ReferenceError（run_frontend_pure.sh 提取后单独求值）。 */
+const TIMEOUT_S_MAX = 7200;
+
+/* fTimeout 输入值的实际生效口径（纯函数，DOM-free）：number 输入的 min/max
+   不拦键盘输入也不标红（只作用在 spinner 与表单校验上，而本控件不在 form
+   内），手打超限值毫无反馈——这里给出「是否被钳 + 生效值」，供提示与提交侧
+   共用同一口径。**必须与 collectCfg 的 Math.min/max 自钳一致**：越界是钳制
+   生效，不是拒绝提交。空值/非数按未填处理，走默认 1200（同 `|| 1200` 口径），
+   不算越界、不提示。 */
+function timeoutClampNote(raw){
+  const s = String(raw ?? "").trim();
+  const v = Number(s);
+  if(s === "" || !Number.isFinite(v)) return { clamped: false, effective: 1200 };
+  if(v > TIMEOUT_S_MAX) return { clamped: true, effective: TIMEOUT_S_MAX };
+  if(v < 1) return { clamped: true, effective: 1 };
+  return { clamped: false, effective: v };
+}
+
 /* ===== §pure:end ===== */
 /* 会展示「均 x/批」的点（>=SPEC_MIN_TPC，<门槛本就不显示）；裁定判定用 */
 const tpcWouldShow = p => p.tok_per_chunk != null && p.tok_per_chunk >= SPEC_MIN_TPC;
@@ -3033,7 +3225,7 @@ const tpcSuppressHTML = pairs => pairs.length
       `${esc(label)}${n} 个点的 均x/批 读数未展示：该模型本轮多数测点无成批交付证据，个别成批读数判定为传输合并/回吐假象——MTP 开没开是服务端全局属性，逐点读数不作数`).join("<br>")}</div>` : "";
 const preUntrustedOf = p => p.prefill_tok_s != null && p.prefill_tok_s > PRE_PHYS_GATE;   // 明细表速度列显示值同口径（prefill_tok_s 毛口径）
 const prePhysMarkOf = p => preUntrustedOf(p)
-  ? ` <span style="color:var(--yellow);cursor:help" title="Prefill 读数超物理界：${fmtNum(p.prefill_tok_s)} tok/s 超出物理速率闸（${fmtNum(PRE_PHYS_GATE)} tok/s），疑似网关伪报成功/异常回传，读数不可信，已从卡片均值/范围统计剔除">⚠不可信</span>` : "";
+  ? ` <span class="flag-warn" title="Prefill 读数超物理界：${fmtNum(p.prefill_tok_s)} tok/s 超出物理速率闸（${fmtNum(PRE_PHYS_GATE)} tok/s），疑似网关伪报成功/异常回传，读数不可信，已从卡片均值/范围统计剔除">⚠不可信</span>` : "";
 // 卡片统计脚注：被剔除的超物理界读数计数（n=0 时不出现在副标题里）
 const preUntrustedTxt = n => n ? `；${n} 点 Prefill 读数超物理界（> ${fmtNum(PRE_PHYS_GATE)} tok/s）已剔除、标注不可信` : "";
 // 疑似空回复点：状态报成功（all_ok）但几乎无输出（out_tokens≤2 且正常结束），
@@ -3044,7 +3236,7 @@ const fakeOkOf = p => (p.all_ok ?? true) && (p.out_tokens ?? 99) <= 2 && p.finis
   && (p.prompt_tokens ?? 0) >= 8192
   && (p.ttft_s > 0 ? p.prompt_tokens / p.ttft_s : Infinity) > PRE_PHYS_GATE;
 const fakeOkMarkOf = p => fakeOkOf(p)
-  ? ` <span style="color:var(--yellow);cursor:help" title="疑似空回复：状态报成功但输出仅 ${p.out_tokens ?? "-"} token 且正常结束，TTFT 相对 ${fmtK(p.prompt_tokens)} prompt 物理上不可能（${fmtNum(p.prompt_tokens / p.ttft_s)} tok/s）——疑似网关/引擎吞掉请求后伪报成功，本点读数不可用于比较">⚠空回复</span>` : "";
+  ? ` <span class="flag-warn" title="疑似空回复：状态报成功但输出仅 ${p.out_tokens ?? "-"} token 且正常结束，TTFT 相对 ${fmtK(p.prompt_tokens)} prompt 物理上不可能（${fmtNum(p.prompt_tokens / p.ttft_s)} tok/s）——疑似网关/引擎吞掉请求后伪报成功，本点读数不可用于比较">⚠空回复</span>` : "";
 // 档位偏差徽标：实际 prompt tokens 与目标档位偏差超 ±10% 时提示——上下文
 // 构造与设定档位不符（模板/系统提示追加或缓存填充），横向对比时注意口径错位
 const ctxDevMarkOf = (target, tokens) => {
@@ -3052,7 +3244,7 @@ const ctxDevMarkOf = (target, tokens) => {
   const dev = (tokens - target) / target;
   if(Math.abs(dev) <= 0.10) return "";
   const pct = Math.round(dev * 100), sign = pct > 0 ? "+" : "";
-  return ` <span style="color:var(--yellow);cursor:help" title="实际 prompt tokens 与目标档位偏差 ${sign}${pct}%（档位 ${fmtK(target)} → 实测 ${fmtK(tokens)}），超出 ±10%——上下文构造与设定不符，横向对比读数时注意口径错位">⚠偏 ${sign}${pct}%</span>`;
+  return ` <span class="flag-warn" title="实际 prompt tokens 与目标档位偏差 ${sign}${pct}%（档位 ${fmtK(target)} → 实测 ${fmtK(tokens)}），超出 ±10%——上下文构造与设定不符，横向对比读数时注意口径错位">⚠偏 ${sign}${pct}%</span>`;
 };
 /* 固定字长阶梯场景（translate）：ctx_target 是原文字符口径——档位标签带场景
    单位（不走 fmtK），且与 prompt_tokens 不同单位、不做偏差判别。
@@ -3065,7 +3257,7 @@ const gearOf = p => {
   const m = state.scenMeta[p.scenario];
   if(m?.ladder) return `${p.ctx_target}${m.unit || ""}`;
   if(p.ctx_edge){
-    return `${fmtK(p.ctx_edge)} <span style="color:var(--yellow);cursor:help" title="贴边裁减档：为保住输出预算与分词漂移余量，构造量由 ${fmtK(p.ctx_edge)} 裁到 ${fmtK(p.ctx_target)}（部署 max_ctx 上限）；逻辑档位不变，读数按裁后实测量">✂裁减</span>`;
+    return `${fmtK(p.ctx_edge)} <span class="flag-warn" title="贴边裁减档：为保住输出预算与分词漂移余量，构造量由 ${fmtK(p.ctx_edge)} 裁到 ${fmtK(p.ctx_target)}（部署 max_ctx 上限）；逻辑档位不变，读数按裁后实测量">✂裁减</span>`;
   }
   return fmtK(p.ctx_target);
 };
@@ -3214,7 +3406,7 @@ function scenDetailTable(sc, scRows, {showTotal, withReps = true, cfg = null, ti
     : `<tr>${ctxSub}${cacheSub}<th>TTFT(s)</th>${preSpdTh}`
       + `<th title="净口径：completion tokens ÷ 空窗校正窗口（相邻内容块间隔 >1s 的部分逐段封顶）">净速(tok/s)</th>`
       + `<th title="均口径：各请求 completion tokens ÷（末 token − 首 token）的均值，含传输/调度停滞">均速(tok/s)</th>`
-      + `<th title="Decode 净耗时：输出 tokens ÷ 净Decode（校正窗口）">净耗时(s)</th>`
+      + `<th title="Decode 净耗时：输出 tokens ÷ Decode 净速（校正窗口）">净耗时(s)</th>`
       + `<th title="Decode 总耗时：输出 tokens ÷ 均Decode（原始窗口，含停滞）">总耗时(s)</th></tr>`;
   // Decode 组子列数两式同为 4（多发：总耗时/均速/总吞吐/吞吐峰值；单发：
   // 净速/均速/净耗时/总耗时）
@@ -3313,21 +3505,21 @@ function pointRow(p, isAgent, showTotal,
         : "本点空窗未超过 1s 校正门限，净/均口径一致");
     // conc>1 点引擎不再产出 stall_s/max_gap_s/flush_* 字段——停滞/空窗徽标只出现在单并发点
     const gapWarn = p.stall_s
-      ? ` <span style="color:var(--yellow);cursor:help" title="${repsNote}decode 中途停滞 ${stallN} 次，累计 ${p.stall_s}s（最长 ${p.max_gap_s ?? "-"}s；网络传输或服务端调度停滞）。${twoGateTxt}。${gapFixTxt}${flushTipTxt(p)}">⚠停滞 ${p.stall_s}s</span>`
+      ? ` <span class="flag-warn" title="${repsNote}decode 中途停滞 ${stallN} 次，累计 ${p.stall_s}s（最长 ${p.max_gap_s ?? "-"}s；网络传输或服务端调度停滞）。${twoGateTxt}。${gapFixTxt}${flushTipTxt(p)}">⚠停滞 ${p.stall_s}s</span>`
       : p.max_gap_s > 1
-      ? ` <span style="color:var(--yellow);cursor:help" title="${repsNote}decode 中途最长空窗 ${p.max_gap_s}s（网络传输或服务端调度停滞）。${twoGateTxt}。${gapFixTxt}${flushTipTxt(p)}">⚠空窗${p.max_gap_s}s</span>` : "";
+      ? ` <span class="flag-warn" title="${repsNote}decode 中途最长空窗 ${p.max_gap_s}s（网络传输或服务端调度停滞）。${twoGateTxt}。${gapFixTxt}${flushTipTxt(p)}">⚠空窗 ${p.max_gap_s}s</span>` : "";
     // 突发交付：chunk 平均间隔 <1ms，疑似网关缓冲冲刷而非真实流式——decode
     // 读数虚高不可信，值仍展示但标记不可用于比较（挂在均口径列，因突发按
     // 原始 chunk 时间线判别）
     const burstMark = p.decode_burst
-      ? ` <span style="color:var(--yellow);cursor:help" title="突发交付：输出以亚毫秒间隔一次性到达，疑似网关缓冲冲刷而非真实流式，decode 读数虚高不可信，不可用于跨次比较">⚠突发</span>` : "";
+      ? ` <span class="flag-warn" title="突发交付：输出以亚毫秒间隔一次性到达，疑似网关缓冲冲刷而非真实流式，decode 读数虚高不可信，不可用于跨次比较">⚠突发</span>` : "";
     // 平均每交付批 token 数（tok_per_chunk）：单事件携带多 token（MTP/EAGLE 类
     // 网关）或逐 token 事件按 verify 周期成批到达（llama.cpp 投机解码，按到达
     // 间隔聚类识别）时记录；<SPEC_MIN_TPC 为逐 token 交付记账噪声，含旧存档
     // 存量噪声，不显示。旧存档无此字段时按空值回退不显示。另受运行级裁定
     // （tpcRunVote）约束：模型未过多数决时按传输合并/回吐假象压制不展示
     const tpcNote = !tpcOff && p.tok_per_chunk != null && p.tok_per_chunk >= SPEC_MIN_TPC
-      ? ` <small style="color:var(--ink-4);cursor:help" title="平均每交付批 token 数：单事件携带多 token（MTP/EAGLE 类网关）或逐 token 事件按 verify 周期成批到达（llama.cpp 投机解码，按到达间隔聚类识别）时记录；≈1 的逐 token 交付记账噪声（<${SPEC_MIN_TPC}，含旧存档存量噪声）不显示；out_tokens 缺 usage 真值时按估算口径计">均 ${p.tok_per_chunk}/批</small>` : "";
+      ? ` <small class="flag-muted" title="平均每交付批 token 数：单事件携带多 token（MTP/EAGLE 类网关）或逐 token 事件按 verify 周期成批到达（llama.cpp 投机解码，按到达间隔聚类识别）时记录；≈1 的逐 token 交付记账噪声（<${SPEC_MIN_TPC}，含旧存档存量噪声）不显示；out_tokens 缺 usage 真值时按估算口径计">均 ${round1(p.tok_per_chunk)}/批</small>` : "";
     // 异常输出弃测重测徽标（短文案）：仅弃测 = 「首测异常，X」；弃测且重测仍
     // 异常（anomaly 打标）= 「首测复测均异常，X」或「首测复测均异常，X/Y」
     // （首测与复测类型不同斜杠并列，相同去重）。逐条明细与样本
@@ -3338,7 +3530,7 @@ function pointRow(p, isAgent, showTotal,
     const anomalyLabel = p.anomaly ? (ANOMALY_LABEL[p.anomaly] || p.anomaly) : "";
     const bothLabels = [...new Set([...discardKinds, ...(p.anomaly ? [anomalyLabel] : [])])].join("/");
     const discardMark = discards.length
-      ? ` <span style="color:var(--yellow);cursor:help" title="${esc(discards.map((d, i) => {
+      ? ` <span class="flag-warn" title="${esc(discards.map((d, i) => {
           const head = `第${i + 1}条 · ${ANOMALY_LABEL[d.anomaly] || d.anomaly} · 输出 ${d.out_tokens ?? "-"} tokens（${d.finish ?? "-"}）· decode ${d.decode_tok_s ?? "-"} tok/s`;
           const samples = [];
           if(d.text_sample) samples.push(`文本样本：${clipSample(d.text_sample)}`);
@@ -3348,29 +3540,29 @@ function pointRow(p, isAgent, showTotal,
     // anomaly 正常必伴随弃测（discards 非空，已折进上行）；旧存档/防御路径下
     // 单独打标时单独出徽标
     const anomalyMark = !discards.length && p.anomaly
-      ? ` <span style="color:var(--yellow);cursor:help" title="异常输出·${esc(anomalyLabel)}：弃测重测一次后仍复现，按实留档，读数需谨慎参考">⚠首测复测均异常，${esc(anomalyLabel)}</span>` : "";
+      ? ` <span class="flag-warn" title="异常输出·${esc(anomalyLabel)}：弃测重测一次后仍复现，按实留档，读数需谨慎参考">⚠首测复测均异常，${esc(anomalyLabel)}</span>` : "";
     // 构建偏离校正重测徽标：首测实测 prompt 与目标档位偏差超 ±10%（新语料段
     // 密度只能外推），整批废弃、按实测密度校正填充量换 nonce 重测——本点
     // 读数取自重测批，ctx_retry = 首测实测 prompt_tokens 留痕；旧存档无该
     // 字段不显示
     const ctxRetryMark = p.ctx_retry != null
-      ? ` <span style="color:var(--ink-4);cursor:help" title="构建偏离校正重测：首测实测 prompt ${p.ctx_retry} tokens，与目标档位偏差超 ±10%，已按实测密度校正填充量、换 nonce 整批重测（防前缀缓存污染），本点读数取自重测批">↻校正重测</span>` : "";
+      ? ` <span class="flag-muted" title="构建偏离校正重测：首测实测 prompt ${p.ctx_retry} tokens，与目标档位偏差超 ±10%，已按实测密度校正填充量、换 nonce 整批重测（防前缀缓存污染），本点读数取自重测批">↻校正重测</span>` : "";
     // 拼接溯源徽标：本点由其他存档拼接而来（spliced_from/spliced_at，服务端
     // 拼接端点打标），非本次运行实测；旧存档无该字段不显示
     const spliceMark = p.spliced_from
-      ? ` <span style="color:var(--ink-4);cursor:help" title="本测速点由存档 ${esc(p.spliced_from)} 拼接而来（${esc(p.spliced_at || "时间未知")}），非本次运行实测">⇢拼接</span>` : "";
+      ? ` <span class="flag-muted" title="本测速点由存档 ${esc(p.spliced_from)} 拼接而来（${esc(p.spliced_at || "时间未知")}），非本次运行实测">⇢拼接</span>` : "";
     // 口径版本徽标：无 metric_version 的存档 = 本机制引入前的遗留口径。读数字段
     // 靠前端隐式回退仍可用，但**不可与当前口径的读数直接混比**（ADR-0083）
     const metricMark = isLegacyMetric(p)
-      ? ` <span style="color:var(--ink-4);cursor:help" title="该测点的存档没有口径版本标记（v${CURRENT_METRIC_VERSION} 之前测量）：字段含义按遗留口径回退解读，与当前口径的新读数不宜直接混比/拼图。"">旧口径</span>` : "";
+      ? ` <span class="flag-muted" title="该测点的存档没有口径版本标记（v${CURRENT_METRIC_VERSION} 之前测量）：字段含义按遗留口径回退解读，与当前口径的新读数不宜直接混比/拼图。">旧口径</span>` : "";
     // 单点复测入口（仅历史/已完成态的页面明细表，opts.retest）：沿用原存档
     // 配置重跑本点，结果合并回本存档；旧版 agent 链测点（turn）不支持
     const retestBtn = (retest && p.turn == null)
-      ? ` <button class="btn-ghost" style="padding:0 6px;font-size:12px" title="单独复测该测试点：沿用原存档配置重跑本点（含 repeats 轮次），完成后结果合并回本存档" data-act="retest" data-ident="${esc(JSON.stringify({model: p.model, scenario: p.scenario, ctx_target: p.ctx_target, inst_tokens: p.inst_tokens ?? null, concurrency: p.concurrency}))}">复测</button>` : "";
+      ? ` <button class="btn-ghost btn-xs" title="单独复测该测试点：沿用原存档配置重跑本点（含 repeats 轮次），完成后结果合并回本存档" data-act="retest" data-ident="${esc(JSON.stringify({model: p.model, scenario: p.scenario, ctx_target: p.ctx_target, inst_tokens: p.inst_tokens ?? null, concurrency: p.concurrency}))}">复测</button>` : "";
     // 单点删除入口（同门槛；agent 链测点按 turn 消歧）：从存档移除本点，
     // 服务端 deletions 审计留痕，删除不可恢复
     const delBtn = retest
-      ? ` <button class="btn-ghost danger" style="padding:0 6px;font-size:12px" title="从历史存档中删除该测试点（不可恢复；服务端留删除审计）" data-act="delete" data-ident="${esc(JSON.stringify({model: p.model, scenario: p.scenario, ctx_target: p.ctx_target, inst_tokens: p.inst_tokens ?? null, concurrency: p.concurrency, turn: p.turn ?? null}))}">删除</button>` : "";
+      ? ` <button class="btn-ghost danger btn-xs" title="从历史存档中删除该测试点（不可恢复；服务端留删除审计）" data-act="delete" data-ident="${esc(JSON.stringify({model: p.model, scenario: p.scenario, ctx_target: p.ctx_target, inst_tokens: p.inst_tokens ?? null, concurrency: p.concurrency, turn: p.turn ?? null}))}">删除</button>` : "";
     // agent 点（旧链 turn）：轮次格 + 缓存构成列（未命中/缓存命中）；矩阵点
     // （inst_tokens）不走档位格，在 colsPre 按 缓存/指令/总长度 三格展开。
     // 命中三态见 hitStateOf；「未回传」时未命中按全量（引擎
@@ -3379,7 +3571,7 @@ function pointRow(p, isAgent, showTotal,
     const isMx = p.inst_tokens != null;
     const phase2 = isTurn && (p.turn_phase ?? (p.turn_delta >= 4096 ? 2 : 1)) === 2;
     const turnCell = isTurn
-      ? `轮 ${p.turn}${isColdTurn(p, cfg) ? " <small style='color:var(--yellow)'>冷</small>" : ""}${phase2 ? " <small style='color:var(--ink-4)'>长文本</small>" : ""}`
+      ? `轮 ${p.turn}${isColdTurn(p, cfg) ? " <small class='note-warn'>冷</small>" : ""}${phase2 ? " <small class='note-muted'>长文本</small>" : ""}`
       : gearOf(p);
     const hs = hitStateOf(p, cfg);
     const hitPct = (p.prompt_tokens && p.cache_hit_tokens) ? Math.round(p.cache_hit_tokens / p.prompt_tokens * 100) : 0;
@@ -3387,7 +3579,7 @@ function pointRow(p, isAgent, showTotal,
     const hitCell = hs === "reported" ? hitTxt
       : hs === "est" ? `<span style="cursor:help" title="网关未回传缓存命中字段；TTFT 显著低于全量重算预期（有缓存迹象），按链内差分估算">≈${hitTxt}</span>`
       : hs === "cold" ? (p.cache_hit_tokens ? hitTxt : "0")
-      : `<span style="color:var(--ink-4);cursor:help" title="网关未回传缓存命中字段，且 TTFT 随全量 prompt 增长（无缓存迹象）——命中数未知，不假设有缓存">未回传</span>`;
+      : `<span class="flag-muted" title="网关未回传缓存命中字段，且 TTFT 随全量 prompt 增长（无缓存迹象）——命中数未知，不假设有缓存">未回传</span>`;
     const missCell = !(isTurn || isMx) || p.prompt_tokens == null ? "-"
       : hs === "unknown"
         ? `<span style="cursor:help" title="无缓存迹象：全量计算（命中数未知）">${fmtK(p.prompt_tokens)}<small> 全量</small></span>`
@@ -3447,7 +3639,7 @@ function pointRow(p, isAgent, showTotal,
       flushTipTxt(p),
     ].filter(Boolean).join("；");
     const decNetTimeTip = [
-      "Decode净耗时 = 输出 tokens ÷ 净速（校正窗口，>1s 空窗封顶，剔除传输/调度停滞拖尾）",
+      "Decode 净耗时 = 输出 tokens ÷ Decode 净速（校正窗口，>1s 空窗封顶，剔除传输/调度停滞拖尾）",
       `Decode总耗时 ${decTotalTime ?? "-"}s`,
       p.decode_tok_s_adj == null
         ? (p.flush_tok != null ? "回吐占比过高，净口径无法可靠估计，暂以均口径回退显示"
@@ -3476,9 +3668,9 @@ function pointRow(p, isAgent, showTotal,
     // Prefill 速度超物理界加 ⚠不可信（值仍展示）
     const preCells = isMx
       ? `<td>${fmtK(p.ctx_target)}</td>`
-        + `<td>${fmtK(p.inst_tokens)}${p.inst_real_tokens != null ? ` <small style='color:var(--ink-4)'>· 实测${fmtK(p.inst_real_tokens)}</small>` : ""}</td>`
-        + `<td>${p.prompt_tokens ?? "-"}${ctxDevMark(p, p.prompt_tokens)}</td>`
-      : `<td>${turnCell}</td><td>${p.prompt_tokens ?? "-"}${ctxDevMark(p, p.prompt_tokens)}</td>`;
+        + `<td>${fmtK(p.inst_tokens)}${p.inst_real_tokens != null ? ` <small class='note-muted'>· 实测${fmtK(p.inst_real_tokens)}</small>` : ""}</td>`
+        + `<td>${p.prompt_tokens != null ? fmtK(p.prompt_tokens) : "-"}${ctxDevMark(p, p.prompt_tokens)}</td>`
+      : `<td>${turnCell}</td><td>${p.prompt_tokens != null ? fmtK(p.prompt_tokens) : "-"}${ctxDevMark(p, p.prompt_tokens)}</td>`;
     const colsPre = isAgent
       ? `${preCells}<td>${p.concurrency}</td><td>${missCell}</td><td>${hitCell}</td>`
       : `${preCells}<td>${p.concurrency}</td>`;
@@ -3496,7 +3688,7 @@ function pointRow(p, isAgent, showTotal,
       ? `<td title="${esc(CALC_SPAN_TIP)}">${calcSpanTime ?? "-"}</td>` : "";
     const mainRow = `<tr class="${p.all_ok?"":"err"}">
       <td>${esc(p.model)}</td>${colsPre}<td${ttTitle}>${p.ttft_s ?? "-"}</td><td${preTitle}>${preMainVal}${prePhysMarkOf(p)}</td>
-      ${decCells}${isAgent ? `<td title="端到端总时长：请求发出 → 末 token（TTFT + decode 全程）">${p.total_s ?? "-"}</td>` : ""}${calcCell}<td>${p.out_tokens ?? "-"}</td>
+      ${decCells}${isAgent ? `<td title="端到端总时长：请求发出 → 末 token（TTFT + decode 全程）">${p.total_s ?? "-"}</td>` : ""}${calcCell}<td>${p.out_tokens != null ? fmtNum(p.out_tokens) : "-"}</td>
       <td>${finishTxt(p.finish)}</td><td>${st}${gapWarn}${discardMark}${anomalyMark}${ctxRetryMark}${spliceMark}${metricMark}${fakeOkMarkOf(p)}${retestBtn}${delBtn}</td></tr>`;
     // 重复轮次子行（withReps）：弃测轮（异常首测整批作废的留痕）在前、对应
     // 轮次的保留行（重测批）在后，按 rep 对齐插入；旧存档弃测条目无 rep 字段
@@ -3504,14 +3696,14 @@ function pointRow(p, isAgent, showTotal,
     // 卡片「聚合行明细」档（withReps=false）不出子行，异常徽标靠聚合行展示
     const retRows = (withReps && p.n_reps > 1 && Array.isArray(p.reps) ? p.reps : []).map((r, i) => {
       const rStall = r.stall_s
-        ? ` <span style="color:var(--yellow);cursor:help" title="本轮 decode 中途停滞 ${r.stall_count || 1} 次，累计 ${r.stall_s}s（最长 ${r.max_gap_s ?? "-"}s）。两档门限：≥0.5s 只标注留痕、>1s 空窗超出部分在净口径封顶扣除（净口径见图表净速系列与存档字段）${flushTipTxt(r)}">⚠停滞 ${r.stall_s}s</span>`
+        ? ` <span class="flag-warn" title="本轮 decode 中途停滞 ${r.stall_count || 1} 次，累计 ${r.stall_s}s（最长 ${r.max_gap_s ?? "-"}s）。两档门限：≥0.5s 只标注留痕、>1s 空窗超出部分在净口径封顶扣除（净口径见图表净速系列与存档字段）${flushTipTxt(r)}">⚠停滞 ${r.stall_s}s</span>`
         : r.max_gap_s > 1
-        ? ` <span style="color:var(--yellow);cursor:help" title="本轮 decode 最长空窗 ${r.max_gap_s}s，>1s 部分已在净口径封顶扣除（净口径见图表净速系列与存档字段）${flushTipTxt(r)}">⚠空窗${r.max_gap_s}s</span>` : "";
+        ? ` <span class="flag-warn" title="本轮 decode 最长空窗 ${r.max_gap_s}s，>1s 部分已在净口径封顶扣除（净口径见图表净速系列与存档字段）${flushTipTxt(r)}">⚠空窗 ${r.max_gap_s}s</span>` : "";
       const rBurst = r.decode_burst
-        ? ` <span style="color:var(--yellow);cursor:help" title="突发交付：读数虚高不可信">⚠突发</span>` : "";
+        ? ` <span class="flag-warn" title="突发交付：读数虚高不可信">⚠突发</span>` : "";
       // 重测仍异常被留档的轮：与聚合行同模板徽标，明细与样本看异常日志
       const rAnomMark = r.anomaly
-        ? ` <span style="color:var(--yellow);cursor:help" title="本轮重测仍异常（${esc(ANOMALY_LABEL[r.anomaly] || r.anomaly)}），按实留档，读数需谨慎参考；输入原文与输出样本见异常日志">⚠首测复测均异常，${esc(ANOMALY_LABEL[r.anomaly] || r.anomaly)}</span>` : "";
+        ? ` <span class="flag-warn" title="本轮重测仍异常（${esc(ANOMALY_LABEL[r.anomaly] || r.anomaly)}），按实留档，读数需谨慎参考；输入原文与输出样本见异常日志">⚠首测复测均异常，${esc(ANOMALY_LABEL[r.anomaly] || r.anomaly)}</span>` : "";
       const rTotalTitle = decTotalTipOf(r);
       // 子行 prefill 均速并发口径悬浮（多发表，与聚合行同文案，数值取本轮 r 字段）
       const preConcTipR = concStyle && p.concurrency > 1 && r.prefill_conc_tok_s != null
@@ -3526,12 +3718,12 @@ function pointRow(p, isAgent, showTotal,
       const rHit = r.cache_hit_tokens == null ? "-"
         : `${r.cache_reported === false ? "≈" : ""}${r.cache_hit_tokens ? fmtK(r.cache_hit_tokens) : "0"}`;
       const colsPreR = isMx
-        ? `<td class="rep-tag" colspan="2">↳ 重复轮次${i + 1}</td><td>${r.prompt_tokens ?? "-"}${ctxDevMark(p, r.prompt_tokens)}</td><td>${p.concurrency}</td><td>${rMiss}</td><td>${rHit}</td>`
+        ? `<td class="rep-tag" colspan="2">↳ 重复轮次${i + 1}</td><td>${r.prompt_tokens != null ? fmtK(r.prompt_tokens) : "-"}${ctxDevMark(p, r.prompt_tokens)}</td><td>${p.concurrency}</td><td>${rMiss}</td><td>${rHit}</td>`
         : isAgent
-        ? `<td class="rep-tag">↳ 重复轮次${i + 1}</td><td>${r.prompt_tokens ?? "-"}${ctxDevMark(p, r.prompt_tokens)}</td><td>${p.concurrency}</td><td>${rMiss}</td><td>${rHit}</td>`
-        : `<td class="rep-tag">↳ 重复轮次${i + 1}</td><td>${r.prompt_tokens ?? "-"}${ctxDevMark(p, r.prompt_tokens)}</td><td>${p.concurrency}</td>`;
+        ? `<td class="rep-tag">↳ 重复轮次${i + 1}</td><td>${r.prompt_tokens != null ? fmtK(r.prompt_tokens) : "-"}${ctxDevMark(p, r.prompt_tokens)}</td><td>${p.concurrency}</td><td>${rMiss}</td><td>${rHit}</td>`
+        : `<td class="rep-tag">↳ 重复轮次${i + 1}</td><td>${r.prompt_tokens != null ? fmtK(r.prompt_tokens) : "-"}${ctxDevMark(p, r.prompt_tokens)}</td><td>${p.concurrency}</td>`;
       const rTpcNote = !tpcOff && r.tok_per_chunk != null && r.tok_per_chunk >= SPEC_MIN_TPC
-        ? ` <small style="color:var(--ink-4)">均 ${r.tok_per_chunk}/批</small>` : "";
+        ? ` <small class="note-muted">均 ${round1(r.tok_per_chunk)}/批</small>` : "";
       const rDecCells = concStyle
         ? `<td>${decTotalTimeOf(r) ?? "-"}</td>
         <td>${decColAvgOf(r) ?? "-"}${rBurst}${rTpcNote}</td>
@@ -3544,7 +3736,7 @@ function pointRow(p, isAgent, showTotal,
         ? `<td title="${esc(CALC_SPAN_TIP)}">${calcSpanTimeOf(r) ?? "-"}</td>` : "";
       return {rep: i + 1, html: `<tr class="rep-row${r.all_ok === false ? " err" : ""}">
         <td></td>${colsPreR}<td>${r.ttft_s ?? "-"}</td><td${preConcTipR}>${concStyle ? (r.prefill_tok_s ?? "-") : (preOf(r) ?? "-")}${prePhysMarkOf(r)}</td>
-        ${rDecCells}${isAgent ? `<td>${r.total_s ?? "-"}</td>` : ""}${rCalcCell}<td>${r.out_tokens ?? "-"}</td>
+        ${rDecCells}${isAgent ? `<td>${r.total_s ?? "-"}</td>` : ""}${rCalcCell}<td>${r.out_tokens != null ? fmtNum(r.out_tokens) : "-"}</td>
         <td>${finishTxt(r.finish)}</td>
         <td>${rSt}${rStall}${rAnomMark}${fakeOkMarkOf(r)}</td></tr>`};
     });
@@ -3570,7 +3762,7 @@ function pointRow(p, isAgent, showTotal,
         <td></td>${colsPreD}<td>${d.ttft_s ?? "-"}</td><td>-</td>
         ${dDecCells}${isAgent ? "<td>-</td>" : ""}${concStyle ? "<td>-</td>" : ""}<td>${d.out_tokens ?? "-"}</td>
         <td>${finishTxt(d.finish)}</td>
-        <td><span style="color:var(--yellow);cursor:help" title="${esc(dTip)}">⚠首测异常，${esc(dKind)}</span></td></tr>`};
+        <td><span class="flag-warn" title="${esc(dTip)}">⚠首测异常，${esc(dKind)}</span></td></tr>`};
     });
     // 稳定排序（同 rep 弃测行先入列即排在保留行前）；旧存档无 rep 的弃测行
     // 取 0 排在最前
@@ -3593,7 +3785,7 @@ function mediaMetricCells(p, kind){
   if(kind === "asr") return [
     fmtRtf(p.rtf), p.speed_x ?? "-", p.audio_min_per_min ?? "-", fmtNum(p.out_chars)];
   if(kind === "tts") return [
-    (p.audio_s ?? "-") + (p.audio_est ? " <small style='color:var(--ink-4)'>~估算</small>" : ""),
+    (p.audio_s ?? "-") + (p.audio_est ? " <small class='note-muted'>~估算</small>" : ""),
     p.ttfa_s ?? "-", fmtRtf(p.rtf), p.speed_x ?? "-", p.audio_min_per_min ?? "-"];
   return [p.ttft_s ?? "-", p.decode_tok_s ?? "-", p.ms_per_img ?? "-", p.img_per_s ?? "-"];
 }
@@ -3610,14 +3802,14 @@ function renderMediaTable(sc, scRows, kind, withReps = true, titled = true, rete
     if(p.err) st = `<span style="cursor:help" title="${esc(p.err)}">${st}</span>`;
     // 单点复测入口（与 LLM 表同门槛，媒体点无 turn 恒可复测）
     const retestBtn = retest
-      ? ` <button class="btn-ghost" style="padding:0 6px;font-size:12px" title="单独复测该测试点：沿用原存档配置重跑本点（含 repeats 轮次），完成后结果合并回本存档" data-act="retest" data-ident="${esc(JSON.stringify({model: p.model, scenario: p.scenario, ctx_target: p.ctx_target, inst_tokens: null, concurrency: p.concurrency}))}">复测</button>` : "";
+      ? ` <button class="btn-ghost btn-xs" title="单独复测该测试点：沿用原存档配置重跑本点（含 repeats 轮次），完成后结果合并回本存档" data-act="retest" data-ident="${esc(JSON.stringify({model: p.model, scenario: p.scenario, ctx_target: p.ctx_target, inst_tokens: null, concurrency: p.concurrency}))}">复测</button>` : "";
     // 拼接溯源徽标与单点删除入口（与 LLM 表同口径）
     const spliceMark = p.spliced_from
-      ? ` <span style="color:var(--ink-4);cursor:help" title="本测速点由存档 ${esc(p.spliced_from)} 拼接而来（${esc(p.spliced_at || "时间未知")}），非本次运行实测">⇢拼接</span>` : "";
+      ? ` <span class="flag-muted" title="本测速点由存档 ${esc(p.spliced_from)} 拼接而来（${esc(p.spliced_at || "时间未知")}），非本次运行实测">⇢拼接</span>` : "";
     const metricMark = isLegacyMetric(p)
-      ? ` <span style="color:var(--ink-4);cursor:help" title="该测点的存档没有口径版本标记（v${CURRENT_METRIC_VERSION} 之前测量）：字段含义按遗留口径回退解读，与当前口径的新读数不宜直接混比/拼图。"">旧口径</span>` : "";
+      ? ` <span class="flag-muted" title="该测点的存档没有口径版本标记（v${CURRENT_METRIC_VERSION} 之前测量）：字段含义按遗留口径回退解读，与当前口径的新读数不宜直接混比/拼图。">旧口径</span>` : "";
     const delBtn = retest
-      ? ` <button class="btn-ghost danger" style="padding:0 6px;font-size:12px" title="从历史存档中删除该测试点（不可恢复；服务端留删除审计）" data-act="delete" data-ident="${esc(JSON.stringify({model: p.model, scenario: p.scenario, ctx_target: p.ctx_target, inst_tokens: null, concurrency: p.concurrency, turn: null}))}">删除</button>` : "";
+      ? ` <button class="btn-ghost danger btn-xs" title="从历史存档中删除该测试点（不可恢复；服务端留删除审计）" data-act="delete" data-ident="${esc(JSON.stringify({model: p.model, scenario: p.scenario, ctx_target: p.ctx_target, inst_tokens: null, concurrency: p.concurrency, turn: null}))}">删除</button>` : "";
     const mainRow = `<tr class="${p.all_ok ? "" : "err"}"><td>${esc(p.model)}</td>`
       + `<td>${p.ctx_target ?? "-"}</td><td>${p.concurrency}</td>`
       + mediaMetricCells(p, kind).map(v => `<td>${v}</td>`).join("")
@@ -3639,16 +3831,16 @@ function renderMediaTable(sc, scRows, kind, withReps = true, titled = true, rete
     + `<thead>${head}</thead><tbody>${rows}</tbody></table></div></div>`;
 }
 
-/* ---------------- 折线图（类别轴 4K/8K/16K；agent 场景按轮次） ---------------- */
+/* ---------------- 折线图（类别轴：上下文档位 4K/8K/16K…；agent 旧链按轮次、矩阵按指令 tokens） ---------------- */
 /* 并发档固定调色板（≥8 色，按并发档序号取色）：旧实现只配了并发 1/2 两档，
    默认并发 [1,2,5] 时第 3 档起回退同一绿色，多条线同色不可区分 */
 const CONC_COLORS = ["#4F46E5", "#9333EA", "#DB2777", "#DC2626", "#0D9488",
-  "#CA8A04", "#16A34A", "#2563EB", "#7C3AED", "#0891B2"];
+  "#A16207", "#16A34A", "#2563EB", "#7C3AED", "#0891B2"];
 const CONC_SYMBOLS = ["circle", "triangle", "rect", "diamond", "emptyCircle", "pin"];
 /* agent 矩阵系列（缓存档）高对比调色板：默认矩阵 3~5 个缓存档，相邻序号必须
    一眼可辨——前四色跨色相取 蓝/红/黄/绿（CONC_COLORS 的 #1 靛 #2 紫 是同色系
    相邻色，用户实测分不清）。黄色取暗金 #CA8A04：纯黄在白底上不可读 */
-const MX_COLORS = ["#2563EB", "#DC2626", "#CA8A04", "#16A34A", "#9333EA",
+const MX_COLORS = ["#2563EB", "#DC2626", "#A16207", "#16A34A", "#9333EA",
   "#0891B2", "#DB2777", "#EA580C", "#4F46E5", "#0D9488"];
 /* 辅助系列（TTFT/均速/总吞吐/耗时）基色的深浅阶：索引 0 = 旧版原色（单并发矩阵
    观感不变），多并发档逐档加深，避免跨并发档同色同型 */
@@ -3657,6 +3849,25 @@ const AUX_SHADES = {
   green:  ["#16A34A", "#15803D", "#14532D", "#052E16", "#166534", "#3F6212"],
   orange: ["#EA580C", "#C2410C", "#9A3412", "#7C2D12", "#431407", "#854D0E"],
 };
+/* 图表主题色：canvas 不认 CSS 变量，集中定义且与 :root 令牌同源（此处字面值是
+   回退；init 时 syncChartTheme() 从 getComputedStyle 现读令牌覆盖——界面灰与
+   图表灰自此同源，暗色改造也只需动令牌） */
+const CHART = {ink:"#111827", gray:"#5F6775", border:"#D1D5DB", soft:"#E5E7EB",
+  grid:"#F3F4F6", amber:"#D97706"};
+function syncChartTheme(){
+  try{
+    const cs = getComputedStyle(document.documentElement);
+    const t = n => cs.getPropertyValue(n).trim();
+    const map = {ink:"--ink", gray:"--ink-3", border:"--border-2", soft:"--border", grid:"--border-3"};
+    for(const k in map) if(t(map[k])) CHART[k] = t(map[k]);
+  }catch(e){ /* 无真 DOM 的环境（测试桩）：留字面值回退 */ }
+}
+/* 导出模式图例自动换行的行数估算（仅离屏出图用；交互页走 scroll 图例用不到）：
+   系列名宽（全角≈12px、半角≈7px）+ 图标/间距 34px，按离屏图内宽 516px 折行 */
+const legendLinesOf = series => Math.max(1, Math.ceil(
+  series.reduce((a,s) => a + [...s.name].reduce((w,ch) => w + (ch.charCodeAt(0) > 0xFF ? 12 : 7), 34), 0) / 516));
+/* prefers-reduced-motion 传导到 echarts 动画（CSS 侧已有全局降级规则） */
+const chartAnim = () => !window.matchMedia || !matchMedia("(prefers-reduced-motion: reduce)").matches;
 /* forExport=true 用于卡片离屏出图：静态 PNG 里 scroll 图例的翻页器点不动，
    第二页系列会永久丢失，故图例改回自动换行的普通型并按行数抬高 grid */
 function buildChartOpt(pts, metric, title, forExport){
@@ -3675,7 +3886,7 @@ function buildChartOpt(pts, metric, title, forExport){
                      : isAgentMx ? [...new Set(pts.map(p=>p.inst_tokens))].sort((a,b)=>a-b)
                      : [...new Set(pts.map(p=>p.ctx_target))].sort((a,b)=>a-b);
   const cats = xs.map(x => isAgent ? "轮 " + x : ladderUnit !== null ? `${x}${ladderUnit}` : fmtK(x));
-  const findAt = (x, conc) => pts.find(q => (isAgent ? q.turn : q.ctx_target)===x && q.concurrency===conc);
+  const findAt = (x, conc) => pts.find(q => (isAgent ? q.turn : q.ctx_target)===x && q.concurrency===conc && q.all_ok !== false);
   const concs = [...new Set(pts.map(p=>p.concurrency))].sort((a,b)=>a-b);
   // 并发档按序号取色/取符号；辅助系列按同序号在基色深浅阶里取变体
   // （图例恒带「并发 N」前缀，单档运行也标——档位本身即有效信息）
@@ -3685,19 +3896,20 @@ function buildChartOpt(pts, metric, title, forExport){
   const auxColor = (shades, c) => shades[idxOf(c) % shades.length];
   const baseOpt = (series, yAxis, nLegendLines) => ({
     backgroundColor:"transparent",
-    title:{text:title, textStyle:{color:"#111827", fontSize:14, fontFamily:"Inter"}, left:12, top:6},
-    tooltip:{trigger:"axis", backgroundColor:"#fff", borderColor:"#E5E7EB",
-      textStyle:{color:"#111827", fontSize:12}, extraCssText:"box-shadow:0 4px 12px rgba(0,0,0,.08)",
+    animation: chartAnim(), aria:{enabled:true},
+    title:{text:title, textStyle:{color:CHART.ink, fontSize:14, fontFamily:"Inter"}, left:12, top:6},
+    tooltip:{trigger:"axis", backgroundColor:"#fff", borderColor:CHART.soft,
+      textStyle:{color:CHART.ink, fontSize:12}, extraCssText:"box-shadow:0 4px 12px rgba(0,0,0,.08)",
       valueFormatter: v => v==null ? "-" : round1(v).toLocaleString("en-US")},
     // 图例独占一行排在标题下方、右对齐：同处 top 行时 scroll 型图例（多系列触发
     // 翻页器）会横贯顶部压到左上角标题；scroll 型恒为单行，grid 顶距无需随系列数变化
     legend: forExport
-      ? {textStyle:{color:"#6B7280"}, top:30, right:12}
-      : {textStyle:{color:"#6B7280"}, top:30, right:12, type:"scroll"},
+      ? {textStyle:{color:CHART.gray}, top:30, right:12}
+      : {textStyle:{color:CHART.gray}, top:30, right:12, type:"scroll"},
     grid:{left:64, right:56, top: forExport ? 40 + 22*(nLegendLines ?? legendLines) : 64, bottom:40},
-    xAxis:{type:"category", name:isAgent?"轮次":isAgentMx?"指令上下文":ladderUnit !== null?"原文长度":"上下文", nameLocation:"middle", nameGap:26, data:cats,
-      nameTextStyle:{color:"#6B7280"}, axisLabel:{color:"#6B7280"},
-      axisLine:{lineStyle:{color:"#D1D5DB"}}, axisTick:{alignWithLabel:true}},
+    xAxis:{type:"category", name:isAgent?"轮次":isAgentMx?"指令":ladderUnit !== null?"原文长度":"上下文", nameLocation:"middle", nameGap:26, data:cats,
+      nameTextStyle:{color:CHART.gray}, axisLabel:{color:CHART.gray},
+      axisLine:{lineStyle:{color:CHART.border}}, axisTick:{alignWithLabel:true}},
     yAxis, series,
   });
   // agent 缓存×指令矩阵：x = 指令 tokens，系列 = 缓存档（按缓存档序号取色、
@@ -3707,14 +3919,14 @@ function buildChartOpt(pts, metric, title, forExport){
     const MX_METRICS = {
       ttft:   {getv: p => p.ttft_net_s ?? p.ttft_s, y: "TTFT（s）"},
       total:  {getv: p => p.total_s,                y: "总时长（s）"},
-      prefill:{getv: preOf,                         y: "Prefill（tok/s）"},
-      decode: {getv: decNetOf,                      y: "Decode（tok/s）"},
+      prefill:{getv: preOf,                         y: "Prefill(tok/s)"},
+      decode: {getv: decNetOf,                      y: "Decode(tok/s)"},
     };
     const mx = MX_METRICS[metric] || MX_METRICS.ttft;
     const insts = [...new Set(pts.map(p => p.inst_tokens))].sort((a,b)=>a-b);
     const caches = [...new Set(pts.map(p => p.ctx_target))].sort((a,b)=>a-b);
     const findMx = (i, c, x) => pts.find(q => q.inst_tokens === i
-      && q.ctx_target === x && q.concurrency === c);
+      && q.ctx_target === x && q.concurrency === c && q.all_ok !== false);
     const ltOf = c => ["solid","dashed","dotted"][concs.indexOf(c) % 3];
     const mseries = [];
     for(const c of concs) for(const x of caches){
@@ -3727,16 +3939,15 @@ function buildChartOpt(pts, metric, title, forExport){
         data: insts.map(i => { const p = findMx(i, c, x); return p ? (mx.getv(p) ?? null) : null; }),
       });
     }
-    const legendWMx = mseries.reduce((a,s) =>
-      a + [...s.name].reduce((w,ch) => w + (ch.charCodeAt(0) > 0xFF ? 12 : 7), 34), 0);
-    const legendLinesMx = Math.max(1, Math.ceil(legendWMx / 516));
+    const legendLinesMx = legendLinesOf(mseries);
     return baseOpt(mseries, [{type:"value",
-      axisLabel:{color:"#6B7280", formatter:v=>v>=1000?(v/1000)+"K":v},
-      splitLine:{lineStyle:{color:"#F3F4F6"}}}], legendLinesMx);
+      axisLabel:{color:CHART.gray, formatter:v=>v>=1000?round1(v/1000)+"K":v},
+      splitLine:{lineStyle:{color:CHART.grid}}}], legendLinesMx);
   }
   // agent 输入构成/缓存命中按表格展示（renderCharts 里的 .turntable），不再出图
   const isPre = metric==="prefill";
   const ttftOf = p => p.ttft_net_s ?? p.ttft_s;   // 与 prefill 同取净口径
+  //（批级毛口径均速 preGrossOf 在 §pure 区，与明细表均速列同字段）
   const decPeakOf = p => p.decode_peak_tok_s;   // 1s 滑窗交付峰值（吞吐峰值列同字段）
   // 旧存档无 decode_peak_tok_s 字段：吞吐峰值系列整图不出（避免全 null 空线占位）
   const hasPeak = pts.some(p => p.decode_peak_tok_s != null);
@@ -3763,15 +3974,15 @@ function buildChartOpt(pts, metric, title, forExport){
     if(isPre){
       if(!concChart){
         return [
-          mk(preOf, c, isAgent ? "增量 Prefill（tok/s）" : "Prefill（tok/s）", "solid", baseColor),
+          mk(preOf, c, isAgent ? "增量 Prefill(tok/s)" : "Prefill(tok/s)", "solid", baseColor),
           mk(ttftOf, c, "TTFT（s）", "dashed", auxColor(AUX_SHADES.amber, c), 1),
         ];
       }
-      // 多发：图题「Prefill」；系列 = Prefill 均速（左轴实线）+ 总耗时
-      //（右轴虚线，即批级 prefill 总时长 prefill_span_s 口径，净口径优先）；
-      // 图例恒带并发档前缀
+      // 多发：图题「Prefill」；系列 = Prefill 均速（左轴实线，批级毛口径
+      // preGrossOf，与明细表均速列同值）+ 总耗时（右轴虚线，即批级 prefill
+      // 总时长 prefill_span_s 口径，净口径优先）；图例恒带并发档前缀
       return [
-        mk(preOf, c, `并发 ${c} ${isAgent ? "增量 " : ""}Prefill 均速（tok/s）`, "solid", baseColor),
+        mk(preGrossOf, c, `并发 ${c} ${isAgent ? "增量 " : ""}Prefill 均速(tok/s)`, "solid", baseColor),
         mk(ttftOf, c, `并发 ${c} 总耗时（s）`, "dashed", auxColor(AUX_SHADES.amber, c), 1),
       ];
     }
@@ -3781,13 +3992,13 @@ function buildChartOpt(pts, metric, title, forExport){
       const noDiff = pts.every(p => decNetOf(p) === decAvgOf(p));
       if(noDiff){
         return [
-          mk(decNetOf, c, "速度（tok/s）", "solid", baseColor),
+          mk(decNetOf, c, "速度(tok/s)", "solid", baseColor),
           mk(decNetTimeOf, c, "耗时（s）", "dashed", auxColor(AUX_SHADES.amber, c), 1),
         ];
       }
       return [
-        mk(decNetOf, c, "净速（tok/s）", "solid", baseColor),
-        mk(decAvgOf, c, "均速（tok/s）", "solid", auxColor(AUX_SHADES.green, c)),
+        mk(decNetOf, c, "净速(tok/s)", "solid", baseColor),
+        mk(decAvgOf, c, "均速(tok/s)", "solid", auxColor(AUX_SHADES.green, c)),
         mk(decNetTimeOf, c, "净耗时（s）", "dashed", auxColor(AUX_SHADES.amber, c), 1),
         mk(decTotalTimeOf, c, "总耗时（s）", "dashed", auxColor(AUX_SHADES.orange, c), 1),
       ];
@@ -3796,23 +4007,20 @@ function buildChartOpt(pts, metric, title, forExport){
     // 峰值（左轴点线，1s 滑窗交付峰值 decode_peak_tok_s，全图无该字段的旧
     // 存档不出此系列）+ 总耗时（右轴虚线，批级 decode_span_s 口径）
     const s = [
-      mk(decTotalOf, c, `并发 ${c} 总吞吐（tok/s）`, "solid", baseColor),
+      mk(decTotalOf, c, `并发 ${c} 总吞吐(tok/s)`, "solid", baseColor),
     ];
     if(hasPeak)
-      s.push(mk(decPeakOf, c, `并发 ${c} 吞吐峰值（tok/s）`, "dotted", auxColor(AUX_SHADES.green, c)));
+      s.push(mk(decPeakOf, c, `并发 ${c} 吞吐峰值(tok/s)`, "dotted", auxColor(AUX_SHADES.green, c)));
     s.push(mk(decTotalTimeOf, c, `并发 ${c} 总耗时（s）`, "dashed", auxColor(AUX_SHADES.orange, c), 1));
     return s;
   });
   const speedAxis = {type:"value",
-    axisLabel:{color:"#6B7280", formatter:v=>v>=1000?(v/1000)+"K":v},
-    splitLine:{lineStyle:{color:"#F3F4F6"}}};
-  // 导出模式图例自动换行，行数决定 grid 顶距：系列名宽（全角≈12px、半角≈7px）
-  // + 图标/间距 34px，按离屏图内宽 516px（540 − 左右边距）折行估算
-  const legendW = series.reduce((a,s) =>
-    a + [...s.name].reduce((w,ch) => w + (ch.charCodeAt(0) > 0xFF ? 12 : 7), 34), 0);
-  const legendLines = Math.max(1, Math.ceil(legendW / 516));
+    axisLabel:{color:CHART.gray, formatter:v=>v>=1000?round1(v/1000)+"K":v},
+    splitLine:{lineStyle:{color:CHART.grid}}};
+  // 导出模式图例行数决定 grid 顶距（估算公式见 legendLinesOf）
+  const legendLines = legendLinesOf(series);
   return baseOpt(series, [speedAxis,
-    {type:"value", axisLabel:{color:"#D97706"}, splitLine:{show:false}}]);
+    {type:"value", axisLabel:{color:CHART.amber}, splitLine:{show:false}}]);
 }
 /* 媒体场景折线图（ADR-0020）：x 轴=场景阶梯（秒音频/张图片/字文本）；
    metric "prefill" 槽位画主指标（asr/tts=倍速 speed_x，ocr=单张时延 ms_per_img，
@@ -3827,7 +4035,7 @@ function buildMediaChartOpt(pts, metric, title, forExport, kind){
     ? (kind === "ocr" ? p => p.ms_per_img : p => p.speed_x)
     : (kind === "ocr" ? p => p.img_per_s : p => p.audio_min_per_min);
   const yLabel = main
-    ? (kind === "ocr" ? "单张时延（ms）" : "倍速（×）")
+    ? (kind === "ocr" ? "单张时延(ms)" : "倍速(×)")
     : (kind === "ocr" ? "吞吐（张/秒）" : "吞吐（音频分钟/分钟）");
   const concs = [...new Set(pts.map(p => p.concurrency))].sort((a,b) => a-b);
   const single = concs.length === 1;   // 单并发时图例直接标指标名
@@ -3838,32 +4046,30 @@ function buildMediaChartOpt(pts, metric, title, forExport, kind){
       type:"line", symbolSize:8, symbol: CONC_SYMBOLS[i % CONC_SYMBOLS.length] || "circle",
       lineStyle:{width:2}, itemStyle:{color: CONC_COLORS[i % CONC_COLORS.length]},
       data: xs.map(x => {
-        const p = pts.find(q => q.ctx_target === x && q.concurrency === c);
+        const p = pts.find(q => q.ctx_target === x && q.concurrency === c && q.all_ok !== false);
         return p ? (getv(p) ?? null) : null;   // 空值（null/undefined）点跳过
       }),
     };
   });
   const vals = pts.map(getv).filter(v => v != null);
   const logAxis = main && kind !== "ocr" && vals.length && vals.every(v => v > 0);
-  // 导出模式图例自动换行，行数决定 grid 顶距（与 llm 图同估算）
-  const legendW = series.reduce((a,s) =>
-    a + [...s.name].reduce((w,ch) => w + (ch.charCodeAt(0) > 0xFF ? 12 : 7), 34), 0);
-  const legendLines = Math.max(1, Math.ceil(legendW / 516));
+  const legendLines = legendLinesOf(series);   // 导出模式行数（与 llm 图同估算）
   return {
     backgroundColor:"transparent",
-    title:{text:title, textStyle:{color:"#111827", fontSize:14, fontFamily:"Inter"}, left:12, top:6},
-    tooltip:{trigger:"axis", backgroundColor:"#fff", borderColor:"#E5E7EB",
-      textStyle:{color:"#111827", fontSize:12}, extraCssText:"box-shadow:0 4px 12px rgba(0,0,0,.08)",
+    animation: chartAnim(), aria:{enabled:true},
+    title:{text:title, textStyle:{color:CHART.ink, fontSize:14, fontFamily:"Inter"}, left:12, top:6},
+    tooltip:{trigger:"axis", backgroundColor:"#fff", borderColor:CHART.soft,
+      textStyle:{color:CHART.ink, fontSize:12}, extraCssText:"box-shadow:0 4px 12px rgba(0,0,0,.08)",
       valueFormatter: v => v==null ? "-" : round1(v).toLocaleString("en-US")},
     legend: forExport
-      ? {textStyle:{color:"#6B7280"}, top:30, right:12}
-      : {textStyle:{color:"#6B7280"}, top:30, right:12, type:"scroll"},
+      ? {textStyle:{color:CHART.gray}, top:30, right:12}
+      : {textStyle:{color:CHART.gray}, top:30, right:12, type:"scroll"},
     grid:{left:64, right:56, top: forExport ? 40 + 22*legendLines : 64, bottom:40},
-    xAxis:{type:"category", name: esc(unit || "档位"), nameLocation:"middle", nameGap:26, data:cats,
-      nameTextStyle:{color:"#6B7280"}, axisLabel:{color:"#6B7280"},
-      axisLine:{lineStyle:{color:"#D1D5DB"}}, axisTick:{alignWithLabel:true}},
-    yAxis:{type: logAxis ? "log" : "value", axisLabel:{color:"#6B7280"},
-      splitLine:{lineStyle:{color:"#F3F4F6"}}},
+    xAxis:{type:"category", name: unit || "档位", nameLocation:"middle", nameGap:26, data:cats,
+      nameTextStyle:{color:CHART.gray}, axisLabel:{color:CHART.gray},
+      axisLine:{lineStyle:{color:CHART.border}}, axisTick:{alignWithLabel:true}},
+    yAxis:{type: logAxis ? "log" : "value", axisLabel:{color:CHART.gray},
+      splitLine:{lineStyle:{color:CHART.grid}}},
     series,
   };
 }
@@ -3874,9 +4080,10 @@ function renderCharts(){
   state.charts.forEach(c => c.dispose());
   state.charts = [];
   box.innerHTML = "";
-  const models = [...new Set(allPoints().map(p => p.model))];
+  const rows = allPoints();   // 排一次序，模型分组复用（原先每模型各排一遍）
+  const models = [...new Set(rows.map(p => p.model))];
   for(const m of models){
-    const pts = allPoints().filter(p => p.model === m);
+    const pts = rows.filter(p => p.model === m);
     const scens = [...new Set(pts.map(p => p.scenario))];
     const blk = document.createElement("div");
     blk.className = "chart-model";
@@ -3886,13 +4093,15 @@ function renderCharts(){
         // agent 缓存×指令矩阵场景出四张图（TTFT/总时长/Prefill/Decode，
         // 与测速卡片一致）；其他场景两张图不变
         const isMxSc = pts.some(p => p.scenario === sc && p.inst_tokens != null);
+        const scenName = SCEN_LABEL[sc] || sc;
+        const aria = t => `${m} · ${scenName} · ${t}折线图`;   // 读屏标签带模型/场景/指标
         const boxes = isMxSc
-          ? [["ttft", "TTFT 折线图"], ["total", "总时长折线图"],
-             ["prefill", "Prefill 折线图"], ["decode", "Decode 折线图"]]
-            .map(([mt, aria]) => `<div class="chartbox" data-scen="${esc(sc)}" data-metric="${mt}" role="img" aria-label="${aria}"></div>`)
+          ? [["ttft", "TTFT"], ["total", "总时长"],
+             ["prefill", "Prefill"], ["decode", "Decode"]]
+            .map(([mt, t]) => `<div class="chartbox" data-scen="${esc(sc)}" data-metric="${mt}" role="img" aria-label="${esc(aria(t))}"></div>`)
             .join("")
-          : `<div class="chartbox" data-scen="${esc(sc)}" data-metric="prefill" role="img" aria-label="主指标折线图"></div>
-          <div class="chartbox" data-scen="${esc(sc)}" data-metric="decode" role="img" aria-label="并发吞吐折线图"></div>`;
+          : `<div class="chartbox" data-scen="${esc(sc)}" data-metric="prefill" role="img" aria-label="${esc(aria("主指标"))}"></div>
+          <div class="chartbox" data-scen="${esc(sc)}" data-metric="decode" role="img" aria-label="${esc(aria("并发吞吐"))}"></div>`;
         return `<div class="cm-scen">
         <div class="cm-scen-name">${SCEN_LABEL[sc] || esc(sc)}</div>
         <div class="grid2">${boxes}</div>
@@ -3911,7 +4120,9 @@ function renderCharts(){
         : (sk === "asr" || sk === "tts") ? {prefill: "倍速", decode: "并发吞吐"}
         : isMx ? {ttft: "TTFT", total: "总时长", prefill: "Prefill", decode: "Decode"}
         : {prefill: "Prefill", decode: "Decode"};
-      ch.setOption(buildChartOpt(scPts, el.dataset.metric, titles[el.dataset.metric]), true);
+      // 交互页走 scroll 图例（forExport=false）：翻页器可点、grid 顶距恒定，
+      // 不随视口宽度误估换行行数；仅离屏导出路径用换行估算（captureScenarioCharts）
+      ch.setOption(buildChartOpt(scPts, el.dataset.metric, titles[el.dataset.metric]), false);
       state.charts.push(ch);
     });
     // 图末详细数据表：agent 旧链给逐轮输入构成（输入 = 缓存命中 + 增量计算）；
@@ -3945,10 +4156,10 @@ function turnTable(scPts){
     const est = hs === "est" ? "≈" : "";
     const phase2 = (p.turn_phase ?? (p.turn_delta >= 4096 ? 2 : 1)) === 2;
     return `<tr class="${p.all_ok ? "" : "err"}">`
-      + `<td>轮 ${p.turn}${isColdTurn(p) ? " <small style='color:var(--yellow)'>冷启动</small>" : ""}${phase2 ? " <small style='color:var(--ink-4)'>长文本</small>" : ""}${multi ? ` · 并发${p.concurrency}` : ""}</td>`
+      + `<td>轮 ${p.turn}${isColdTurn(p) ? " <small class='note-warn'>冷启动</small>" : ""}${phase2 ? " <small class='note-muted'>长文本</small>" : ""}${multi ? ` · 并发${p.concurrency}` : ""}</td>`
       + `<td>${p.turn_delta != null ? "+" + fmtK(p.turn_delta) : "-"}</td>`
       + `<td>${p.prompt_tokens != null ? fmtK(p.prompt_tokens) : "-"}${ctxDevMarkOf(p.ctx_target, p.prompt_tokens)}</td>`
-      + (hs === "unknown" ? `<td style="color:var(--ink-4)">未回传</td><td>—</td><td>—</td>`
+      + (hs === "unknown" ? `<td class="note-muted">未回传</td><td>—</td><td>—</td>`
                  : `<td>${est}${fmtK(hit)}</td><td>${est}${miss != null ? fmtK(miss) : "-"}</td><td>${pct}%</td>`)
       + `<td>${p.ttft_s ?? "-"}</td>`
       + `<td>${preOf(p) ?? "-"}${prePhysMarkOf(p)}</td>`
@@ -3957,7 +4168,7 @@ function turnTable(scPts){
   }).join("");
   return `<table><thead><tr><th>轮次</th><th>新增 tokens</th><th>输入 tokens</th>`
     + `<th>缓存命中</th><th>增量计算</th><th>命中率</th><th>TTFT(s)</th>`
-    + `<th title="增量口径：（prompt − 前缀命中）÷ TTFT——暖轮命中部分走缓存不重算，仅计增量计算量；冷启动轮为全量口径">Prefill(tok/s)</th><th title="净口径：completion tokens ÷ 空窗校正窗口（相邻内容块间隔 >1s 的部分逐段封顶）">净Decode(tok/s)</th><th>输出 tokens</th></tr></thead><tbody>${rows}</tbody></table>`
+    + `<th title="增量口径：（prompt − 前缀命中）÷ TTFT——暖轮命中部分走缓存不重算，仅计增量计算量；冷启动轮为全量口径">Prefill(tok/s)</th><th title="净口径：completion tokens ÷ 空窗校正窗口（相邻内容块间隔 >1s 的部分逐段封顶）">净速(tok/s)</th><th>输出 tokens</th></tr></thead><tbody>${rows}</tbody></table>`
     + (anyEst ? `<div class="hint">≈ 网关未回传缓存命中字段，但 TTFT 显著低于全量重算预期（有缓存迹象），命中/增量按链内差分估算</div>` : "")
     + (anyMiss ? `<div class="hint">「未回传」= 网关未回传且 TTFT 随全量 prompt 增长（无缓存迹象），命中未知、Prefill 按全量口径；真值需服务端/网关透出 cached_tokens</div>` : "");
 }
@@ -3975,7 +4186,7 @@ function agentMatrixTable(scPts){
     const pct = (p.prompt_tokens && hit) ? Math.round(hit / p.prompt_tokens * 100) : 0;
     const est = hs === "est" ? "≈" : "";
     const hitCell = hs === "unknown"
-      ? `<td style="color:var(--ink-4)">未回传</td>`
+      ? `<td class="note-muted">未回传</td>`
       : `<td>${est}${fmtK(hit)}${hit ? `<small> · ${pct}%</small>` : ""}</td>`;
     return `<tr class="${p.all_ok ? "" : "err"}">`
       + `<td>${fmtK(p.ctx_target)}${multi ? ` · 并发${p.concurrency}` : ""}</td>`
@@ -3989,7 +4200,7 @@ function agentMatrixTable(scPts){
   }).join("");
   return `<table><thead><tr><th>已缓存上下文</th><th>指令 tokens</th><th>输入 tokens</th>`
     + `<th>缓存命中</th><th>TTFT(s)</th>`
-    + `<th title="净口径：completion tokens ÷ 空窗校正窗口（相邻内容块间隔 >1s 的部分逐段封顶）">净Decode(tok/s)</th>`
+    + `<th title="净口径：completion tokens ÷ 空窗校正窗口（相邻内容块间隔 >1s 的部分逐段封顶）">净速(tok/s)</th>`
     + `<th title="端到端总时长：请求发出 → 末 token（TTFT + decode 全程）">总时长(s)</th>`
     + `<th>输出 tokens</th></tr></thead><tbody>${rows}</tbody></table>`
     + (anyEst ? `<div class="hint">≈ 网关未回传缓存命中字段，但 TTFT 显著低于同规模全量预期 / 相对零缓存档走平 / 本轮已证实缓存生效（有缓存迹象），命中按预热实测 prompt 估算</div>` : "")
@@ -4024,7 +4235,7 @@ function ctxTable(scPts){
         + `<th title="批级口径：Σ输出 tokens ÷ decode 有效时长（decode_span_s）">Decode 总吞吐(tok/s)</th>`
         + `<th title="批级 decode 有效时长：全批最晚首 token → 最晚末 token（decode_span_s，max 口径）">Decode 总耗时(s)</th>`
       : `<th>TTFT(s)</th><th title="全量口径：prompt tokens ÷（TTFT − RTT）">Prefill(tok/s)</th>`
-        + `<th title="净口径：completion tokens ÷ 空窗校正窗口（相邻内容块间隔 >1s 的部分逐段封顶）">净Decode(tok/s)</th>`)
+        + `<th title="净口径：completion tokens ÷ 空窗校正窗口（相邻内容块间隔 >1s 的部分逐段封顶）">净速(tok/s)</th>`)
     + `<th>输出 tokens</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 /* 媒体场景逐档位读数表（与 ctxTable 同位）：asr=时长/RTF/倍速/吞吐/输出字符；
@@ -4095,18 +4306,15 @@ function cardTurnTable(pts){
 /* 卡片内 agent 矩阵表（缓存×指令新口径，导出 PNG 随卡片走）：行=已缓存
    上下文，列=指令长度，格按 metric 取 TTFT(s)/总时长(s)/Prefill/Decode 速度
    ——agent 单步延迟/吞吐核心画像。多并发矩阵取最低并发档（标题注明）；
-   decode/总时长明细走页面矩阵表 */
-/* 卡片矩阵选档：state.cardTable 的 "mx-" + 按固定顺序 join 的指标集合（多选，
-   如 mx-ttft-decode；"mx-" 空集 = 不出矩阵表）。旧单值形态 mx-ttft 按分隔符
-   拆成单元素集合解析（防御，仅内存态）；none/agg/full 档回退默认
-   [ttft, decode]（保持默认即有 TTFT + Decode 两张矩阵的样子） */
+   四种指标矩阵均可多选堆叠（选档集合见下方 cardMxMetrics） */
+/* 卡片矩阵选档：state.cardTable.mx 即已选指标集合（null = 默认 [ttft, decode]，
+   保持默认即有 TTFT + Decode 两张矩阵的样子；空数组 = 不出矩阵表），
+   渲染按 MX_ORDER 固定顺序归一 */
 const MX_ORDER = ["ttft", "total", "prefill", "decode"];
 const MX_NAME = {ttft:"TTFT", total:"总时长", prefill:"Prefill", decode:"Decode"};
-const cardMxMetrics = () => {
-  if(!String(state.cardTable).startsWith("mx-")) return ["ttft", "decode"];
-  const set = new Set(String(state.cardTable).slice(3).split("-"));
-  return MX_ORDER.filter(m => set.has(m));
-};
+const cardMxMetrics = () => state.cardTable.mx === null
+  ? ["ttft", "decode"]
+  : MX_ORDER.filter(m => state.cardTable.mx.includes(m));
 /* 矩阵表多选堆叠：按固定顺序渲染已选矩阵集合（全部取消勾选 = 不出矩阵表） */
 function cardAgentMatrixTables(pts){
   return cardMxMetrics().map(m => cardAgentMatrixTable(pts, m)).join("");
@@ -4146,6 +4354,30 @@ function modelInfo(model){
   return state.cfg?.model_info?.[model] || resolveDeployment(currentProvider()?.deployments, model) || null;
 }
 /* 生成单个模型的卡片 HTML（全场景合并）；多模型时由 genCards 平铺多张 */
+/* 导出卡片的符号图例：⚠/≈/⇢/✂ 等标记的含义原本都收在 title 悬浮里——
+   PNG 是静态位图，悬浮全部丢失，分享对象无法解读。故扫描卡片数据实际出现的
+   标记（与 pointRow 徽标同字段判定），按需拼一行纯文本图例附进脚注；
+   页面对应位置同时受益（触屏也没有 hover） */
+function cardSymbolNotes(pts){
+  const L = [];
+  const has = f => pts.some(f);
+  const hasRep = f => pts.some(p => (p.reps || []).some(f) || (p.reps_discarded || []).some(f));
+  if(has(p => p.ctx_edge)) L.push("✂裁减 = 贴边裁减档：构造量裁到 max_ctx，读数按裁后实测量");
+  if(has(p => p.spliced_from)) L.push("⇢拼接 = 该点由其他存档拼接而来，非本次实测");
+  if(has(p => p.ctx_retry != null)) L.push("↻校正重测 = 构建偏离超 ±10%，已按实测密度校正重测");
+  if(has(isLegacyMetric)) L.push("旧口径 = 遗留口径存档，不宜与当前口径混比");
+  if(has(p => p.cache_reported === false && p.cache_hit_tokens)) L.push("≈ = 缓存命中为估算口径（网关未回传真值）");
+  if(has(p => p.stall_s) || hasRep(r => r.stall_s)) L.push("⚠停滞 = decode 中途停滞，只标注不改读数");
+  if(has(p => p.max_gap_s > 1) || hasRep(r => r.max_gap_s > 1)) L.push("⚠空窗 / * = 空窗超出部分已在净口径封顶扣除");
+  if(has(p => p.decode_burst) || hasRep(r => r.decode_burst)) L.push("⚠突发 = 突发交付，读数虚高不可信");
+  if(has(p => p.inst_tokens == null && p.turn == null && ctxDevMarkOf(p.ctx_target, p.prompt_tokens)))
+    L.push("⚠偏 = 实测 prompt 与目标档位偏差超 ±10%");
+  if(has(preUntrustedOf)) L.push("⚠不可信 = Prefill 读数超物理界，已从统计剔除");
+  if(has(fakeOkOf)) L.push("⚠空回复 = 疑似网关伪报成功，读数不可用于比较");
+  if(has(p => p.anomaly)) L.push("⚠异常 = 异常输出按实留档，读数需谨慎参考");
+  if(has(p => (p.reps_discarded || []).length)) L.push("删除线 = 异常首测整批作废的弃测留痕");
+  return L;
+}
 function cardHTML(model){
   const all = allPoints().filter(p => p.model===model);
   const scens = [...new Set(all.map(p=>p.scenario))];
@@ -4355,10 +4587,10 @@ function cardHTML(model){
       <div class="sc-scen-head"><span class="bar"></span><span class="name">${SCEN_LABEL[sc]||esc(sc)}</span></div>
       <div class="sc-stats">${cells.join("")}</div>
       <div class="sc-charts">
-        ${chartImgs.ttft ? `<div class="sc-chart-cell"><img src="${chartImgs.ttft}" alt="${esc(sc)} TTFT 曲线"></div>` : ""}
-        ${chartImgs.total ? `<div class="sc-chart-cell"><img src="${chartImgs.total}" alt="${esc(sc)} 总时长曲线"></div>` : ""}
-        ${chartImgs.prefill ? `<div class="sc-chart-cell"><img src="${chartImgs.prefill}" alt="${esc(sc)} prefill 曲线"></div>` : ""}
-        ${chartImgs.decode ? `<div class="sc-chart-cell"><img src="${chartImgs.decode}" alt="${esc(sc)} decode 曲线"></div>` : ""}
+        ${chartImgs.ttft ? `<div class="sc-chart-cell"><img src="${chartImgs.ttft}" alt="${SCEN_LABEL[sc]||esc(sc)} TTFT 曲线"></div>` : ""}
+        ${chartImgs.total ? `<div class="sc-chart-cell"><img src="${chartImgs.total}" alt="${SCEN_LABEL[sc]||esc(sc)} 总时长曲线"></div>` : ""}
+        ${chartImgs.prefill ? `<div class="sc-chart-cell"><img src="${chartImgs.prefill}" alt="${SCEN_LABEL[sc]||esc(sc)} Prefill 曲线"></div>` : ""}
+        ${chartImgs.decode ? `<div class="sc-chart-cell"><img src="${chartImgs.decode}" alt="${SCEN_LABEL[sc]||esc(sc)} Decode 曲线"></div>` : ""}
       </div>
       ${sc === "agent" ? (isAgentMx ? cardAgentMatrixTables(pts) : cardTurnTable(pts)) : ""}
     </div>`;
@@ -4371,7 +4603,7 @@ function cardHTML(model){
     footNotes.push("Prefill 速度 = 实际 prompt tokens ÷（TTFT − 网络往返基线）"
       + (all.some(p => p.turn != null || p.inst_tokens != null) ? "，agent 场景缓存档为增量口径（（prompt − 前缀命中）÷ TTFT）" : ""));
     if(all.some(p => decNetOf(p) !== decAvgOf(p)))
-      footNotes.push("净 Decode = 生成 tokens ÷ 校正窗口（相邻内容块间隔 >1s 的部分封顶）· 均 Decode = 生成 tokens ÷ 原始窗口（含停滞）");
+      footNotes.push("Decode 净速 = 生成 tokens ÷ 校正窗口（相邻内容块间隔 >1s 的部分封顶）· Decode 均速 = 生成 tokens ÷ 原始窗口（含停滞）");
     const nPhys = all.filter(p => preOf(p) != null && preOf(p) > PRE_PHYS_GATE).length;
     if(nPhys) footNotes.push(`${nPhys} 点 Prefill 读数超物理界（> ${fmtNum(PRE_PHYS_GATE)} tok/s）已从均值/范围统计剔除`);
   } else if(runKind === "ocr"){
@@ -4379,6 +4611,10 @@ function cardHTML(model){
   } else {
     footNotes.push("RTF = 净耗时 ÷ 音频时长 · 倍速 = 音频时长 ÷ 净耗时 · 并发吞吐 = 总音频量 ÷ 批窗口（音频分钟/分钟）");
   }
+  if(all.some(p => p.all_ok === false))
+    footNotes.push("失败测点不入曲线（出断点），读数见明细表标红行");
+  const symNotes = cardSymbolNotes(all);
+  if(symNotes.length) footNotes.push("符号：" + symNotes.join("；"));
   const footHtml = `<div class="sc-foot">${footNotes.join(" · ")} · 由 <a href="https://${REPO_URL}" target="_blank" rel="noopener">LLM-SPEED</a> 生成 · ${REPO_URL}</div>`;
 
   return `<div class="speed-card" data-model="${esc(model)}">
@@ -4388,7 +4624,7 @@ function cardHTML(model){
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
         </div>
         <div>
-          <div class="sc-title">LLM 测速卡片</div>
+          <div class="sc-title">${runKind === "llm" ? "LLM 测速卡片" : `${esc(KIND_LABEL[runKind] || runKind)}测速卡片`}</div>
           <div class="sc-sub">Local LLM Speed Report · ${runKind === "llm" ? "prefill / decode" : esc(KIND_LABEL[runKind] || runKind)}</div>
         </div>
       </div>
@@ -4410,7 +4646,7 @@ function cardHTML(model){
 function genCards(noScroll){
   state.cmp = null;
   const models = [...new Set(allPoints().map(p => p.model))];
-  if(!models.length){ alert("当前暂无测速结果"); return; }
+  if(!models.length){ setPill("当前暂无测速结果", "err"); return; }
   $("#cardWrap").innerHTML = models.map(cardHTML).join("");
   $("#btnDl").disabled = false;
   if(!noScroll) $("#cardWrap").scrollIntoView({behavior:"smooth", block:"nearest"});
@@ -4534,6 +4770,7 @@ function openCardLegend(btn){
   pop.style.top = Math.min(r.bottom + 6, innerHeight - pop.offsetHeight - 8) + "px";
   pop.style.left = Math.max(8, Math.min(r.right - pop.offsetWidth, innerWidth - pop.offsetWidth - 8)) + "px";
   btn.setAttribute("aria-expanded", "true");
+  pop.querySelector("input")?.focus();   // 键盘用户 Tab 序直达浮层（挂 body 末尾不在自然序内）
   // 勾选变化：勾上=从隐藏记忆里删该系列，取消=记隐藏，随后重渲染当前卡片
   pop.addEventListener("change", e => {
     const t = e.target;
@@ -4544,7 +4781,7 @@ function openCardLegend(btn){
   });
   // 点外部 / ESC 关闭（capture 监听挂 document，随浮层关闭一并移除）
   const onDoc = e => { if(!pop.contains(e.target) && !btn.contains(e.target)) closeCardLegend(); };
-  const onKey = e => { if(e.key === "Escape") closeCardLegend(); };
+  const onKey = e => { if(e.key === "Escape") closeCardLegend(true); };
   document.addEventListener("pointerdown", onDoc, true);
   document.addEventListener("keydown", onKey, true);
   pop._off = () => {
@@ -4552,13 +4789,16 @@ function openCardLegend(btn){
     document.removeEventListener("keydown", onKey, true);
   };
 }
-function closeCardLegend(){
+function closeCardLegend(restoreFocus){
   const pop = $("#cardLegendPop");
   if(!pop) return;
   if(pop._off) pop._off();
   pop.remove();
+  const opener = document.querySelector('.sc-cfg-btn[aria-expanded="true"]');
   document.querySelectorAll('.sc-cfg-btn[aria-expanded="true"]')
     .forEach(b => b.setAttribute("aria-expanded", "false"));
+  // Esc 关闭才还焦（键盘路径）；外部点击关闭随指针走，不抢焦点
+  if(restoreFocus && opener && opener.isConnected) opener.focus();
 }
 /* 单卡重渲染（图例勾选后即时应用）：整体替换卡片 DOM，图表重走离屏出图，
    选择从 state.cardLegend 读回；对比卡跨模型合图（无单模型键），命中 data-cmp 全卡重渲 */
@@ -4568,17 +4808,33 @@ function refreshCard(model){
   const el = document.querySelector(`#cardWrap .speed-card[data-model="${CSS.escape(model)}"]`);
   if(el) el.outerHTML = cardHTML(model);
 }
+/* html2canvas 按需加载：仅「下载 PNG」用到，不为其付首屏解析成本（vendor
+   文件仍在本地，加载是同源一次请求）。多次点击共享同一 Promise，不重复注入 */
+let _h2cP = null;
+function loadHtml2canvas(){
+  if(window.html2canvas) return Promise.resolve(true);
+  if(!_h2cP) _h2cP = new Promise(res => {
+    const s = document.createElement("script");
+    s.src = "/static/vendor/html2canvas.min.js";
+    s.onload = () => res(!!window.html2canvas);
+    s.onerror = () => res(false);
+    document.head.appendChild(s);
+  });
+  return _h2cP;
+}
 /* 多模型卡片合并为单张纵向长图导出（ADR-0011，部分取代旧版逐张导出）：
    异步渲染后再多次 a.click() 会被浏览器当作无手势的多文件下载拦截；
    先逐卡 canvas 渲染、再拼接成一张图一次点击，可靠且单文件更易分享 */
 async function downloadCard(){
-  if(!window.html2canvas){ setPill("html2canvas 未加载（图表库缺失），无法导出 PNG", "err"); return; }
   const btn = $("#btnDl");
   if(btn.disabled) return;   // 重入保护：双击不并发跑两次导出
   const cards = [...document.querySelectorAll("#cardWrap .speed-card")];
   if(!cards.length) return;
+  const btnTxt = btn.querySelector("span");
   btn.disabled = true;   // 导出期间禁用（含 finally 恢复），按钮不再响应重复点击
+  if(btnTxt) btnTxt.textContent = "导出中…";
   try{
+    if(!await loadHtml2canvas()){ setPill("html2canvas 未加载（static/vendor/ 不完整），无法导出 PNG", "err"); return; }
     const parts = [];
     for(const card of cards){
       // 卡片配置工具组（图例/明细按钮）是编辑控件，不入导出图（图例选择本身已渲染在图表里）
@@ -4620,6 +4876,7 @@ async function downloadCard(){
     setPill("导出 PNG 失败：" + (e && e.message || e), "err");
   }finally{
     btn.disabled = false;
+    if(btnTxt) btnTxt.textContent = "下载 PNG";
   }
 }
 
@@ -4753,7 +5010,7 @@ async function downloadAnomalyLog(){
    耗时口径回单次卡片查看 */
 /* 运行配色：跨次对比的首要区分维度，前四色取两两高对比组合（靛蓝/橙/青/品红）。
    不复用 CONC_COLORS——其 #1 靛 #2 紫是相邻色，双运行对比时几乎不可分辨 */
-const RUN_COLORS = ["#4F46E5", "#EA580C", "#0D9488", "#DB2777", "#CA8A04",
+const RUN_COLORS = ["#4F46E5", "#EA580C", "#0D9488", "#DB2777", "#A16207",
   "#2563EB", "#7C3AED", "#16A34A", "#DC2626", "#0891B2"];
 const REPO_URL = "github.com/zify9000/LLM-SPEED";   // 卡片页脚出处链接
 /* cmpLegendKey 已移入上方 §pure 区域 */
@@ -4851,7 +5108,7 @@ async function cmpConfirm(){
 function genCmpCards(noScroll){
   const runs = (state.cmp || {}).runs || [];
   if(!runs.length){ state.cmp = null; return; }
-  if(!runs.some(r => r.results.length)){ alert("所选存档没有可对比的测速点"); return; }
+  if(!runs.some(r => r.results.length)){ setPill("所选存档没有可对比的测速点", "err"); return; }
   $("#cardWrap").innerHTML = cmpCardHTML();
   $("#btnDl").disabled = false;
   if(!noScroll) $("#cardWrap").scrollIntoView({behavior:"smooth", block:"nearest"});
@@ -4862,10 +5119,10 @@ function cardToolsHTML(hasCharts, extra, isMx){
   const legendBtn = hasCharts
     ? `<button class="btn-ghost sc-cfg-btn" onclick="toggleCardLegend(this)"
         aria-haspopup="dialog" aria-expanded="false" aria-label="配置图表图例"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="7" cy="18" r="2"/></svg>图例</button>` : "";
-  const mode = state.cardTable;
-  // 按钮文案：矩阵卡按集合态显示已选矩阵名——state 非 mx-* 时按默认
-  // [ttft, decode] 计数；两个以内列名、超过「数据·矩阵×N」、零个回退「数据」。
-  // 无矩阵点的卡/对比卡不认 mx-* 集合（其上不出矩阵表），恒显示数据档位
+  const mode = state.cardTable.tier;
+  // 按钮文案：矩阵卡按集合态显示已选矩阵名（mx 为 null 时按默认 [ttft, decode]
+  // 计数）；两个以内列名、超过「数据·矩阵×N」、零个回退「数据」。
+  // 无矩阵点的卡/对比卡不认 mx 集合（其上不出矩阵表），恒显示数据档位
   const mxCur = isMx ? cardMxMetrics() : null;
   const label = mxCur
     ? (mxCur.length === 0 ? "数据"
@@ -5183,7 +5440,7 @@ function buildCmpChartOpt(entries, metric, title, conc){
   const series = [];
   for(const e of ents){
     const tag = e.tag;
-    const findAt = x => e.pts.find(q => cmpGearOf(q) === x);
+    const findAt = x => e.pts.find(q => cmpGearOf(q) === x && q.all_ok !== false);
     const mk = (getv, name, lt, yAxisIndex) => series.push({
       name, type:"line", symbolSize:7, symbol: "circle",
       lineStyle:{width:2, type: lt || "solid"}, itemStyle:{color: e.color},
@@ -5193,42 +5450,41 @@ function buildCmpChartOpt(entries, metric, title, conc){
     if(isMedia){
       if(metric === "prefill")
         mk(kind === "ocr" ? p => p.ms_per_img : p => p.speed_x,
-           `${tag} ${kind === "ocr" ? "单张时延（ms）" : "倍速（×）"}`);
+           `${tag} ${kind === "ocr" ? "单张时延(ms)" : "倍速(×)"}`);
       else
         mk(kind === "ocr" ? p => p.img_per_s : p => p.audio_min_per_min,
            `${tag} ${kind === "ocr" ? "吞吐（张/秒）" : "吞吐（音频分钟/分钟）"}`);
     } else if(metric === "prefill"){
-      mk(preOf, `${tag} ${concStyle ? "Prefill 均速" : "Prefill"}（tok/s）`);
+      // 多并发档取批级毛口径（与表格均速列同字段），单并发档保持净口径
+      mk(concStyle ? preGrossOf : preOf, `${tag} ${concStyle ? "Prefill 均速" : "Prefill"}(tok/s)`);
       mk(p => p.ttft_net_s ?? p.ttft_s, `${tag} ${concStyle ? "总耗时" : "TTFT"}（s）`, "dashed", 1);
     } else if(concStyle){
       // 多并发档 Decode 对比图 = 多并发卡片图批级三系列
-      mk(decTotalOf, `${tag} 总吞吐（tok/s）`);
-      if(hasPeak) mk(p => p.decode_peak_tok_s, `${tag} 吞吐峰值（tok/s）`, "dotted");
+      mk(decTotalOf, `${tag} 总吞吐(tok/s)`);
+      if(hasPeak) mk(p => p.decode_peak_tok_s, `${tag} 吞吐峰值(tok/s)`, "dotted");
       mk(decTotalTimeOf, `${tag} 总耗时（s）`, "dashed", 1);
     } else {
-      mk(decNetOf, `${tag} 净速（tok/s）`);
+      mk(decNetOf, `${tag} 净速(tok/s)`);
       mk(decNetTimeOf, `${tag} 净耗时（s）`, "dashed", 1);
     }
   }
-  // 图例行数估算与 buildChartOpt 同公式（系列名宽 全角≈12/半角≈7px + 图标间距 34px，
-  // 图内宽 516px）；对比系列名带运行标签更长，行数随之上浮
-  const legendW = series.reduce((a, s) =>
-    a + [...s.name].reduce((w, ch) => w + (ch.charCodeAt(0) > 0xFF ? 12 : 7), 34), 0);
-  const legendLines = Math.max(1, Math.ceil(legendW / 516));
+  // 对比系列名带运行标签更长，行数随之上浮（估算公式见 legendLinesOf）
+  const legendLines = legendLinesOf(series);
   return {
     backgroundColor:"transparent",
-    title:{text:title, textStyle:{color:"#111827", fontSize:14, fontFamily:"Inter"}, left:12, top:6},
-    tooltip:{trigger:"axis", backgroundColor:"#fff", borderColor:"#E5E7EB",
-      textStyle:{color:"#111827", fontSize:12}, extraCssText:"box-shadow:0 4px 12px rgba(0,0,0,.08)",
+    animation: chartAnim(), aria:{enabled:true},
+    title:{text:title, textStyle:{color:CHART.ink, fontSize:14, fontFamily:"Inter"}, left:12, top:6},
+    tooltip:{trigger:"axis", backgroundColor:"#fff", borderColor:CHART.soft,
+      textStyle:{color:CHART.ink, fontSize:12}, extraCssText:"box-shadow:0 4px 12px rgba(0,0,0,.08)",
       valueFormatter: v => v==null ? "-" : round1(v).toLocaleString("en-US")},
-    legend:{textStyle:{color:"#6B7280"}, top:30, right:12},
+    legend:{textStyle:{color:CHART.gray}, top:30, right:12},
     grid:{left:64, right:56, top:40 + 22 * legendLines, bottom:40},
     xAxis:{type:"category", name: isMedia ? "档位" : "上下文", nameLocation:"middle", nameGap:26, data:cats,
-      nameTextStyle:{color:"#6B7280"}, axisLabel:{color:"#6B7280"},
-      axisLine:{lineStyle:{color:"#D1D5DB"}}, axisTick:{alignWithLabel:true}},
-    yAxis:[{type:"value", axisLabel:{color:"#6B7280", formatter:v=>v>=1000?(v/1000)+"K":v},
-      splitLine:{lineStyle:{color:"#F3F4F6"}}},
-      {type:"value", axisLabel:{color:"#D97706"}, splitLine:{show:false}}],
+      nameTextStyle:{color:CHART.gray}, axisLabel:{color:CHART.gray},
+      axisLine:{lineStyle:{color:CHART.border}}, axisTick:{alignWithLabel:true}},
+    yAxis:[{type:"value", axisLabel:{color:CHART.gray, formatter:v=>v>=1000?round1(v/1000)+"K":v},
+      splitLine:{lineStyle:{color:CHART.grid}}},
+      {type:"value", axisLabel:{color:CHART.amber}, splitLine:{show:false}}],
     series,
   };
 }
@@ -5257,36 +5513,34 @@ function buildCmpAgentMxChartOpt(entries, metric, title, conc){
   const series = [];
   for(const e of ents){
     // 该运行没有的缓存档不出系列（否则全 null 空线占位图例）
-    const eCaches = caches.filter(x => e.pts.some(q => cmpGearOf(q) === x));
+    const eCaches = caches.filter(x => e.pts.some(q => cmpGearOf(q) === x && q.all_ok !== false));
     for(const x of eCaches){
       series.push({
         name: `${e.tag} 缓存 ${fmtK(x)}`,
         type:"line", symbolSize:7, symbol: symOf(x),
         lineStyle:{width:2, type: ltOf(x)}, itemStyle:{color: e.color},
         data: insts.map(i => {
-          const p = e.pts.find(q => q.inst_tokens === i && cmpGearOf(q) === x);
+          const p = e.pts.find(q => q.inst_tokens === i && cmpGearOf(q) === x && q.all_ok !== false);
           return p ? (getv(p) ?? null) : null;
         }),
       });
     }
   }
-  // 图例行数估算与 buildCmpChartOpt 同公式
-  const legendW = series.reduce((a, s) =>
-    a + [...s.name].reduce((w, ch) => w + (ch.charCodeAt(0) > 0xFF ? 12 : 7), 34), 0);
-  const legendLines = Math.max(1, Math.ceil(legendW / 516));
+  const legendLines = legendLinesOf(series);
   return {
     backgroundColor:"transparent",
-    title:{text:title, textStyle:{color:"#111827", fontSize:14, fontFamily:"Inter"}, left:12, top:6},
-    tooltip:{trigger:"axis", backgroundColor:"#fff", borderColor:"#E5E7EB",
-      textStyle:{color:"#111827", fontSize:12}, extraCssText:"box-shadow:0 4px 12px rgba(0,0,0,.08)",
+    animation: chartAnim(), aria:{enabled:true},
+    title:{text:title, textStyle:{color:CHART.ink, fontSize:14, fontFamily:"Inter"}, left:12, top:6},
+    tooltip:{trigger:"axis", backgroundColor:"#fff", borderColor:CHART.soft,
+      textStyle:{color:CHART.ink, fontSize:12}, extraCssText:"box-shadow:0 4px 12px rgba(0,0,0,.08)",
       valueFormatter: v => v==null ? "-" : round1(v).toLocaleString("en-US")},
-    legend:{textStyle:{color:"#6B7280"}, top:30, right:12},
+    legend:{textStyle:{color:CHART.gray}, top:30, right:12},
     grid:{left:64, right:56, top:40 + 22 * legendLines, bottom:40},
-    xAxis:{type:"category", name:"指令上下文", nameLocation:"middle", nameGap:26, data:cats,
-      nameTextStyle:{color:"#6B7280"}, axisLabel:{color:"#6B7280"},
-      axisLine:{lineStyle:{color:"#D1D5DB"}}, axisTick:{alignWithLabel:true}},
-    yAxis:[{type:"value", axisLabel:{color:"#6B7280", formatter:v=>v>=1000?(v/1000)+"K":v},
-      splitLine:{lineStyle:{color:"#F3F4F6"}}}],
+    xAxis:{type:"category", name:"指令", nameLocation:"middle", nameGap:26, data:cats,
+      nameTextStyle:{color:CHART.gray}, axisLabel:{color:CHART.gray},
+      axisLine:{lineStyle:{color:CHART.border}}, axisTick:{alignWithLabel:true}},
+    yAxis:[{type:"value", axisLabel:{color:CHART.gray, formatter:v=>v>=1000?round1(v/1000)+"K":v},
+      splitLine:{lineStyle:{color:CHART.grid}}}],
     series,
   };
 }
@@ -5347,12 +5601,14 @@ function cmpCardHTML(){
         models: [...new Set(r.pts.filter(p => p.scenario === sc).map(p => p.model))]}));
     const isTurn = entries.some(e => e.pts.some(p => p.turn != null));   // 旧轮次链
     const chartImgs = imgs[sc] || {};
-    // 同并发拆图（追加八）：键 = metric@并发档，按并发档升序、档内 prefill
-    // 在前渲染；图题内已缀「· 并发 N」（多档时），单元格不另标注
+    // 同并发拆图（追加八）：键 = metric@并发档，按并发档升序、档内指标固定
+    // ttft→total→prefill→decode（与单次卡片图序一致）；图题内已缀「· 并发 N」
+    //（多档时），单元格不另标注
+    const MT_ORDER = {ttft:0, total:1, prefill:2, decode:3};
     const chartCells = Object.keys(chartImgs).sort((a, b) => {
       const [ma, ca] = a.split("@"), [mb, cb] = b.split("@");
-      return (+ca) - (+cb) || (ma === "prefill" ? -1 : 1);
-    }).map(k => `<div class="sc-chart-cell"><img src="${chartImgs[k]}" alt="${esc(sc)} ${esc(k)} 对比曲线"></div>`).join("");
+      return (+ca) - (+cb) || (MT_ORDER[ma] ?? 9) - (MT_ORDER[mb] ?? 9);
+    }).map(k => `<div class="sc-chart-cell"><img src="${chartImgs[k]}" alt="${SCEN_LABEL[sc]||esc(sc)} ${esc(k)} 对比曲线"></div>`).join("");
     return `<div class="sc-scen-block">
       <div class="sc-scen-head"><span class="bar"></span><span class="name">${SCEN_LABEL[sc] || esc(sc)}</span><span class="sc-cmp-note">对比 ${entries.length} 次</span></div>
       ${cmpScenSummaryHTML(sc, entries)}
@@ -5370,13 +5626,17 @@ function cmpCardHTML(){
     footNotes.push(`对比图按并发档拆分、同场景同并发叠加${anyConc ? "：单并发档 Decode 为净速/净耗时，多并发档按多并发卡片图口径（总吞吐/吞吐峰值/总耗时）" : "：Decode 为净速/净耗时"}`);
     if(anyMx) footNotes.push("Agent 矩阵对比图：指令档为轴、运行×缓存档为系列，各次档位取并集、缺档出断点");
     footNotes.push("Prefill 速度 = 实际 prompt tokens ÷（TTFT − 网络往返基线）");
-    footNotes.push("净 Decode = 生成 tokens ÷ 校正窗口（>1s 空窗封顶）");
+    footNotes.push("Decode 净速 = 生成 tokens ÷ 校正窗口（>1s 空窗封顶）");
     const nPhys = runs.flatMap(r => r.pts)
       .filter(p => preOf(p) != null && preOf(p) > PRE_PHYS_GATE).length;
     if(nPhys) footNotes.push(`${nPhys} 点 Prefill 读数超物理界（> ${fmtNum(PRE_PHYS_GATE)} tok/s）已从统计剔除`);
   } else {
     footNotes.push("对比图：主指标与并发吞吐按运行分色叠加");
   }
+  if(runs.flatMap(r => r.pts).some(p => p.all_ok === false))
+    footNotes.push("失败测点不入曲线（出断点），读数见明细表标红行");
+  const cmpSymNotes = cardSymbolNotes(runs.flatMap(r => r.pts));
+  if(cmpSymNotes.length) footNotes.push("符号：" + cmpSymNotes.join("；"));
   const footHtml = `<div class="sc-foot">${footNotes.join(" · ")} · 由 <a href="https://${REPO_URL}" target="_blank" rel="noopener">LLM-SPEED</a> 生成 · ${REPO_URL}</div>`;
   return `<div class="speed-card sc-cmp-card" data-cmp="1">
     <div class="sc-head">
@@ -5385,7 +5645,7 @@ function cmpCardHTML(){
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
         </div>
         <div>
-          <div class="sc-title">LLM 测速卡片 <span class="sc-cmp-badge">对比 ×${runs.length}</span></div>
+          <div class="sc-title">${allLlm ? "LLM 测速卡片" : "媒体测速卡片"} <span class="sc-cmp-badge">对比 ×${runs.length}</span></div>
           <div class="sc-sub">Local LLM Speed Report · 颜色=运行 · 线型=指标 · 符号=并发档 · 汇总表逐列最优高亮</div>
         </div>
       </div>
@@ -5407,8 +5667,8 @@ function cmpCardHTML(){
    键保持 p.model——裁定集按 run 分开持有，无需复合键），抑制留痕逐 run×model
    一行收明细区底部 */
 function cmpDetailHTML(runs){
-  // 明细档位只在 agg/full 档渲染（mx-* 是矩阵选档，不出明细区）
-  const tier = String(state.cardTable).startsWith("mx-") ? "none" : state.cardTable;
+  // 明细档位只在 agg/full 档渲染（mx 矩阵选档时 tier 恒为 none，不出明细区）
+  const tier = state.cardTable.tier;
   if(tier === "none") return "";
   const withReps = tier === "full";
   const tpcVotes = runs.map(r => tpcRunVote(r.pts));
@@ -5434,8 +5694,8 @@ function cmpDetailHTML(runs){
 }
 /* 单次卡片的明细区（数据即当前 state.points / 存档水合点） */
 function cardDetailHTML(model){
-  // 明细档位只在 agg/full 档渲染（mx-* 是矩阵选档，不出明细区）
-  const tier = String(state.cardTable).startsWith("mx-") ? "none" : state.cardTable;
+  // 明细档位只在 agg/full 档渲染（mx 矩阵选档时 tier 恒为 none，不出明细区）
+  const tier = state.cardTable.tier;
   if(tier === "none") return "";
   const rows = allPoints().filter(p => p.model === model);
   if(!rows.length) return "";
@@ -5465,16 +5725,15 @@ function openCardTable(btn){
   const opts = isMx
     ? [["ttft", "TTFT 矩阵", "格 = TTFT（s），净口径优先"],
        ["total", "总时长 矩阵", "格 = 单步端到端总时长（s）"],
-       ["prefill", "Prefill 矩阵", "格 = Prefill 速度（tok/s）"],
-       ["decode", "Decode 矩阵", "格 = Decode 净速（tok/s）"]]
+       ["prefill", "Prefill 矩阵", "格 = Prefill 速度(tok/s)"],
+       ["decode", "Decode 矩阵", "格 = Decode 净速(tok/s)"]]
     : [["none", "数据", "卡片只保留统计格与曲线（最紧凑）"],
        ["agg", "数据＋测速表", "每测试点一行；多次重复取均值"],
        ["full", "数据＋测速详表", "测速表 + 逐次重复子行（含 ⚠ 留痕徽标）"]];
-  // 勾选态：矩阵卡=当前矩阵集合（state 非 mx-* 时按默认 [ttft, decode]，即
-  // cardMxMetrics 的回端口径）；普通卡反之勾「数据」
+  // 勾选态：矩阵卡=当前矩阵集合（cardMxMetrics 已含默认回端）；普通卡=当前
+  // tier（mx 选档态下 tier 恒为 none，勾「数据」）
   const mxSel = isMx ? cardMxMetrics() : null;
-  const cur = isMx ? null
-    : (["none", "agg", "full"].includes(state.cardTable) ? state.cardTable : "none");
+  const cur = isMx ? null : state.cardTable.tier;
   const pop = document.createElement("div");
   pop.id = "cardTablePop";
   pop.className = "card-legend-pop";
@@ -5490,19 +5749,20 @@ function openCardTable(btn){
   pop.style.top = Math.min(r.bottom + 6, innerHeight - pop.offsetHeight - 8) + "px";
   pop.style.left = Math.max(8, Math.min(r.right - pop.offsetWidth, innerWidth - pop.offsetWidth - 8)) + "px";
   btn.setAttribute("aria-expanded", "true");
+  pop.querySelector("input")?.focus();
   pop.addEventListener("change", e => {
     const t = e.target;
     if(t.name !== "cardTableMode") return;
     if(isMx){
       // 矩阵多选：以浮层 checkbox 勾选集合写回（按 MX_ORDER 固定顺序归一）；
-      // 全部取消勾选 = 空集 "mx-"（卡片不出矩阵表）
+      // 全部取消勾选 = 空集（卡片不出矩阵表）；选矩阵即退出明细档位
       const set = new Set([...pop.querySelectorAll('input[name="cardTableMode"]:checked')].map(i => i.value));
-      state.cardTable = "mx-" + MX_ORDER.filter(m => set.has(m)).join("-");
-    } else state.cardTable = t.value;
+      state.cardTable = {tier:"none", mx: MX_ORDER.filter(m => set.has(m))};
+    } else state.cardTable = {tier: t.value, mx: null};   // 选明细档位即矩阵回默认
     refreshAllCards();   // 数据档位是全局设置：重渲染全部卡片（不滚动）
   });
   const onDoc = e => { if(!pop.contains(e.target) && !btn.contains(e.target)) closeCardTable(); };
-  const onKey = e => { if(e.key === "Escape") closeCardTable(); };
+  const onKey = e => { if(e.key === "Escape") closeCardTable(true); };
   document.addEventListener("pointerdown", onDoc, true);
   document.addEventListener("keydown", onKey, true);
   pop._off = () => {
@@ -5510,13 +5770,15 @@ function openCardTable(btn){
     document.removeEventListener("keydown", onKey, true);
   };
 }
-function closeCardTable(){
+function closeCardTable(restoreFocus){
   const pop = $("#cardTablePop");
   if(!pop) return;
   if(pop._off) pop._off();
   pop.remove();
+  const opener = document.querySelector('.sc-cfg-btn[aria-expanded="true"]');
   document.querySelectorAll('.sc-cfg-btn[aria-expanded="true"]')
     .forEach(b => b.setAttribute("aria-expanded", "false"));
+  if(restoreFocus && opener && opener.isConnected) opener.focus();
 }
 /* 数据档位变化重渲染全部卡片（对比态走对比路径）；不重排滚动位置 */
 function refreshAllCards(){
@@ -5535,10 +5797,11 @@ function historyLabel(h){
   const agentOnly = (h.scenarios||[]).length === 1 && h.scenarios[0] === "agent";
   const nCache = (h.agent_cache_ladder||[]).length, nInst = (h.agent_inst_ladder||[]).length;
   const nTurns = ((h.agent_turns_p1 != null && h.agent_turns_p2 != null)
-    ? h.agent_turns_p1 + h.agent_turns_p2 : (h.agent_turns || 12))
+    ? h.agent_turns_p1 + h.agent_turns_p2 : h.agent_turns)
     + (h.agent_cold_ctx != null ? 1 : 0);   // 新口径冷启动独立成轮；旧存档无该字段
   const ctx = agentOnly
-    ? (nCache && nInst ? `${nCache}×${nInst} 缓存×指令` : `${nTurns} 轮链`)
+    ? (nCache && nInst ? `${nCache}×${nInst} 缓存×指令`
+      : nTurns ? `${nTurns} 轮链` : "轮次链")   // 旧存档轮数字段缺失时不猜数
     : ctxs.length > 1 ? `${fmtK(ctxs[0])}~${fmtK(ctxs[ctxs.length-1])}`
     : ctxs.length === 1 ? fmtK(ctxs[0]) : "";
   const conc = (h.concurrencies||[]).slice().sort((a,b) => a-b).join("/");
@@ -5573,10 +5836,12 @@ async function loadHistoryList(){
 let histCache = [];
 async function editHistoryNote(){
   const id = $("#historySel").value;
-  if(!id) return;
+  if(!id){ setPill("请先在历史记录中选择一条存档", "err"); return; }
   const cur = histCache.find(h => h.run_id === id);
-  const note = prompt("任务备注（留空清除，≤80 字符）：", cur?.note || "");
-  if(note === null) return;
+  const note = await uiDialog({title:"任务备注", sub:"留空即清除备注",
+    okText:"保存", input:{value: cur?.note || "", maxlength: 80, placeholder: "≤80 字符",
+      validate: v => v.trim().length > 80 ? "备注不能超过 80 字符" : null}});
+  if(note === false) return;
   try{
     const r = await fetch(`/api/bench/history/${encodeURIComponent(id)}/note`,
       {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({note})});
@@ -5651,9 +5916,13 @@ async function renderActiveRuns(){
       <button class="btn-ghost" data-act="enter" data-ident="${esc(JSON.stringify({run_id: r.run_id, total_points: r.total_points}))}">进入</button>
     </div>`).join("");
 }
-/* 进入正在运行的任务：重放历史事件（seq 去重）后接续实时流，状态从零重建 */
-function enterRun(rid, totalPoints){
+/* 进入正在运行的任务：重放历史事件（seq 去重）后接续实时流，状态从零重建。
+   多次对比视图是唯一能费工重建的查看态（存档本体随时可重载），仅此时确认 */
+async function enterRun(rid, totalPoints, {skipConfirm} = {}){
   if(state.running && state.runId === rid) return;
+  if(!skipConfirm && state.cmp &&
+     !await uiDialog({title:"进入进行中的任务？",
+       body:"当前多次对比视图将被清空（存档仍在，可重新生成对比）。", okText:"进入"})) return;
   if(state.es) state.es.close();
   state.points.clear(); state.maxSeq = -1; state.activeReqs.clear();
   state.cmp = null;   // 进入运行任务 = 退出多次对比态
@@ -5665,6 +5934,7 @@ function enterRun(rid, totalPoints){
   $("#progWrap").hidden = false;
   $("#progFill").style.width = "0%";   // 接管他人任务：进度从零重建（回放会推进）
   state.runId = rid; state.running = true; state.cfg = null;   // cfg 事件随回放到达
+  state.runStartTs = Date.now();   // 接管时刻起算（任务真实起点在他处，标「约」）
   $("#btnStart").hidden = true; $("#btnStop").hidden = false; setStopBtn(false); $("#btnDl").disabled = true;
   setPhase("run");
   setPill("测速运行中…", "run");
@@ -5817,7 +6087,9 @@ async function deletePoint(ident){
   const gear = ident.inst_tokens != null
     ? `缓存 ${fmtK(ident.ctx_target)} × 指令 ${fmtK(ident.inst_tokens)}`
     : `档位 ${fmtK(ident.ctx_target)}`;
-  if(!confirm(`从历史存档中删除该测试点？\n${ident.model} · ${SCEN_LABEL[ident.scenario] || ident.scenario} · ${gear} · 并发 ${ident.concurrency}${ident.turn != null ? ` · 轮次 ${ident.turn}` : ""}\n删除不可恢复（服务端留删除审计）。`)) return;
+  if(!await uiDialog({title:"从历史存档中删除该测试点？",
+    body:`${ident.model} · ${SCEN_LABEL[ident.scenario] || ident.scenario} · ${gear} · 并发 ${ident.concurrency}${ident.turn != null ? ` · 轮次 ${ident.turn}` : ""}\n删除不可恢复（服务端留删除审计）。`,
+    okText:"删除", danger:true})) return;
   let d;
   try{
     const r = await fetch(`/api/bench/history/${encodeURIComponent(archiveId)}/delete-point`,
@@ -5868,7 +6140,7 @@ function hydrateArchive(d){
 }
 async function loadHistory(){
   const id = $("#historySel").value;
-  if(!id) return;
+  if(!id){ setPill("请先在历史记录中选择一条存档", "err"); return; }
   let r;
   try{ r = await fetch(`/api/bench/history/${encodeURIComponent(id)}`); }
   catch(e){ setPill("历史载入请求失败：" + e.message, "err"); return; }
@@ -5899,7 +6171,9 @@ async function retestPoint(ident){
   const gear = ident.inst_tokens != null
     ? `缓存 ${fmtK(ident.ctx_target)} × 指令 ${fmtK(ident.inst_tokens)}`
     : `档位 ${fmtK(ident.ctx_target)}`;
-  if(!confirm(`单独复测该测试点？\n${ident.model} · ${SCEN_LABEL[ident.scenario] || ident.scenario} · ${gear} · 并发 ${ident.concurrency}\n沿用原存档配置（含 repeats 轮次），完成后新结果合并替换回原存档。`)) return;
+  if(!await uiDialog({title:"单独复测该测试点？",
+    body:`${ident.model} · ${SCEN_LABEL[ident.scenario] || ident.scenario} · ${gear} · 并发 ${ident.concurrency}\n沿用原存档配置（含 repeats 轮次），完成后新结果合并替换回原存档。`,
+    okText:"复测"})) return;
   let d;
   try{
     const r = await fetch(`/api/bench/history/${encodeURIComponent(archiveId)}/retest`,
@@ -5908,7 +6182,7 @@ async function retestPoint(ident){
     if(!r.ok){ setPill(d.detail || "复测启动失败", "err"); return; }
   }catch(e){ setPill("复测请求失败：" + e.message, "err"); return; }
   state.retestArchive = archiveId;
-  enterRun(d.run_id, 1);
+  enterRun(d.run_id, 1, {skipConfirm:true});   // 复测确认已发过，不再二次确认
 }
 /* 复测运行终态后重载原存档。合并由服务端守望任务在 run 收尾后执行，done
    事件到达时合并未必落盘：expectMerge=true 时轮询直到存档 retests 审计里
@@ -5979,9 +6253,12 @@ $("#activeRuns").addEventListener("click", e => {
 
 /* 顶层引导：init() 是 async，既要接同步抛错也要接 Promise 拒绝；成功后才把
    _booted 置真，关掉顶部那个启动期 error 钩子（启动后运行期的偶发错误不该
-   再冒充"初始化失败"）。 */
+   再冒充"初始化失败"）。echarts 走 defer（解析完才执行），故 init 也等
+   DOMContentLoaded——defer 脚本保证先于它执行完，window.echarts 已就绪 */
+const _boot = () => init().then(() => { _booted = true; }, bootFailed);
 try{
-  init().then(() => { _booted = true; }, bootFailed);
+  if(document.readyState === "loading") document.addEventListener("DOMContentLoaded", _boot, {once:true});
+  else _boot();
 }catch(err){ bootFailed(err); }
 </script>
 </body>

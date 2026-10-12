@@ -23,6 +23,48 @@ const CONC5 = {model:"Qwen3.8-Flash-Next", scenario:"code", kind:"llm", ctx_targ
 const voter = (model, tpc, over = {}) => ({model, all_ok:true, out_tokens:256,
   decode_tok_s:30.4, decode_burst:null, tok_per_chunk:tpc, ...over});
 
+/* ---------------- fTimeout 越界生效口径 timeoutClampNote ---------------- */
+/* number 输入的 min/max 不拦手打值，提示与提交都必须按同一个钳制口径走 */
+
+test("timeoutClampNote：区间内取值原样生效、不提示", () => {
+  for(const raw of ["1", "1200", "3600", "7200", "9.5"]){
+    const r = timeoutClampNote(raw);
+    assert.equal(r.clamped, false, `不应提示: ${raw}`);
+    assert.equal(r.effective, Number(raw));
+  }
+});
+
+test("timeoutClampNote：超上限钳到 TIMEOUT_S_MAX 并提示（与后端校验同值）", () => {
+  for(const raw of ["7201", "99999", "86400"]){
+    const r = timeoutClampNote(raw);
+    assert.equal(r.clamped, true);
+    assert.equal(r.effective, TIMEOUT_S_MAX);
+  }
+  assert.equal(TIMEOUT_S_MAX, 7200);   // 后端 bench.TIMEOUT_S_MAX 镜像，改要同步
+});
+
+test("timeoutClampNote：低于下限钳到 1 并提示（0/负数不得透传成即时超时）", () => {
+  for(const raw of ["0", "-5", "0.5"]){
+    const r = timeoutClampNote(raw);
+    assert.equal(r.clamped, true, `应提示: ${raw}`);
+    assert.equal(r.effective, 1);
+  }
+});
+
+test("timeoutClampNote：空/非数按未填走默认 1200，不算越界（不骚扰用户）", () => {
+  for(const raw of ["", "   ", null, undefined, "abc"]){
+    const r = timeoutClampNote(raw);
+    assert.equal(r.effective, 1200, `默认口径: ${raw}`);
+    assert.equal(r.clamped, false, `空/非数不该提示: ${raw}`);
+  }
+});
+
+test("timeoutClampNote：Infinity 不逃逸（非有限值按默认处理）", () => {
+  const r = timeoutClampNote("Infinity");
+  assert.equal(Number.isFinite(r.effective), true);
+  assert.equal(r.effective, 1200);
+});
+
 /* ---------------- 闸一致性：hasMultiConc / hiConcOf ---------------- */
 
 test("hasMultiConc：纯 conc=1 点集为 false，hiConcOf 为 null，不变式成立", () => {
@@ -337,18 +379,21 @@ test("cmpLegendKey：单并发档不带后缀，多并发档带并发后缀", ()
   assert.equal(cmpLegendKey("code", "decode", 5), "cmp::code::decode::5");
 });
 
-test("口径版本：缺字段 = 遗留(0)，当前版本点不算遗留（ADR-0083）", () => {
+test("口径版本：缺字段 = 遗留(0)，旧版本也算遗留（ADR-0093）", () => {
   // 本机制引入前的存量存档没有该字段 → 遗留口径，前端必须显式标注
   assert.equal(metricVersionOf({}), 0);
   assert.equal(metricVersionOf({metric_version: null}), 0);
   assert.equal(metricVersionOf({metric_version: 0}), 0);
   assert.equal(isLegacyMetric({}), true);
   assert.equal(isLegacyMetric({metric_version: 0}), true);
-  assert.equal(metricVersionOf({metric_version: 1}), 1);
-  assert.equal(isLegacyMetric({metric_version: 1}), false);
+  // 当前版本点不算遗留；更新的版本（> 当前）也不得判成遗留
   assert.equal(isLegacyMetric({metric_version: CURRENT_METRIC_VERSION}), false);
-  // 未来版本也不得被判成"遗留"（> 当前版本说明是更新的口径）
   assert.equal(isLegacyMetric({metric_version: CURRENT_METRIC_VERSION + 1}), false);
+  // 低于当前版本的已发布口径（今天 = v1，构造侧修正 ADR-0089/0090 之前）算旧口径
+  if (CURRENT_METRIC_VERSION > 1) {
+    assert.equal(metricVersionOf({metric_version: CURRENT_METRIC_VERSION - 1}), CURRENT_METRIC_VERSION - 1);
+    assert.equal(isLegacyMetric({metric_version: CURRENT_METRIC_VERSION - 1}), true);
+  }
   assert.equal(metricVersionTxt(0), "遗留");
   assert.equal(metricVersionTxt(null), "遗留");
   assert.equal(metricVersionTxt(1), "v1");
@@ -364,8 +409,12 @@ test("口径版本：遗留点的读数仍走隐式回退（不因缺版本而�
 });
 
 test("口径版本：混档时按点判定，不是按整档一刀切", () => {
-  const mix = [{metric_version: 1}, {}, {metric_version: 1}, {metric_version: 0}];
+  const cur = CURRENT_METRIC_VERSION;
+  const mix = [{metric_version: cur}, {}, {metric_version: cur}, {metric_version: 0}];
   assert.deepEqual(mix.map(isLegacyMetric), [false, true, false, true]);
+  // 旧已发布版本（今天无：v1 就是当前版本）与缺字段都算旧口径
+  if (cur > 1) assert.equal(isLegacyMetric({metric_version: cur - 1}), true);
+  assert.equal(isLegacyMetric({metric_version: cur + 1}), false);
 });
 
 /* ---------------- 对比叠加图档位对齐（贴边裁减点归一） ---------------- */

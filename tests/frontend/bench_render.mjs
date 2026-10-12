@@ -405,6 +405,36 @@ const hFullDone = resultEl.innerHTML;
 check("setPhase 落地结果 == 终态（done，retest 闸开）直接全量渲染", hPhase === hFullDone,
   `phase=${fp(hPhase).hash} full=${fp(hFullDone).hash}`);
 
+/* 断言 5：被停止打断的点（stopped_mid_point，读数全 None + reqs:[]）可渲染
+   —— 该形状 2026-09-24 起才出现（此前中断点被整点丢弃，前端从未见过）：
+   它必须出一行、状态列判为失败（✗）、且读数格子走 null 分支显示 "-"，
+   不能因 undefined/空 reqs 抛错中断整表渲染 */
+resetState("done", [], false);
+const stoppedPt = (() => {
+  const q = makePoint(MODELS[0], "code", 262144, null, 1, 0, 0);
+  for(const k of Object.keys(q))
+    if(!["model","scenario","kind","ctx_target","concurrency","metric_version",
+         "inst_tokens","rtt_ms"].includes(k)) delete q[k];
+  return { ...q, all_ok:false, reqs:[], n_reps:undefined, reps:[],
+           batch_time_s:null, stopped_mid_point:true,
+           err:"测量被手动停止（m / 代码生成 / 256K / 并发 1，该点读数不可用）",
+           ttft_s:null, prefill_tok_s:null, decode_tok_s:null,
+           prompt_tokens:null, out_tokens:null, tok_per_chunk:null };
+})();
+let renderThrew = null;
+try { api.addPoint(stoppedPt); api.renderAll(); }
+catch (e) { renderThrew = e && e.message || String(e); }
+check("中断点（stopped_mid_point）渲染不抛错", renderThrew === null, renderThrew || "");
+const hStopped = resultEl.innerHTML;
+check("中断点渲染出一行主行且标 err 类",
+  /<tr class="err">/.test(hStopped), `rows=${(hStopped.match(MAIN_ROW_RE)||[]).length}`);
+check("中断点状态列显示 ✗（空 reqs 不得显示 ✓ 0/0）",
+  /✗/.test(hStopped) && !/✓\s*0\/0/.test(hStopped), hStopped.slice(0, 0));
+check("中断点读数列渲染为占位 -（未产生 undefined 文本）",
+  !/>undefined</.test(hStopped) && !/undefined/.test(hStopped));
+check("中断点的停止原因随 err 落 title 悬浮",
+  hStopped.includes("测量被手动停止"));
+
 /* ------------------------------------------------------------ 报告 */
 console.log("");
 console.log("============================================================");
