@@ -77,6 +77,7 @@ from bench import (
     _render_in_full,
     _retry_after_s,
     _strip_in_full,
+    _stopped_point,
     _synth_document_png,
     _synth_speech_wav,
     _tok_per_batch,
@@ -2196,6 +2197,368 @@ class TestCorrectFillerChars(unittest.TestCase):
         self.assertIsNone(_correct_filler_chars(500, 500.0, 500, None, 0, 1.0))
 
 
+class TestDensityLedger(unittest.TestCase):
+    """密度台账纯函数：分段线性 chars↔tokens 反解。
+
+    为什么钉这个：语料流 token 密度沿流阶跃（代码语料的整数字常量表区边际
+    密度 ~1.4 c/t vs 邻段 ~3.2），单锚点外推对第一个跨过它的档位必然失准
+    （实测 64K 档首测 +40%）。台账用**包围目标的相邻两段斜率**，把阶跃
+    包在表里。"""
+
+    # 实测形状简化的两段曲线：普通段 3.2 c/t，数字表区 1.4 c/t
+    PLAIN = [(0.0, 0.0), (100000.0, 31250.0)]        # 100000/3.2
+    DIP = [(100000.0, 31250.0), (200000.0, 102678.0)]  # +100000/1.4 ≈ +71428
+
+    def test_below_min_anchor_returns_none(self):
+        """目标低于最小锚点：不得用首段斜率向下外推（真机踩过的坑，
+        2026-10-10）。台账只有大锚点时，首段斜率跳过了中间整段、被密度
+        塔陷拉平（实测 2.25 c/t vs 小档区真实 3.5 c/t），给 8K 档造出
+        +89.7% 的 prompt。呓实交回旧公式（旧公式的锚点就在小档区，反而准）。
+        """
+        anchors = [(113473.0, 32947.0), (336491.0, 132168.0)]
+        self.assertIsNone(bench._ledger_interp(anchors, 8192, 1.8),
+                          "低于最小锚点必须返回 None，不猜")
+        # 区间内仍正常内插（证明不是把整个函数关掉了）
+        self.assertIsNotNone(bench._ledger_interp(anchors, 60000, 1.8))
+
+    def test_interpolation_uses_enclosing_segment_not_last_slope(self):
+        """关键性质：目标落在两段之间时，用的是它自己那一段的斜率。
+        旧单锚点公式拿邻段斜率外推，遇阶跃必偏。"""
+        anchors = self.PLAIN + self.DIP[1:]
+        # 目标 60000 tokens 落在塌陷段（31250~102678）内
+        c = bench._ledger_interp(anchors, 60000, 3.2)
+        self.assertIsNotNone(c)
+        # 该段斜率 = 100000/71428 ≈ 1.4；按此从 (100000, 31250) 起推
+        self.assertAlmostEqual(c, 100000 + (60000 - 31250) * (100000 / 71428),
+                               delta=2)
+        self.assertLess(c, 100000 + (60000 - 31250) * 3.2,
+                        "若误用普通段斜率会构造过长（就是 +40% 的成因）")
+
+    def test_extrapolation_beyond_max_anchor_uses_last_slope(self):
+        anchors = self.PLAIN + self.DIP[1:]
+        c = bench._ledger_interp(anchors, 110000, None)
+        self.assertIsNotNone(c)
+        self.assertGreater(c, anchors[-1][0], "目标超过最大锚点，构造必须更长")
+
+    def test_single_anchor_returns_none(self):
+        """单锚点没有局部斜率，必须诚实交回旧公式而不是猜。"""
+        self.assertIsNone(bench._ledger_interp([(10000.0, 3000.0)], 4096, 3.2))
+        self.assertIsNone(bench._ledger_interp([], 4096, 3.2))
+
+    def test_add_keeps_sorted_and_dedups_near_points(self):
+        pts = bench._ledger_add([], 10000, 3000)
+        pts = bench._ledger_add(pts, 20000, 6000)
+        pts = bench._ledger_add(pts, 20010, 6500)   # 同位置重测 → 取新
+        self.assertEqual([p[0] for p in pts], [10000.0, 20010.0])
+        self.assertEqual(pts[-1][1], 6500.0, "同位置近点应取新观测")
+
+    def test_add_rejects_non_monotonic_observation(self):
+        """字更多却 tokens 更少的观测（删减重试/换料窗口）不得让台账折返。"""
+        pts = bench._ledger_add([], 10000, 5000)
+        pts = bench._ledger_add(pts, 20000, 4000)   # 非单调
+        self.assertEqual(len(pts), 1, "非单调观测应丢弃")
+        self.assertEqual(pts[0][0], 10000.0)
+
+    def test_add_rejects_out_of_band_density(self):
+        pts = bench._ledger_add([], 10000, 100000)  # 0.1 c/t，越下界
+        self.assertEqual(pts, [])
+        pts = bench._ledger_add([], 1000000, 100)   # 10000 c/t，越上界
+        self.assertEqual(pts, [])
+
+    def test_trim_keeps_max_anchor(self):
+        """超上限抽稀必须保留最大锚点：它是向上外推的唯一起跳点。"""
+        pts = []
+        for i in range(bench.DENSITY_LEDGER_MAX_POINTS + 40):
+            pts = bench._ledger_add(pts, (i + 1) * 10000.0, (i + 1) * 3000.0)
+        self.assertLessEqual(len(pts), bench.DENSITY_LEDGER_MAX_POINTS)
+        self.assertEqual(pts[-1][0], (bench.DENSITY_LEDGER_MAX_POINTS + 40) * 10000.0,
+                         "最大锚点被抽稀掉了——大档位将无锚点可外推")
+
+    def test_fingerprint_tracks_corpus_content(self):
+        fp1 = bench._stream_fingerprint("code")
+        self.assertIsNotNone(fp1, "code 场景应有语料指纹（台账可寻址）")
+        self.assertEqual(fp1, bench._stream_fingerprint("code"), "指纹必须确定")
+        self.assertNotEqual(fp1, bench._stream_fingerprint("creative"),
+                            "不同语料不得共用台账")
+        self.assertIsNone(bench._stream_fingerprint("ocr"),
+                          "无文本语料流的场景不走台账")
+
+    def test_key_includes_model_and_corpus(self):
+        """键必须同时含模型与语料指纹：密度由分词器决定（同一段字节在不同
+        模型上 tokens 不同），拿一个模型的表切另一个模型的 prompt，错得比
+        不用台账更隐蔽。"""
+        k1 = bench._ledger_key("m1", "code")
+        self.assertNotEqual(k1, bench._ledger_key("m2", "code"), "不同模型不得共用")
+        self.assertNotEqual(k1, bench._ledger_key("m1", "creative"), "不同语料不得共用")
+        self.assertEqual(k1, bench._ledger_key("m1", "code"), "键必须确定")
+        self.assertIsNone(bench._ledger_key("m1", "ocr"), "无流场景无台账")
+
+    def test_trimmed_and_shifted_observations_excluded(self):
+        """台账只收「从流首 0 截取、未删减」的观测（真机踩过的坑，现场复现
+        于 2026-10-10）：被 _trim_middle 裁过的批次（实发量<构造量）和换料
+        批次（stream_offset>0）都不是流首前缀，入表会顶掉同位置的正确锚点，
+        下一轮沿假斜率构造——比不加台账更坏。"""
+        run = BenchRun({})
+        run._probe_density[("m", "code")] = 3.47   # 归户指纹与既有子表同口径
+        lk = bench._ledger_key("m", "code")
+        run.density[lk] = [{"density": 3.47, "source": {}, "seen": 1.0,
+                            "anchors": [[113538.0, 32947.0]]}]
+
+        async def real_ok(sent):
+            return [{"usage_real": True, "prompt_tokens": 52748,
+                     "sent_chars": sent}]
+
+        import asyncio as _aio
+
+        async def go():
+            # 删减过的观测（sent < 构造）：不得入表
+            await run._calibrate_usage(("m", "code"), 113857, 113077,
+                                       await real_ok(60000), prefix_obs=True)
+            self.assertEqual(run.density[lk][0]["anchors"],
+                             [[113538.0, 32947.0]],
+                             "删减批次不得污染台账，也不得顶掉正确锚点")
+            # 换料批次（prefix_obs=False）：同样不得入表
+            await run._calibrate_usage(("m", "code"), 113857, 113077,
+                                       await real_ok(113857), prefix_obs=False)
+            self.assertEqual(run.density[lk][0]["anchors"],
+                             [[113538.0, 32947.0]])
+            # 干净前缀观测：正常入表
+            await run._calibrate_usage(("m", "code"), 197502, 197110,
+                                       [{"usage_real": True,
+                                         "prompt_tokens": 70397,
+                                         "sent_chars": 197502}], prefix_obs=True)
+            self.assertIn([197110.0, 70397.0],
+                          [[p[0], p[1]] for p in run.density[lk][0]["anchors"]])
+        _aio.run(go())
+
+    def test_mock_runs_never_write_ledger(self):
+        """mock 运行不写台账：假网关的 usage 是编的，写一次就污染跨运行状态
+        （读侧在 run() 开头由 mock_seen 拦，写侧在 _save_density 拦）。"""
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, bench.DENSITY_LEDGER_FILE)
+            seed = {"m|code@x": [{"density": 3.4, "source": {}, "seen": 1.0,
+                                 "anchors": [[1000.0, 300.0], [2000.0, 600.0]]}]}
+            bench._ledger_save(path, seed)
+            run = BenchRun({}, results_dir=td)
+            run.mock_seen = True
+            # 假网关的密度（两点一条目：_ledger_load 会丢单锚点条目）
+            run.density = {"m|code@x": [{"density": 1.0, "source": {},
+                                         "seen": 2.0,
+                                         "anchors": [[9999.0, 9999.0],
+                                                     [19998.0, 19998.0]]}]}
+            run._save_density()
+            self.assertEqual(bench._ledger_load(path), seed,
+                             "mock 运行的密度不得落盘")
+            run.mock_seen = False
+            run._save_density()
+            self.assertEqual(bench._ledger_load(path), run.density,
+                             "真运行的密度应正常落盘（守卫不是永关）")
+
+    def test_no_results_dir_skips_density_persistence(self):
+        """无 results_dir（内嵌调用/MCP 临时跑）：不写也不炸。"""
+        run = BenchRun({})
+        run.density = {"m|code@x": [{"density": 3.4, "source": {}, "seen": 1.0,
+                                    "anchors": [[1000.0, 300.0],
+                                                [2000.0, 600.0]]}]}
+        self.assertIsNone(run._density_path)
+        run._save_density()      # 不得抛
+
+    def test_load_save_roundtrip_and_tolerates_corruption(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, bench.DENSITY_LEDGER_FILE)
+            table = {"m|code@abc": [{"density": 3.4,
+                                     "source": {"deploy": "x"},
+                                     "seen": 1.0,
+                                     "anchors": [[1000.0, 300.0],
+                                                 [20000.0, 6000.0]]}]}
+            bench._ledger_save(path, table)
+            self.assertEqual(bench._ledger_load(path), table)
+            # 损坏/空/不存在：一律空表，不抛
+            with open(path, "w") as f:
+                f.write("{truncated")
+            self.assertEqual(bench._ledger_load(path), {})
+            self.assertEqual(bench._ledger_load(None), {})
+            self.assertEqual(bench._ledger_load(os.path.join(td, "nope")), {})
+            # 单锚点子表不装载（_ledger_interp 对单点本就返回 None）；
+            # 缺 density 的子表无法参与归户匹配，同样丢掉
+            with open(path, "w") as f:
+                f.write('{"m|code@abc": [{"density": 3.4, "anchors": [[1000, 300]]}]}')
+            self.assertEqual(bench._ledger_load(path), {})
+            with open(path, "w") as f:
+                f.write('{"m|code@abc": [{"anchors": [[1000, 300], [2000, 600]]}]}')
+            self.assertEqual(bench._ledger_load(path), {})
+            # v1 结构（键→裸锚点列表）不装载：不猜着迁移，自然失效重建
+            with open(path, "w") as f:
+                f.write('{"m|code@abc": [[1000, 300], [2000, 600]]}')
+            self.assertEqual(bench._ledger_load(path), {})
+
+    def test_pick_arbitrates_by_probe_density(self):
+        """归户仲裁：probe 密度与子表标定密度相差 ≤5% 归同一张（probe nonce
+        固有抖动 ≤1.7%，不会误判）；超 5% 新建子表（真换分词器的量级）。"""
+        subs = [{"density": 3.46, "source": {"deploy": "fastllm"},
+                 "seen": 1.0, "anchors": [[1000.0, 300.0]]}]
+        # 同分词器（探针读数小抖）→ 归户，不新建
+        idx, new = bench._ledger_pick(subs, 3.50, {"deploy": "fastllm"}, 5.0)
+        self.assertEqual((idx, new), (0, False))
+        self.assertEqual(len(subs), 1)
+        self.assertEqual(subs[0]["seen"], 5.0, "归户要刷新 seen（LRU 依据）")
+        # 换分词器（差 20%）→ 新建，**旧表保留**（切回该后端时直接复用）
+        idx, new = bench._ledger_pick(subs, 2.87, {"deploy": "lvllm"}, 9.0)
+        self.assertEqual((idx, new), (1, True))
+        self.assertEqual(len(subs), 2)
+        self.assertEqual(subs[0]["density"], 3.46, "旧表不得被覆写或作废")
+        self.assertEqual(subs[1]["source"]["deploy"], "lvllm", "新表记来源")
+
+    def test_pick_source_does_not_overwrite(self):
+        """来源只补空缺不覆写：后续换了机器仍归同一表时，覆写会把来源说成
+        一个从未建过这张表的地址，事后查污染反而误导。"""
+        subs = [{"density": 3.46, "source": {"deploy": "fastllm"},
+                 "seen": 1.0, "anchors": [[1.0, 1.0]]}]
+        bench._ledger_pick(subs, 3.47, {"deploy": "lvllm"}, 2.0)
+        self.assertEqual(subs[0]["source"]["deploy"], "fastllm")
+
+    def test_pick_caps_subtables_lru(self):
+        """子表上限 3（拍板值）：满员后淘汰最久未用（seen 最小），保留近期
+        真在用的部署——fallback 切走再切回的两边都是热的。"""
+        subs = [{"density": d, "source": {"deploy": n}, "seen": s, "anchors": []}
+                for d, n, s in ((3.4, "a", 1.0), (2.8, "b", 2.0), (1.9, "c", 3.0))]
+        idx, new = bench._ledger_pick(subs, 4.9, {"deploy": "d"}, 9.0)
+        self.assertTrue(new)
+        self.assertEqual(len(subs), bench.DENSITY_LEDGER_MAX_SUBTABLES)
+        self.assertNotIn("a", [s["source"]["deploy"] for s in subs],
+                         "seen 最小的应先被淘汰")
+        self.assertIn("d", [s["source"]["deploy"] for s in subs])
+
+    def test_note_uses_probe_density_not_observation_density(self):
+        """归户只认本轮 probe 密度，不认观测自身密度：实测同机器自己的观测在
+        累计密度口径下跨 30~50%（小档被模板稀释、大档遇密度阶跃），用观测密度
+        逐条归户会把一轮测速撕成好几张表。"""
+        run = BenchRun({"model_info": {"m": {"deploy_label": "dep1"}}})
+        run._probe_density[("m", "code")] = 3.46     # probe 指纹归既有表
+        lk = bench._ledger_key("m", "code")
+        run.density[lk] = [{"density": 3.46, "source": {}, "seen": 1.0,
+                            "anchors": [[113473.0, 32947.0]]}]
+        # 大档观测自身密度 2.55（与标定差 26%），仍应归同一张表
+        run._ledger_note(lk, 334000, 131100)
+        self.assertEqual(len(run.density[lk]), 1,
+                         "同分词器一轮内的观测不得因自身密度差异拆表")
+        self.assertEqual(len(run.density[lk][0]["anchors"]), 2)
+        self.assertEqual(run._pending_ledger_notes, [], "归户不应播报")
+
+    def test_note_announces_new_subtable(self):
+        """probe 密度与所有已知口径都差超容差 → 新建子表并播报（影响全矩阵
+        读数的环境事件不得静默）。"""
+        run = BenchRun({"model_info": {"m": {"deploy_label": "lvllm-x"}},
+                        "gateway_url": "http://h:1"})
+        run._probe_density[("m", "code")] = 2.10     # 与已知 3.46 差 39%
+        lk = bench._ledger_key("m", "code")
+        run.density[lk] = [{"density": 3.46, "source": {}, "seen": 1.0,
+                            "anchors": [[113473.0, 32947.0]]}]
+        run._ledger_note(lk, 113473, 54000)
+        self.assertEqual(len(run.density[lk]), 2)
+        self.assertEqual(len(run._pending_ledger_notes), 1)
+        msg = run._pending_ledger_notes[0]
+        self.assertIn("新建子表", msg)
+        self.assertIn("lvllm-x", msg, "播报要带来源，才能看出是分词器还是改道")
+
+    def test_note_without_probe_density_falls_back_to_observation(self):
+        """无 probe 密度的调用路径退回**观测自身密度**归户（宁可多建表不合表），
+        而密度 <1 字符/token 的观测直接丢弃——子表的标定密度决定后续所有观测
+        归到哪张表，拿一个不合理的数当标定值会把整键的归户带偏。"""
+        run = BenchRun({})
+        lk = bench._ledger_key("m", "code")
+        run.density[lk] = [{"density": 3.47, "source": {}, "seen": 1.0,
+                            "anchors": [[113538.0, 32947.0]]}]
+        # ① 观测密度 3.47（与既有子表同口径）→ 归户，不新建也不播报
+        run._ledger_note(lk, 113857, 32800)
+        self.assertEqual(len(run.density[lk]), 1, "同口径不得新建子表")
+        self.assertEqual(run._pending_ledger_notes, [])
+        # ② 观测密度 2.11（差 39%）→ 新建（无 probe 时只能拿它当口径代表）
+        run._ledger_note(lk, 113857, 54000)
+        self.assertEqual(len(run.density[lk]), 2, "超容差应新建子表")
+        self.assertEqual(len(run._pending_ledger_notes), 1)
+        # ③ 密度 0.25（<1）→ 丢弃：不新建、不写入、不再播报
+        run._ledger_note(lk, 100, 400)
+        self.assertEqual(len(run.density[lk]), 2, "越界密度不配当标定值")
+        self.assertEqual(len(run._pending_ledger_notes), 1, "丢弃路径不得发播报")
+
+    def test_construction_prefers_covering_subtable(self):
+        """构造取「覆盖目标且锚点最多」的子表，而不是本轮 probe 新建的空表：
+        probe 切回旧分词器时，历史同口径表就该直接复用（分表而非作废的目的）。"""
+        run = BenchRun({})
+        lk = bench._ledger_key("m", "code")
+        run.density[lk] = [
+            {"density": 2.1, "source": {}, "seen": 9.0, "anchors": []},      # 本轮新表（空）
+            {"density": 3.4, "source": {}, "seen": 1.0,
+             "anchors": [[100000.0, 31250.0], [200000.0, 102678.0]]},        # 历史同口径
+        ]
+        run._probe_density[("m", "code")] = 2.1
+        got = {}
+
+        async def fake_one(client, model, msgs, scenario, req_i, ctx, conc,
+                           cpt, max_tokens, rep=0, quiet=False,
+                           est_tokens=None, img_tokens=0, **kw):
+            got["chars"] = len(msgs[1]["content"])
+            return {"req": req_i, "err": None, "first_abs": 1.0, "last_abs": 2.0,
+                    "out_tokens": 10, "prompt_tokens": ctx, "usage_real": True,
+                    "sent_chars": 10 ** 9, "cache_hit": 0, "cache_reported": False,
+                    "finish": "length", "ttft_s": 0.1, "ttft_net_s": 0.1,
+                    "decode_tok_s": 10.0, "total_s": 1.0, "stall_s": None,
+                    "stall_count": None, "max_gap_s": None, "decode_burst": None,
+                    "tok_per_chunk": 1.0, "prefill_tok_s": 100.0,
+                    "prefill_net_tok_s": 100.0, "text_chars": 0, "reason_chars": 0}
+
+        async def noop(ev):
+            return None
+        run._one = fake_one
+        run.emit = noop
+        import asyncio as _aio
+        _aio.run(run._run_point(None, "m", "code", 60000, 1, 1.8))
+        self.assertLess(got["chars"], 160000,
+                        "应用历史表的塔陷段斜率（旧新表均无料时不得乱猜）")
+
+    def test_construction_prefers_ledger_over_single_anchor(self):
+        """有台账时构造走分段内插，而不是旧单锚点+滑动斜率：这是 64K 档
+        +40% 的成因所在（旧公式用邻段斜率外推跨不过密度阶跃）。"""
+        run = BenchRun({})
+        key = ("m", "code")
+        lk = bench._ledger_key("m", "code")
+        self.assertIsNotNone(lk)
+        # 台账：100K 字符=31250 tok，200K 字符=102678 tok（密度塔陷段 1.4 c/t）
+        run.density[lk] = [{"density": 3.2, "source": {}, "seen": 1.0,
+                            "anchors": [[100000.0, 31250.0],
+                                        [200000.0, 102678.0]]}]
+        # 旧记账故意设成普通段斜率 3.2：若被采纳，64K 会构造出 ~200K 字符
+        run.prefix_kb[key] = (100000.0, 31250.0)
+        run.cpt_marginal[key] = 3.2
+        got = None
+
+        async def fake_one(client, model, msgs, scenario, req_i, ctx, conc,
+                           cpt, max_tokens, rep=0, quiet=False,
+                           est_tokens=None, img_tokens=0, **kw):
+            nonlocal got
+            got = len(msgs[1]["content"])
+            return {"req": req_i, "err": None, "first_abs": 1.0, "last_abs": 2.0,
+                    "out_tokens": 10, "prompt_tokens": ctx, "usage_real": True,
+                    "sent_chars": 10 ** 9, "cache_hit": 0, "cache_reported": False,
+                    "finish": "length", "ttft_s": 0.1, "ttft_net_s": 0.1,
+                    "decode_tok_s": 10.0, "total_s": 1.0, "stall_s": None,
+                    "stall_count": None, "max_gap_s": None, "decode_burst": None,
+                    "tok_per_chunk": 1.0, "prefill_tok_s": 100.0,
+                    "prefill_net_tok_s": 100.0, "text_chars": 0, "reason_chars": 0}
+
+        async def noop_emit(ev):
+            return None
+
+        run._one = fake_one
+        run.emit = noop_emit
+        asyncio.run(run._run_point(None, "m", "code", 60000, 1, 1.8))
+        self.assertIsNotNone(got)
+        # 内插值：100000 + (60000-31250)*100000/71428 ≈ 140560（+ 固定开销）
+        self.assertLess(got, 160000,
+                        "走了台账（塔陷段斜率）；若走旧公式会 >190000")
+
+
 class TestCtxDeviationRetest(unittest.IsolatedAsyncioTestCase):
     """上下文构建偏离 >CTX_DEV_TOLERANCE 时按实测密度校正重测：_one 打桩
     控制实测 prompt_tokens（按消息字符数 ÷ 固定密度建模真实分词），校准打桩
@@ -2234,8 +2597,8 @@ class TestCtxDeviationRetest(unittest.IsolatedAsyncioTestCase):
             req_calls.append(r)
             return r
 
-        async def fake_calib(key, chars, filler_n, ok):
-            calib_calls.append((chars, filler_n))
+        async def fake_calib(key, chars, filler_n, ok, prefix_obs=False):
+            calib_calls.append((chars, filler_n, prefix_obs))
 
         async def fake_emit(ev):
             if ev.get("type") == "status":
@@ -2402,6 +2765,106 @@ class TestCtxDeviationRetest(unittest.IsolatedAsyncioTestCase):
                             "槽位 1 重测 nonce 应与首测不同")
         self.assertEqual(len(set(retry_nonces)), len(retry_nonces),
                          "重测批内各槽位 nonce 互不相同")
+
+    async def test_first_try_chars_lands_with_reading(self):
+        """D：首测构造字符量随 ctx_retry 成对落档。只存读数不存字节量时，
+        「同一段字节 ↔ 哪个读数」事后无法验证（2026-10-10 计数稳定性定性
+        因此只能从其他点位反推）。未触发重测时两键同为 None。"""
+        key = (self.MODEL, self.SCEN)
+        run, reqs, _calibs, _ = self._make_run(
+            [{"prompt_tokens": self._density(1.5)},
+             {"prompt_tokens": self._density(1.5)}])
+        run.prefix_kb[key] = (2000.0, 1500.0)
+        run.cpt_marginal[key] = 2.0
+        point = await run._run_point(None, self.MODEL, self.SCEN, 4096, 1, 1.8)
+        self.assertIsNotNone(point["ctx_retry"], "前提：本例触发重测")
+        first_chars = sum(len(m["content"]) for m in reqs[0]["_msgs"])
+        self.assertEqual(point["ctx_retry_chars"], first_chars,
+                         "ctx_retry_chars 应等于首测那一批的构造字符量")
+        self.assertNotEqual(point["ctx_retry_chars"],
+                            sum(len(m["content"]) for m in reqs[1]["_msgs"]),
+                            "校正后的重测批字符量已变，两者不得混淆")
+
+    async def test_no_retest_leaves_retry_keys_none(self):
+        """未触发重测（实测落在 ±10% 内）时两个留痕键为 None——它们只在
+        真的发生过一次「首测」时才有意义。构造按 cpt=1.8 估字符数，
+        故打桩密度取 1.8 即零偏离。"""
+        run, _reqs, _calibs, _ = self._make_run(
+            [{"prompt_tokens": self._density(1.8)}])
+        point = await run._run_point(None, self.MODEL, self.SCEN, 4096, 1, 1.8)
+        self.assertIsNone(point["ctx_retry"])
+        self.assertIsNone(point["ctx_retry_chars"])
+
+
+class TestPointCalibFreeze(unittest.IsolatedAsyncioTestCase):
+    """A：同一点位的 repeats 之间冻结密度记账（_calib_snapshot/_calib_restore）。
+
+    背景：校准是「边测边学」的滑动记账，同点位 reps 之间这个学习使 rep1 的
+    构造量被 rep0 的读数牵动——实测（Lvllm/Flash-Next、64K 单档×repeats=3、
+    无回退无重测无异常、all_ok 全 True）逐 rep prompt_tokens = 92608/51530/
+    69112，聚合行是三个不同长度的均值（且服务端计数零噪声，漂移全在构造侧）。
+    修复后：同点位内各 rep 构造逐位一致；点位之间照常学习（ADR-0005 不削弱）。"""
+
+    KEY = ("m", "code")
+
+    def _run(self):
+        run = BenchRun({})
+        run.cpt_calib[self.KEY] = 3.4
+        run.cpt_calib_w[self.KEY] = 1000.0
+        run.prefix_kb[self.KEY] = (111778.0, 32045.0)
+        run.cpt_marginal[self.KEY] = 3.2
+        run.cpt_marginal_w[self.KEY] = 5000.0
+        return run
+
+    def test_snapshot_restore_roundtrip_including_missing_key(self):
+        run = self._run()
+        snap = run._calib_snapshot(("other", "code"))   # 全缺失键
+        run.cpt_calib[("other", "code")] = 9.9          # 模拟 rep0 写入
+        run.prefix_kb[("other", "code")] = (1.0, 2.0)
+        run._calib_restore(("other", "code"), snap)
+        self.assertNotIn(("other", "code"), run.cpt_calib,
+                         "快照时不存在的键，恢复后必须仍不存在（而非留 None）")
+        self.assertNotIn(("other", "code"), run.prefix_kb)
+
+    def test_restore_only_touches_this_key(self):
+        """快照/恢复不得连带清掉其他 (model, scenario) 的记账：同一次运行里
+        多模型/多场景交替出点，越界恢复会把别人的学习成果抹掉。"""
+        run = self._run()
+        other = ("m2", "creative")
+        run.prefix_kb[other] = (5.0, 6.0)
+        run.cpt_calib[other] = 1.5
+        snap = run._calib_snapshot(self.KEY)
+        run.prefix_kb[self.KEY] = (999.0, 888.0)   # 本 key 被 rep0 改写
+        run.cpt_calib[self.KEY] = 7.7
+        run._calib_restore(self.KEY, snap)
+        self.assertEqual(run.prefix_kb[self.KEY], (111778.0, 32045.0))
+        self.assertEqual(run.cpt_calib[self.KEY], 3.4)
+        self.assertEqual(run.prefix_kb[other], (5.0, 6.0), "其他 key 不得受影响")
+        self.assertEqual(run.cpt_calib[other], 1.5)
+
+    def test_weight_accumulation_not_triple_counted(self):
+        """恢复后末轮观测仍入账一次：repeats=3 的三份相同观测不得把滑动
+        平均的字符权重计成 3 倍（否则该点对校准的影响被人为抬高）。"""
+        run = self._run()
+        snap = run._calib_snapshot(self.KEY)
+        w0 = run.cpt_calib_w[self.KEY]
+        for _rep in range(3):
+            if _rep > 0:
+                run._calib_restore(self.KEY, snap)
+            run.cpt_calib_w[self.KEY] += 100.0   # 模拟一轮校准写入
+        self.assertEqual(run.cpt_calib_w[self.KEY], w0 + 100.0,
+                         "三轮只应计一轮的权重（前两轮在恢复时被回退）")
+
+    def test_freeze_call_sites_present(self):
+        """源头卡：两个出点循环（文本阶梯 / agent 矩阵）都要有 rep 间冻结，
+        漏一个则该路径继续混口径。"""
+        src = open(bench.__file__, encoding="utf-8").read()
+        self.assertGreaterEqual(src.count("_calib_restore"), 3,
+                                "快照/恢复原语定义 1 处 + 两处 rep 循环调用")
+        for marker in ("calib_snap = self._calib_snapshot((model, scenario))",
+                       "calib_snap = self._calib_snapshot(key)"):
+            self.assertIn(marker, src,
+                          "缺一条出点路径的快照（文本阶梯或 agent 矩阵）")
 
 
 class TestDegenerateText(unittest.TestCase):
@@ -4212,6 +4675,49 @@ class TestConcBatchStatsAggregate(unittest.TestCase):
         self.assertNotIn("decode_peak_tok_s", agg)
         self.assertIsNone(agg["reps"][0]["decode_peak_tok_s"])
         self.assertIsNone(agg["reps"][1]["decode_conc_tok_s"])
+
+
+class TestStoppedPoint(unittest.TestCase):
+    """停止时中断点的收口（_stopped_point）：中断档必须在存档里留下 err 点，
+    不能再整档无痕消失（2026-09-24 256K 档事故的直接后果）。"""
+
+    _IDENT = {"model": "m1", "scenario": "code", "kind": "llm",
+              "ctx_target": 262144, "concurrency": 1}
+
+    def test_identity_survives_without_completed_reps(self):
+        """零已完成轮次（首个复测就被打断，正是 256K 那种）：身份字段仍由
+        ident 兜底产出，档位/并发可定位。"""
+        pt = _stopped_point([], dict(self._IDENT), "测量被手动停止")
+        self.assertEqual(pt["model"], "m1")
+        self.assertEqual(pt["ctx_target"], 262144)
+        self.assertEqual(pt["concurrency"], 1)
+        self.assertFalse(pt["all_ok"])
+        self.assertEqual(pt["err"], "测量被手动停止")
+        self.assertTrue(pt["stopped_mid_point"])
+
+    def test_readings_voided_not_carried_over(self):
+        """半截读数一律置空：已完成轮次的 ttft/prefill/decode 不得残留在
+        中断点上（否则该点会混进对比图当真值）。"""
+        rep = {**self._IDENT, "ttft_s": 12.3, "prefill_tok_s": 800.0,
+               "decode_tok_s": 40.0, "prompt_tokens": 262144, "out_tokens": 512,
+               "batch_time_s": 99.9, "all_ok": True, "rtf": 0.4, "speed_x": 2.5,
+               "reqs": [{"req": 0, "err": None}], "reps": [{"ttft_s": 1.0}]}
+        pt = _stopped_point([rep], dict(self._IDENT), "停止")
+        for k in ("ttft_s", "prefill_tok_s", "decode_tok_s", "prompt_tokens",
+                  "out_tokens", "batch_time_s"):
+            self.assertIsNone(pt[k], f"半截读数未清空：{k}")
+        # 媒体口径键不在 _VOID_POINT_KEYS 内，靠 _stopped_point 显式清空
+        self.assertIsNone(pt["rtf"])
+        self.assertIsNone(pt["speed_x"])
+        self.assertEqual(pt["reqs"], [])
+        self.assertNotIn("reps", pt)
+
+    def test_ident_overrides_rep_shell(self):
+        """ident 覆盖骨架：停止发生在贴边裁减档时，ctx_target 记的是裁后实测
+        档位，须与已完成点同口径（调用方另以 ctx_edge 留痕原档位）。"""
+        rep = {**self._IDENT, "ctx_target": 260608, "ttft_s": 5.0}
+        pt = _stopped_point([rep], {**self._IDENT, "ctx_target": 260608}, "停止")
+        self.assertEqual(pt["ctx_target"], 260608)
 
 
 if __name__ == "__main__":

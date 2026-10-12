@@ -443,6 +443,19 @@ DEFAULT_CONCURRENCIES = [1, 2, 5]
 # （构造按校准系数命中目标，实测偏差 ≤1%）与系统提示等隐式占用（ADR-0005）
 CTX_HEADROOM = 1024
 
+# 单请求超时（秒）取值上界。**本字段是「连续无输出多少秒判为断开」的闲置超时
+# （idle）**——随每次收到字节归零重计，不是「单请求总时长」；它是 httpx 的
+# read 超时（run() 里 httpx.Timeout(read=cfg["timeout_s"])）。
+# 上界必须存在：兜的是「对面彻底不响应」这一种需要止损的情形（不设顶 = 网关
+# 挂死时测速永挂）。但也必须够宽：超长上下文 prefill 全程一个字节都不吐
+# （实测 218K tokens 在 2×2080Ti fastllm 上静默约 9 分钟），512K/1M 档更久。
+# 7200（2 小时）覆盖那类静默并留余量。
+# 请求「跑飞不收尾」（连接活着、一直吐字节）不由本字段兜：由 client_cut 按
+# token 超发量主动断流（CLIENT_CUT_FACTOR），按量判比按墙上时钟猜准。
+# 消费方共三处，改这里要同步：server._validate_bench_cfg 的范围校验、
+# server 复测路径对存档值的钳制、前端 fTimeout 的 min/max（前端同名常量）。
+TIMEOUT_S_MAX = 7200
+
 # 部署上限超窗「贴边裁减」阈值：目标档连同输出预算超出部署上限的量不超过
 # max_ctx × 本比例时不再整档跳过，而是把上下文裁减到能放下（贴边）实测一次
 # ——256K 部署测 256K 档这类「档位顶着上限」的矩阵点（输出预算只占上限的
@@ -474,6 +487,9 @@ CTX_EDGE_FB_RATIO = 0.85
 # 阶梯删减语料（改 shape）比继续判失败更可能救回该点。仅空流启用——瞬时类
 # （超时/5xx）重试确有自愈价值，不得因耗尽而误改 shape 污染口径
 EMPTY_STREAM_FORCE_EDGE_FB = True
+
+# 校准快照的「键原本不存在」哨兵（None 是合法值，不能拿来表示缺失）
+_NO_CALIB = object()
 
 # 上下文构建偏离重测阈值（ADR-0005 嵌套记账盲区的现场补救）：语料流 token
 # 密度不均时，滑动边际估算（cpt_marginal）对「新进入语料段」的密度只能外推
@@ -1171,6 +1187,232 @@ SCENARIOS["tts"]["filler_boundaries"] = SCENARIOS["creative"]["filler_boundaries
 # translate 场景的待译原文同复用创意语料流（中文散文 = 真实中译英负载）
 SCENARIOS["translate"]["filler_stream"] = SCENARIOS["creative"]["filler_stream"]
 SCENARIOS["translate"]["filler_boundaries"] = SCENARIOS["creative"]["filler_boundaries"]
+
+
+# ---------------------------------------------------------------------------
+# 密度台账（分段线性 chars↔tokens）
+# ---------------------------------------------------------------------------
+# 为什么需要它：语料流的 token 密度沿流剧烈不均——代码语料里 ggml-quants.c
+# 的整数字常量表区（流上 ~188K–245K 字符，数字字符占比 10%）边际密度只有
+# ~1.4 字符/token，而前后普通源码段是 ~3.2。构造长档位靠「上一档斜率外推
+# 下一档」（prefix_kb 单锚点 + cpt_marginal 滑动均值）时，遇上这种**阶跃**
+# 必然失准：实测 64K 档首测 +40%，而它后面的 128K 档（增量段全在塌陷区内）
+# 只偏 1%——因为到那时模型已经吃过这个区间的样本。只有「第一个跨过节跃」
+# 的档位会中招，而每个新运行都要重付一次学费。
+# 治本办法是把密度做成**多点表**而非单点斜率：已知锚点之间分段线性内插，
+# 阶跃被表本身容纳。锚点不需要引入分词器（那会破「只通过 OpenAI 兼容协议
+# 观察」的边界并新增依赖）——每轮测速本来就在产出 (填充字符数, 实测
+# prompt_tokens) 真值对，台账只是**别把它们丢了**：跨运行持久化、按语料内容
+# 哈希寻址（改语料即自然失效，不产生错表）。
+DENSITY_LEDGER_MAX_POINTS = 96    # 台账点数上限（超出按字符数等距抽稀）
+DENSITY_LEDGER_MERGE_CHARS = 64   # 字符数差小于此值的锚点视为同一点（取新）
+DENSITY_LEDGER_FILE = "density-ledger.v2"   # 不用 .json 后缀：避开历史列表扫描
+# v2：一个键下挂**多张子表**（v1 是一键一表）。原因：同一模型名背后的分词器
+# 会变（网关 fallback 到另一套部署、换 tokenizer 的引擎升级），一张表只能
+# 要么静默换血要么整体作废。实测（2026-10-10，同档位=同批字节跨运行对比）：
+# 换量化/换引擎（fastllm·vLLM·llama.cpp·Lvllm）密度只差 ≤2%（量化不改分词），
+# 同一部署跨运行抖动 ≤1.7%；真换词表才是量级差。所以子表只在真换词表时新建，
+# 不会因日常换部署而 proliferate。
+DENSITY_LEDGER_TOL = 0.05         # 归户容差：实测密度与子表标定密度相差在此内同一张表
+DENSITY_LEDGER_MAX_SUBTABLES = 3  # 每个 (模型,场景,语料) 最多几张子表（LRU 淘汰）
+
+
+def _ledger_pick(subs: list[dict], density: float | None,
+                 source: dict | None, now: float) -> tuple[int, bool]:
+    """本次观测属于哪张子表：返回 (下标, 是否新建)。
+
+    归户用**密度**而不是精确指纹：probe 的 nonce 是随机 4 位数字，其读数有
+    ~1% 固有抖动（实测同模型跨运行 ≤1.7%），拿它当精确键会误判「换了分词器」
+    而疯狂新建表。相对差 ≤DENSITY_LEDGER_TOL 即归入已有表（当前 5%：抖动地板
+    1.7% 与真换词表的量级差之间）。
+    超上限按最近使用淘汰（seen 最小的）——保留的都是近期真在用的部署，
+    fallback 切走再切回的两边都是热的（作废方案每次切换都重付学费）。"""
+    if density and density > 0:
+        best, best_dev = None, None
+        for i, s in enumerate(subs):
+            d = s.get("density")
+            if not d:
+                continue
+            dev = abs(density - d) / d
+            if dev <= DENSITY_LEDGER_TOL and (best_dev is None or dev < best_dev):
+                best, best_dev = i, dev
+        if best is not None:
+            subs[best]["seen"] = now
+            if source:
+                # 来源只补空缺不覆写：首次建表的那台机器才是这张表的口径来源，
+                # 后续换了机器仍归同一表（同一分词器），覆写会把来源说成一个
+                # 从来没建过这张表的地址，事后查污染时反而误导
+                subs[best].setdefault("source", source)
+            return best, False
+    if len(subs) >= DENSITY_LEDGER_MAX_SUBTABLES:
+        subs.sort(key=lambda s: s.get("seen") or 0)
+        subs.pop(0)   # LRU：淘汰最久没碰到的那张
+    subs.append({"density": density, "source": source or {},
+                 "seen": now, "anchors": []})
+    return len(subs) - 1, True
+
+
+
+def _stream_fingerprint(scenario: str) -> str | None:
+    """场景语料流的内容指纹（sha1 前 12 位）。台账按它寻址：语料一旦改动
+    （含 vendored 版本更新、缺失时静默降级到内置回退池）旧表立即不再命中，
+    而不是拿旧密度去切新内容。空流（媒体场景）返回 None → 不走台账。"""
+    stream = (SCENARIOS.get(scenario) or {}).get("filler_stream") or ""
+    if not stream:
+        return None
+    return hashlib.sha1(stream.encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def _ledger_interp(anchors: list[tuple[float, float]], target: int,
+                   fallback_slope: float | None) -> int | None:
+    """按分段线性密度表反解：要凑够 target 个 prompt_tokens，需要多少字符
+    填充。anchors = [(填充字符数, 实测 prompt_tokens), …]，调用方保证按字符数
+    升序且 tokens 同步升序（_ledger_add 维护）。
+
+    与单锚点公式（kb[0] + (ctx-kb[1]) × 滑动斜率）的区别：本函数只在**包围
+    目标的两个锚点之间**取斜率，新语料段的密度用自己的那一段描述，不再拿
+    邻段斜率外推。只有目标超出最大锚点时才外推（沿末段斜率），且退化情形
+    （零锚点/单锚点无斜率）返回 None 交回旧公式，不假装算得出。"""
+    if not anchors:
+        return None
+    if len(anchors) == 1:
+        # 单锚点无局部斜率可用，只能交回旧路径（cpt_marginal 兜底）
+        return None
+    pts = anchors
+    if target <= pts[0][1]:
+        # **低于最小锚点不外推**（真机踩过的坑，2026-10-10）：台账锚点通常从
+        # 小档位起，但若本轮只测了大档位（或台账刚由大档位建立），向下外推只能
+        # 用首段斜率——而首段斜率跳过了中间整段（被密度塔陷拉平：实测 2.25 c/t
+        # vs 小档区真实 3.5 c/t），给 8K 档构造出 +89.7% 的 prompt。
+        # 旧单锚点公式在这种情形反而准（probe 播种的锚点就在小档区），所以
+        # 此处诚实返回 None 交回旧路径，而不是猜一个数
+        return None
+    for (c1, t1), (c2, t2) in zip(pts, pts[1:]):
+        if target <= t2:
+            if c2 <= c1 or t2 <= t1:
+                return None
+            return round(c1 + (target - t1) * (c2 - c1) / (t2 - t1))
+    # 超出最大锚点：沿末段斜率外推（典型：本次矩阵比历史最高档更大）
+    (c1, t1), (c2, t2) = pts[-2], pts[-1]
+    slope = (c2 - c1) / (t2 - t1) if t2 > t1 else (fallback_slope or 0)
+    if slope <= 0:
+        return None
+    return round(pts[-1][0] + (target - pts[-1][1]) * slope)
+
+
+def _ledger_add(anchors: list[tuple[float, float]], chars: float,
+                real: float) -> list[tuple[float, float]]:
+    """把一次实测并入台账：同位置近点取新、按字符数升序、整体强制 tokens
+    单调递增、超上限抽稀。
+
+    单调性为何要硬保证：内插靠 tokens 随字符数单调，一旦某个观测回头（字更多
+    却 tokens 更少），内插会「回头」算出比实际更短的构造。不单调只可能是
+    口径错位（删减重试后实际发送量小于构造量、换料窗口的局部密度差异），
+    宁可丢这个观测也不能让台账折返。
+    密度越界（<0.3 或 >20 字符/token，与 _calibrate_usage 同界）的观测同样不采纳。"""
+    if chars <= 0 or real <= 0:
+        return list(anchors)
+    if not (0.3 <= chars / max(real, 1) <= 20):
+        return list(anchors)
+    pts = [p for p in anchors
+           if abs(p[0] - chars) > DENSITY_LEDGER_MERGE_CHARS]
+    pts.append((float(chars), float(real)))
+    pts.sort(key=lambda p: p[0])
+    # 强制单调：从左到右扫，tokens 不增的点丢弃（保留历史上更好的那个）
+    mono: list[tuple[float, float]] = []
+    for c, t in pts:
+        if mono and t <= mono[-1][1]:
+            continue
+        mono.append((c, t))
+    if len(mono) > DENSITY_LEDGER_MAX_POINTS:
+        # 等距抽稀，但最大锚点必须保留（它是向上外推的唯一起跳点）
+        step = len(mono) / DENSITY_LEDGER_MAX_POINTS
+        kept = [mono[min(len(mono) - 1, int(i * step))]
+                for i in range(DENSITY_LEDGER_MAX_POINTS - 1)]
+        if kept[-1][0] < mono[-1][0]:
+            kept.append(mono[-1])
+        mono = kept
+    return mono
+
+
+def _ledger_key(model: str, scenario: str) -> str | None:
+    """台账条目键：`model|scenario@语料指纹`。
+
+    键里必须有模型：密度由**分词器**决定，同一批字节在不同模型上算出的
+    prompt_tokens 不同（实测同一段字节在两个部署上读数差近一倍），拿一个模型
+    的表切另一个模型的 prompt，错得比不用台账更隐蔽。语料指纹负责另一半：
+    语料一改版（含目录缺失静默降级到内置回退池）旧表立即不命中。"""
+    fp = _stream_fingerprint(scenario)
+    if fp is None:
+        return None
+    return f"{model}|{scenario}@{fp}"
+
+
+def _ledger_load(path: str | None) -> dict:
+    """读台账：不存在/损坏/结构不合一律当空表——台账是优化项，坏了就当没有，
+    不能拖死测速。
+
+    v2 磁盘结构：`键 → [ {density, source, seen, anchors:[[chars,tok],…]}, … ]`。
+    子表缺 density 字段（无法参与归户匹配）或 anchors 少于 2 点（单锚点无局部
+    斜率，_ledger_interp 本就返回 None）的子表丢掉。**不兼容 v1**（v1 一键一表、
+    无密度无来源，无法参与子表匹配）：改名 density-ledger.v2 就是为了让 v1
+    自然失效重建，而不是猜着迁移。
+    """
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            return {}
+        out = {}
+        for k, subs in raw.items():
+            if not isinstance(k, str) or not isinstance(subs, list):
+                continue
+            kept = []
+            for s in subs:
+                if not isinstance(s, dict) or not s.get("density"):
+                    continue
+                try:
+                    d = float(s["density"])
+                except (TypeError, ValueError):
+                    continue
+                if not (d > 0):
+                    continue
+                pts = [[float(p[0]), float(p[1])] for p in (s.get("anchors") or [])
+                       if isinstance(p, (list, tuple)) and len(p) == 2
+                       and all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                               for x in p)]
+                if len(pts) < 2:
+                    continue
+                src = s.get("source")
+                kept.append({"density": d,
+                             "source": src if isinstance(src, dict) else {},
+                             "seen": float(s.get("seen") or 0),
+                             "anchors": pts})
+            if kept:
+                out[k] = kept[:DENSITY_LEDGER_MAX_SUBTABLES]
+        return out
+    except Exception:   # noqa: BLE001
+        return {}
+
+
+def _ledger_save(path: str, table: dict):
+    """原子写台账（同目录临时文件 + os.replace，与 _save 同口径）：截断的 JSON
+    会让下次读到半张表，而半张表比没表更坏——错误的末段锚点会被拿去外推。"""
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(table, f, ensure_ascii=False, sort_keys=True)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -1886,6 +2128,10 @@ _ROUND = {"ttft_s": 3, "ttft_net_s": 3, "prefill_tok_s": 1, "prefill_net_tok_s":
 # 取值规则：**字段含义**变化时 +1 并在下表追加一行；无该字段的存档一律按
 # LEGACY_METRIC_VERSION(0) 处理（本机制引入前的存量，前端走原隐式回退）。
 # 只改实现不改口径（重构/修 bug/换语料落点）不递增。
+# 已裁定**不递增**的两类：①构造侧改进（密度台账 ADR-0090、同点位 reps 冻结
+# ADR-0089）——偏离校正重测会把点位**替换**成有效档位读数（`ctx_retry` 留痕），
+# 落档读数的口径含义未变；②「同口径下的自救」（改 shape 回退 ADR-0085）——
+# `edge_fallback` 留痕可辨识。判据与已发布版本清单见 ADR-0093 第 19 条。
 # ---------------------------------------------------------------------------
 METRIC_VERSION = 1
 LEGACY_METRIC_VERSION = 0
@@ -2165,6 +2411,44 @@ _VOID_POINT_KEYS = (
 )
 
 
+def _stopped_point(rep_points: list[dict], ident: dict, msg: str,
+                   rtt_s: float | None = None) -> dict:
+    """被「停止」打断的当前点收口为 err 点（不再整点无痕丢弃）。
+
+    动机（2026-09-24 256K 档事故）：旧行为是 stop_flag 置位时 continue 丢弃在途
+    点，而 _save() 在 finally 里照常落盘——「停止时刻的已完成快照」里那一档
+    **整档缺席**，既不是 point_skipped 也没有 err 点，事后无从区分「这档没数据」
+    是被跳过、失败、还是被停止。长 prefill 卡住类问题因此只能翻引擎日志反推。
+
+    口径：读数字段一律置空（半截批次不可信，与地板留档同口径），只留 err 说明
+    中断事实。已完成的复测轮次不保留读数——点是整体，留部分轮次会让聚合行与
+    单轮行口径不一致，且该点本就不该进任何对比图。
+    身份字段取已完成轮次的点骨架（model/scenario/kind/ctx_target/concurrency
+    等最全），无已完成轮时由 ident 兜底。
+    """
+    base = rep_points[0] if rep_points else {}
+    pt = {**base, **ident}
+    pt.setdefault("metric_version", METRIC_VERSION)
+    for k in ("reqs", "reps", "reps_discarded", "anomaly", "err"):
+        pt.pop(k, None)
+    # 读数键**显式建键置 None**（不依赖 _void_point_readings 的「只清已有键」）：
+    # 零已完成轮次时点里没有这些键，前端按 p.ttft_s 取值会得 undefined 而非
+    # null，明细表/图表的判空口径与常规失败点不一致（e2e 用例暴露）
+    for k in _VOID_POINT_KEYS:
+        pt[k] = None
+    # 媒体口径读数同样显式建键（asr/tts 路径共用本收口）
+    for k in ("audio_s", "elapsed_s", "elapsed_net_s", "rtf", "speed_x",
+              "out_chars", "out_bytes", "ttfa_s", "audio_est"):
+        pt[k] = None
+    pt["batch_time_s"] = None
+    pt["rtt_ms"] = round(rtt_s * 1000) if rtt_s is not None else None
+    pt["reqs"] = []
+    pt["stopped_mid_point"] = True
+    pt["all_ok"] = False
+    pt["err"] = msg
+    return pt
+
+
 def _void_point_readings(pt: dict, msg: str):
     """把点标记为测量失败：读数字段置空 + all_ok=False + err 落档。
     用于「重测仍低于有效输出地板」的早停——此类读数完全不可信，不再
@@ -2377,6 +2661,15 @@ class BenchRun:
         self.prefix_kb: dict[tuple[str, str], tuple[float, float]] = {}
         self.cpt_marginal: dict[tuple[str, str], float] = {}
         self.cpt_marginal_w: dict[tuple[str, str], float] = {}
+        # 密度台账（跨运行复用）：model|scenario@语料指纹 → **子表列表**
+        # （每张 = 一个分词器口径：{density, source, seen, anchors}）。
+        # run() 开头装载、收口时落盘；mock 运行既不写也不读
+        self.density: dict[str, list[dict]] = {}
+        # probe 密度（归户指纹）：(model, scenario) → chars/real；probe 完成后写
+        self._probe_density: dict[tuple[str, str], float] = {}
+        self._pending_ledger_notes: list[str] = []
+        self._density_path = (os.path.join(results_dir, DENSITY_LEDGER_FILE)
+                              if results_dir else None)
         # (model, scenario) → prefill 实测速率曲线 [(ctx, tok/s)]（ctx 升序）：
         # 探测（@实测 prompt_tokens）播种、conc=1 测速点逐点登记。prefill 等待期估值的
         # 先验经 rate_prior() 曲线插值/外推——速率随上下文先增后减，平推
@@ -2533,6 +2826,13 @@ class BenchRun:
                     pass
         return warning
 
+    def _save_density(self):
+        """密度台账落盘：mock 运行不写（假网关的密度会把真表带偏，而那恰好是
+        唯一能静默污染跨运行状态的路径）；无表/无目录那么不写。"""
+        if self.mock_seen or not self._density_path or not self.density:
+            return
+        _ledger_save(self._density_path, self.density)
+
     def _save(self):
         if self.mock_seen:   # 模拟数据不进历史记录
             return
@@ -2587,6 +2887,10 @@ class BenchRun:
             # 本地状态，多标签页进入正在运行的任务也能拿到正确的 provider（ADR-0009：cfg 事件）
             await self.emit({"type": "cfg", "started_at": self.started_at,
                              "cfg": {k: v for k, v in cfg.items() if k != "api_key"}})
+            # 密度台账装载（跨运行复用的密度锚点）：mock 运行不读——假网关的
+            # usage 是编的，读一次就污染真表（写侧由 mock_seen 在收口处拦住）
+            if not self.mock_seen:
+                self.density = _ledger_load(self._density_path)
             uc = cfg.get("url_choice")
             if uc:   # 多地址 provider：服务端已按顺序取首个可达地址，播报本次生效地址
                 lat = f"{uc['latency_ms']}ms" if uc.get("latency_ms") is not None else "全部不可达，回退首选"
@@ -2599,7 +2903,12 @@ class BenchRun:
                 await self.emit({"type": "status", "msg":
                     "repeats=1：单次测量无统计效力，读数含瞬时抖动；"
                     "关键结论建议 repeats≥3 重复取均值"})
-            timeout = httpx.Timeout(connect=15, read=float(cfg.get("timeout_s", 600)),
+            # read = 单请求超时（idle 语义：收到字节即归零，见 TIMEOUT_S_MAX）。
+            # 上界在此再钳一次：服务端入口已校验，但 bench 可被直接调用（测试/
+            # 内嵌），且复测路径沿用存档里的历史 cfg——那条路不经 _validate_bench_cfg
+            timeout = httpx.Timeout(connect=15,
+                                    read=min(max(float(cfg.get("timeout_s", 600)), 1.0),
+                                             float(TIMEOUT_S_MAX)),
                                     write=60, pool=30)
             limits = httpx.Limits(max_connections=32, max_keepalive_connections=16)
             # 不设 client 级 Content-Type：它会盖掉 files= 的 multipart 头（ASR
@@ -2609,8 +2918,12 @@ class BenchRun:
             if cfg.get("api_key"):
                 headers["Authorization"] = f"Bearer {cfg['api_key']}"
             url = cfg["gateway_url"].rstrip("/")
+            # trust_env=False：网关地址显式指定（多为内网），隔离桌面会话注入的
+            # 代理环境变量（GNOME 系统代理导出 ALL_PROXY=socks://… 时 httpx 会
+            # 在构造期直接抛 Unknown scheme；no_proxy 里的 CIDR 客户端也不认）
             async with httpx.AsyncClient(base_url=url, headers=headers,
-                                         timeout=timeout, limits=limits) as client:
+                                         trust_env=False, timeout=timeout,
+                                         limits=limits) as client:
                 # 网络往返基线：TTFT 含 RTT + 排队等固定开销，云端短上下文的
                 # prefill 读数会被严重摊薄（实测 4K 档低估约一倍）；净口径 =
                 # TTFT − RTT（ADR-0006）
@@ -2720,7 +3033,20 @@ class BenchRun:
                                         if self.stop_flag:
                                             break
                                         rep_points.append(pt)
-                                    if self.stop_flag:   # 丢弃被中断点，交下一轮判停
+                                    if self.stop_flag:   # 被中断的媒体点收口为 err 点留档
+                                        sp = _stopped_point(
+                                            rep_points,
+                                            {"model": model, "scenario": scenario,
+                                             "kind": kind, "ctx_target": rung,
+                                             "concurrency": conc},
+                                            f"测量被手动停止（{model} / {sc['label']}"
+                                            f"{rung}{sc['unit']} / 并发 {conc}，"
+                                            "该点读数不可用）", rtt_s=self.rtt_s)
+                                        if rung_edge is not None:
+                                            sp["ctx_edge"] = rung_edge
+                                        _strip_in_full(sp)
+                                        self.results.append(sp)
+                                        await self.emit({"type": "point", "point": sp})
                                         continue
                                     point = (rep_points[0] if len(rep_points) == 1
                                              else _aggregate_reps(rep_points))
@@ -2837,7 +3163,19 @@ class BenchRun:
                                         if self.stop_flag:
                                             break
                                         rep_points.append(pt)
-                                    if self.stop_flag:   # 丢弃被中断点，交下一轮判停
+                                    if self.stop_flag:   # 被中断的翻译档收口为 err 点留档
+                                        sp = _stopped_point(
+                                            rep_points,
+                                            {"model": model, "scenario": scenario,
+                                             "kind": kind, "ctx_target": rung,
+                                             "concurrency": conc},
+                                            f"测量被手动停止（{model} / {sc['label']}"
+                                            f"{rung}{sc['unit']} / 并发 {conc}，"
+                                            "该点读数不可用）", rtt_s=self.rtt_s)
+                                        if rung_edge is not None:
+                                            sp["ctx_edge"] = rung_edge
+                                        self.results.append(sp)
+                                        await self.emit({"type": "point", "point": sp})
                                         continue
                                     point = (rep_points[0] if len(rep_points) == 1
                                              else _aggregate_reps(rep_points))
@@ -2888,17 +3226,38 @@ class BenchRun:
                                 # 输入系数按实测校准，目标长度命中更准
                                 cpt = self.cpt_calib.get((model, scenario)) or base_cpt
                                 rep_points = []
+                                # 同点位内冻结密度记账：reps 之间构造逐位一致（否则
+                                # 均值混了几个不同长度，见 _calib_snapshot 注释）；
+                                # 循环结束不再恢复，本点的观测照常推进下一档构造
+                                calib_snap = self._calib_snapshot((model, scenario))
                                 for rep in range(repeats):
                                     if repeats > 1:
                                         await self.emit({"type": "status", "msg":
                                             f"　重复轮次 {rep + 1}/{repeats}（取均值）"})
+                                    if repeats > 1 and rep > 0:
+                                        self._calib_restore((model, scenario),
+                                                            calib_snap)
                                     pt = await self._run_rep_guarded(
                                         client, model, scenario, ctx, conc,
                                         cpt, rep, max_tokens, echo_mode)
                                     if self.stop_flag:
                                         break
                                     rep_points.append(pt)
-                                if self.stop_flag:   # 停止时丢弃被中断的当前点，交给下一轮判停
+                                if self.stop_flag:   # 被中断的当前点收口为 err 点留档
+                                    sp = _stopped_point(
+                                        rep_points,
+                                        {"model": model, "scenario": scenario,
+                                         "kind": kind, "ctx_target": ctx,
+                                         "concurrency": conc},
+                                        f"测量被手动停止（{model} / "
+                                        f"{_fmt_scenario_ctx(scenario, ctx)} / "
+                                        f"并发 {conc}，该点读数不可用）",
+                                        rtt_s=self.rtt_s)
+                                    if ctx_edge is not None:
+                                        sp["ctx_edge"] = ctx_edge
+                                    _strip_in_full(sp)
+                                    self.results.append(sp)
+                                    await self.emit({"type": "point", "point": sp})
                                     continue
                                 point = (rep_points[0] if len(rep_points) == 1
                                          else _aggregate_reps(rep_points))
@@ -2915,6 +3274,12 @@ class BenchRun:
             await self.emit({"type": "error", "msg": f"测速任务异常: {e}"})
         finally:
             self.finished_at = time.time()
+            try:
+                # 台账先于存档落盘：两者都是本次运行的产出，但台账只存观测
+                # 事实（字符数/实测 tokens），即使本轮部分点位失败也已成立
+                await asyncio.to_thread(self._save_density)
+            except Exception as e:   # noqa: BLE001  优化项落盘失败不影响测速结果
+                log.warning("密度台账落盘失败（不影响测速结果）: %s", e)
             try:
                 # 存档移出事件循环：多 MB json.dump 是同步阻塞，跑在同一循环上
                 # 会卡住正在测量的 TTFT/decode tick；to_thread 只把落盘 I/O 挪走
@@ -3017,6 +3382,9 @@ class BenchRun:
         calib = chars / r["prompt_tokens"]
         self.cpt_calib[(model, scenario)] = calib
         self.cpt_calib_w[(model, scenario)] = chars
+        # probe 读数同时是台账的**分词器归户指纹**（字节固定、每轮必发；probe
+        # 失败则本轮无指纹，观测退回自身密度归户，宁可多建表不合错表）
+        self._probe_density[(model, scenario)] = filler_n / max(r["prompt_tokens"], 1)
         # 顺手播种嵌套前缀记账（探测字符量 ~3.7K 天然过 2000 字符门）：首个非零
         # 小档（<2000 字符、测速点不登记）也能按已知前缀+增量段构造（ADR-0005）
         self.prefix_kb[(model, scenario)] = (filler_n, r["prompt_tokens"])
@@ -3207,9 +3575,34 @@ class BenchRun:
         key = (model, scenario)
         kb = self.prefix_kb.get(key)
         filler_chars = None
-        if kb and ctx > 0:
-            marg = self.cpt_marginal.get(key) or cpt
-            filler_chars = max(0, round(kb[0] + (ctx - kb[1]) * marg))
+        if ctx > 0:
+            # 首选密度台账（分段线性，能容纳语料流上的密度阶跃）；取**锚点
+            # 最多且覆盖目标**的那张子表（本轮 probe 选中的表可能还是新建的空表，
+            # 历史同分词器表更有料——同分词器就该复用，这正是分表而非作废的目的）；
+            # 表不足/反解退化时回退旧的单锚点+滑动斜率公式，行为与改前一致
+            lk = _ledger_key(model, scenario)
+            subs = self.density.get(lk) if lk else None
+            if subs:
+                best = None
+                for s in subs:
+                    an = [(p[0], p[1]) for p in s.get("anchors") or []]
+                    # 目标超出该表最大锚点 ×1.25 视为不覆盖（外推太远不可信），
+                    # 让位给覆盖得到的表；全不覆盖时退回锚点最多的表做末段外推
+                    cover = bool(an) and ctx <= an[-1][1] * 1.25
+                    # 覆盖优先、锚点数次之（本轮新表只有 probe 一个点时，
+                    # 历史同分词器表的覆盖与内容都更有料）
+                    cand = (1 if cover else 0, len(an))
+                    if len(an) >= 2 and (best is None or cand > best[0]):
+                        best = (cand, an)
+                if best:
+                    n = _ledger_interp(best[1], ctx, cpt)
+                    # 合理性守卫：台账外推给出负数/零/离谱量级的构造量（超过
+                    # 目标×20 字符，连 20 c/t 的上界密度都解释不了）宁可不用
+                    if n is not None and 0 < n <= max(1, ctx) * 20:
+                        filler_chars = n
+            if filler_chars is None and kb:
+                marg = self.cpt_marginal.get(key) or cpt
+                filler_chars = max(0, round(kb[0] + (ctx - kb[1]) * marg))
         msgs_list = []
         img_tokens_list = [0] * conc
         filler_n = 0
@@ -3303,7 +3696,13 @@ class BenchRun:
         if media_msgs is None and not tl_mode:
             kb_before = self.prefix_kb.get(key)
             msgs_chars = sum(len(m["content"]) for m in msgs_list[0])
-            await self._calibrate_usage(key, msgs_chars, filler_n, ok)
+            # 换料批次（stream_offset>0，弃测重测翻 echo 落点）不入台账：窗口
+            # 不在流首，其 (字符数, tokens) 对「前缀密度表」是错的口径；
+            # 但对全局 chars/token 校准仍是有效样本（位置相关性误差由后续
+            # 档位的偏离校正吸收），所以照常入校准
+            await self._calibrate_usage(key, msgs_chars, filler_n, ok,
+                                        prefix_obs=not stream_offset)
+            await self._flush_ledger_notes()
         else:
             kb_before = None
             msgs_chars = 0
@@ -3317,6 +3716,7 @@ class BenchRun:
         # 重测必然复现，不触发。翻译场景 ctx 是字符口径（与 prompt_tokens 不同
         # 单位），不做偏离判定
         ctx_retry = None
+        ctx_retry_chars = None
         if (media_msgs is None and not tl_mode and ctx > 0 and cache_mode == "bust"
                 and not self.stop_flag):
             reals = [r["prompt_tokens"] for r in ok if r.get("usage_real")]
@@ -3335,6 +3735,10 @@ class BenchRun:
                             + ("并发批在途余量已取消，" if early_dev else "")
                             + "已按实测密度校正重测"})
                         ctx_retry = round(real_mean)
+                        # 首测的构造字符量同时落档：只有读数没有字节量时，
+                        # 「同一段字节对应哪个读数」无法事后验证（实测阻碍了
+                        # 2026-10-10 的计数稳定性定性，只能从其他点位反推）
+                        ctx_retry_chars = msgs_chars
                         # 重测必须换全新 nonce（盐 999983 与步长 137 互质，
                         # 各槽位与首测均无碰撞）：前缀缓存命中的是共享前缀而
                         # 非整条内容，同 nonce 重测会与首测共享 nonce+指令+
@@ -3356,10 +3760,11 @@ class BenchRun:
                                        for i, msgs in enumerate(retry_msgs)]
                         reqs, batch_time = await self._await_batch(retry_tasks)
                         ok = [r for r in reqs if not r.get("err")]
-                        # 重测样本同样入校准（真实密度观测，口径同首批）
+                        # 重测样本同样入校准（真实密度观测，口径同首批）；
+                        # 台账资格与首批同判（重测批共用同一 stream_offset）
                         await self._calibrate_usage(
                             key, sum(len(m["content"]) for m in retry_msgs[0]),
-                            fn, ok)
+                            fn, ok, prefix_obs=not stream_offset)
         # prefill 估值先验逐点登记：conc=1 点的实测净速率入曲线（高并发点
         # 的批量效应会扭曲速率曲线，只取单发口径；0K 档是固定开销主导、
         # 非上下文标度，不入曲线）。媒体场景（图像 token 标度未接入曲线）与
@@ -3403,6 +3808,8 @@ class BenchRun:
             "decode_peak_tok_s": None,
             "flush_tok": None, "flush_count": None, "flush_s": None,
             "ctx_retry": ctx_retry,   # 构建偏离校正重测的首次实测 prompt_tokens 留痕
+            # 首测构造字符量（与 ctx_retry 成对：字节量 ↔ 实测 token 数）
+            "ctx_retry_chars": ctx_retry_chars,
         }
         if len(ok) != conc:   # 失败原因落档（repeats>1 时聚合层按失败轮拼接覆写）
             point["err"] = _first_err(reqs)
@@ -3567,7 +3974,7 @@ class BenchRun:
             # 与 _one.emit_tick 同契约（ADR-0052）：任何失败都弹悬浮岛提醒；
             # stop_flag 置位（用户主动停止）时不弹——中断是用户动作本身
             if not self.stop_flag:
-                await self.emit({"type": "status", "toast": True,
+                await self.emit({"type": "status", "toast": True, "level": "error",
                                  "msg": f"{model} / {sc['label']} 请求 r{req_i} 失败：{msg[:120]}"})
             return {"req": req_i, "err": msg}
 
@@ -3734,8 +4141,47 @@ class BenchRun:
                     return retried
             return await _fail(msg)
 
+    # -- 点位级校准冻结（repeats 构造一致性）-----------------------------------
+    # 输入系数校准是「边测边学」的滑动记账：每次实测都改写 cpt_calib /
+    # prefix_kb / cpt_marginal，下一档构造因此更准（ADR-0005，这是设计意图）。
+    # 但同一测点的 repeats 之间这个学习成了**缺陷**：rep1 的构造量被 rep0 的
+    # 读数牵动，「重复测量取均值」实际测的是几个不同的上下文长度。实测
+    # （2026-10-10，Qwen3.8-Flash-Next/Lvllm，64K 单档 × repeats=3，无超窗回退、
+    # 无偏离重测、无异常标记、all_ok 全 True）逐 rep 实测 prompt_tokens =
+    # 92608(+41%) / 51530(−21%) / 69112(+5%)，聚合行 71083 是三个不同长度的
+    # 均值——既不代表任何一次实测，也把 +41% 的构建偏离洗成「看着没事」。
+    # 服务端计数本身零噪声（同一段字节重复 5 次读数极差 0），漂移全在构造侧。
+    # 判据：repeats 是「同一负载重复观测」，观测之间不得改变负载本身——
+    # 故同一点位内冻结，点位之间照常学习（跨档位仍在累积，ADR-0005 不削弱）。
+    _CALIB_ATTRS = ("cpt_calib", "cpt_calib_w", "prefix_kb",
+                    "cpt_marginal", "cpt_marginal_w")
+
+    def _calib_snapshot(self, key: tuple[str, str]) -> dict:
+        """取一个 (model, scenario) 的密度记账快照（缺失的键记 None，恢复时删）。
+        只快照 key 名下五个滑动记账字典的那一个键，不快照整字典：同 key 的
+        其他并发链不存在（测速按 model×scenario 串行出点），而 prefill 速率
+        曲线/输出系数不在构造链上，冻结它们会连带削弱别的口径。"""
+        snap = {}
+        for attr in self._CALIB_ATTRS:
+            d = getattr(self, attr)
+            snap[attr] = d.get(key, _NO_CALIB)
+        return snap
+
+    def _calib_restore(self, key: tuple[str, str], snap: dict):
+        """恢复快照：每个 rep 起点调用，使各 rep 的构造逐位一致。
+        末轮之后不再恢复，故本点的观测仍以「一轮」的量正常推进记账
+        （repeats=3 的三份相同观测不该把滑动平均的权重计成 3 倍）。"""
+        for attr in self._CALIB_ATTRS:
+            d = getattr(self, attr)
+            v = snap[attr]
+            if v is _NO_CALIB:
+                d.pop(key, None)
+            else:
+                d[key] = v
+
     async def _calibrate_usage(self, key: tuple[str, str], msgs_chars: int,
-                               filler_n: int, ok: list[dict]):
+                               filler_n: int, ok: list[dict],
+                               prefix_obs: bool = False):
         """输入系数实测校准 + 嵌套前缀记账：用服务端真实 prompt_tokens 反推
         chars/token。llama.cpp 等分词与场景先验（in_cpt：创意 1.5 / 代码 3.9）
         仍可能有差，校准后后续上下文点按实测值构造（ADR-0005）。按字符量加权
@@ -3778,6 +4224,79 @@ class BenchRun:
                                                   mw, m_obs, m_chars)
                     self.cpt_marginal_w[key] = mw + m_chars
             self.prefix_kb[key] = (filler_n, real)
+            # 同一观测并入密度台账（跨运行复用，见 _ledger_key）：台账要的是
+            # 「多点」，而 prefix_kb 只留最新一个锚点——单锚点对密度阶跃只能外推。
+            # 台账只收**真正的语料流前缀观测**，两个必要条件：
+            # ① prefix_obs：filler_n 确实是「从流首 0 截取」的长度。agent 矩阵传
+            #    的是 ctx_n + seg_n（指令材料另取错位段），不是前缀长度，不得入表；
+            #    弃测重测换料（stream_offset>0）同例，所以由调用方统一拦住。
+            # ② 实发量 == 构造量：_trim_middle 保留头尾掉中段，发出去的字节不再
+            #    是从流首起的前缀（尾部取自流上更远处）。真机踩过的坑（2026-10-10）：
+            #    64K 档被裁到 0.5× 后实测 113077→52748（2.14 c/t），入表后按字符序
+            #    顶掉了同位置的**正确**锚点 113538→32947（3.47 c/t），下一轮 32K 档
+            #    沿这条假斜率构造 → 首测 −39%（比不加台账更坏）
+            if (prefix_obs and filler_n > 0 and not any(
+                    r.get("sent_chars", 0) < msgs_chars for r in ok)):
+                lk = _ledger_key(key[0], key[1])
+                if lk:
+                    self._ledger_note(lk, filler_n, real)
+
+    def _ledger_source(self, model: str) -> dict:
+        """本表来源标记：部署快照 + 网关地址。不影响算法，只让事后能查
+        「这张表是哪台机器喂出来的」——网关静默改道（2026-10-10 256K 事故）
+        对引擎不可见，但来源字段会把它留痕。字段全取自 run 配置，零探测成本。"""
+        info = (self.cfg.get("model_info") or {}).get(model) or {}
+        src = {}
+        for k, dst in (("deploy_label", "deploy"), ("framework", "framework"),
+                       ("quant", "quant")):
+            v = info.get(k)
+            if isinstance(v, str) and v.strip():
+                src[dst] = v.strip()[:64]
+        gw = self.cfg.get("gateway_url")
+        if isinstance(gw, str) and gw:
+            src["gateway"] = gw[:100]
+        return src
+
+    def _ledger_note(self, lk: str, chars: float, real: float):
+        """一次前缀观测归户入表。归户用 **probe 密度**而不是观测自身的
+        chars/real：实测同机器自己的观测在累计密度口径下跨 30~50%（小档被
+        模板稀释、大档遇密度阶跃），用观测密度逐条归户会把同一台机器的
+        一轮测速撕成好几张表——归户只认本轮 probe 的读数（字节固定、每轮
+        必发、分词器指纹），一轮内全部观测进 probe 选中的那张表。
+        无 probe 密度（不经探测的调用路径）退回观测密度，宁可多建表不合表。
+        probe 密度变化超容差时新建子表并播报——分词器口径变了是影响全矩阵
+        读数的环境事件（网关静默改道坑过一次），静默新建 = 重蹈。"""
+        model, scenario = lk.split("|")[0], lk.split("|")[1].split("@")[0]
+        density = self._probe_density.get((model, scenario))
+        if not density:
+            density = chars / max(real, 1)
+        if not density or density < 1:   # 密度带内（入表守卫同界）才配当标定值
+            return
+        now = time.time()
+        subs = self.density.setdefault(lk, [])
+        src = self._ledger_source(model)
+        idx, new = _ledger_pick(subs, density, src, now)
+        sub = subs[idx]
+        sub["anchors"] = _ledger_add(
+            [(p[0], p[1]) for p in sub.get("anchors") or []], chars, real)
+        if new:
+            self._pending_ledger_notes.append(
+                f"{model} / {SCENARIOS[scenario]['label']} 密度台账：本轮"
+                f" probe 密度 {density:.2f} 字符/token，与已知分词器口径"
+                + ("（%s）相差超 %d%%，"
+                   % (", ".join(f"{s['density']:.2f}" for s in subs
+                                if s is not sub),
+                      round(DENSITY_LEDGER_TOL * 100))
+                   if len(subs) > 1 else "（无已知口径，首次建表），")
+                + f"新建子表（来源 {src.get('deploy') or src.get('gateway') or '未知'}，"
+                  "旧表保留：切回该后端时直接复用）")
+
+    async def _flush_ledger_notes(self):
+        """台账播报统一发出：_calibrate_usage 可能被同步路径复用（测试打桩），
+        不在其内部直接 emit（裸 create_task 会丢事件）；出点主路径逐点冲刷。"""
+        while self._pending_ledger_notes:
+            await self.emit({"type": "status", "msg": self._pending_ledger_notes.pop(0)})
+
 
     # -- Agent 缓存×指令矩阵 ----------------------------------------------------
 
@@ -3906,6 +4425,15 @@ class BenchRun:
             if repeats > 1:
                 await self.emit({"type": "status", "msg":
                     f"　重复轮次 {rep + 1}/{repeats}（取均值）"})
+            # 矩阵按整轮冻结密度记账：轮内跨缓存档的逐档学习是设计意图
+            # （ADR-0005），但 rep 之间不得互改——否则同一「缓存×指令」组合
+            # 在不同 rep 里是不同长度，聚合行混口径（与文本阶梯同病）。
+            # rep0 取快照、后续 rep 起点恢复；末轮之后不恢复（观测照常入账）
+            if repeats > 1:
+                if rep == 0:
+                    calib_snap = self._calib_snapshot(key)
+                else:
+                    self._calib_restore(key, calib_snap)
             base_seed = random.randint(100000, 999999)
             nonces = [f"{base_seed}-c{i}" for i in range(conc)]
             # 零缓存档实测 TTFT（净口径优先）：非回传网关的缓存迹象判别基准，
@@ -4020,7 +4548,7 @@ class BenchRun:
                                     client, model, msgs, scenario,
                                     i * n_inst + inst_ladder.index(inst), c,
                                     conc, cpt, max_tokens, rep=rep,
-                                    est_tokens=tick_est))
+                                    est_tokens=tick_est, inst=inst))
                                  for i, msgs in enumerate(msgs_list)]
                         reqs, batch_time = await self._await_batch(tasks)
                         if self.stop_flag:
@@ -4530,7 +5058,8 @@ class BenchRun:
                    prime: bool = False, _retried: int = 0,
                    _empty_retried: int = 0,
                    _edge_fb: int = 0, _trim_keep: int | None = None,
-                   _orig_chars: int | None = None) -> dict:
+                   _orig_chars: int | None = None,
+                   inst: int | None = None) -> dict:
         # quiet=True（探测/预热请求）：不发 tick/实时事件，只走完整请求链路并返回
         # 结果。prime=True 例外：保持 status 日志静默但发实时 tick（带 prime 标记）
         # ——大缓存档预热的 prefill 长达数十秒，全程无帧会让前端实时表与「进行中
@@ -4615,14 +5144,18 @@ class BenchRun:
         async def emit_tick(payload: dict):
             """tick 统一出口：prime 请求打标记（前端据此单独成列、不进 KPI）；
             错误帧随发悬浮岛提醒（ADR-0052：任何失败都应有提醒——此前仅兜底
-            重试调度弹 toast，速率闸/超窗等确定性失败只在实时表留个 ✗）。"""
+            重试调度弹 toast，速率闸/超窗等确定性失败只在实时表留个 ✗）。
+            agent 矩阵（inst 非 None）附指令档：实时表才能区分「缓存 × 指令」
+            组合（ctx 只是缓存档，req 序号是组合编码）。"""
             if prime:
                 payload["prime"] = True
+            if inst is not None:
+                payload["inst"] = inst
             await self.emit(payload)
             # stop_flag 置位（用户主动停止）时不弹失败提醒：中断是用户动作本身，
             # 不是需要提醒的失败（停止路径不播报的既有口径不变）
             if payload.get("phase") == "error" and not self.stop_flag:
-                await self.emit({"type": "status", "toast": True,
+                await self.emit({"type": "status", "toast": True, "level": "error",
                                  "msg": f"{model} / {sc['label']} / "
                                         f"{_fmt_scenario_ctx(scenario, ctx)} "
                                         f"请求 r{req_i} 失败：{payload.get('msg', '')[:120]}"})

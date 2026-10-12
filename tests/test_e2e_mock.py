@@ -1285,6 +1285,45 @@ class TestMockEndToEnd(unittest.IsolatedAsyncioTestCase):
         self.assertIn("stopped", [e["type"] for e in run.history])
         self.assertNotIn("done", [e["type"] for e in run.history])
 
+    async def test_stop_keeps_interrupted_point_as_err(self):
+        """停止时被中断的那一档必须留 err 点，不能整档无痕消失。
+
+        复现 2026-09-24 256K 档事故的可观测性缺口：旧行为下 run.results 只含
+        已完成点，那一档既不 point_skipped 也无 err 点，事后无从判断它是被跳过、
+        失败还是被停止——只能去翻推理引擎日志反推。"""
+        old_pp = mock_server.PP
+        mock_server.PP = 260.0   # 4096 ctx → prefill ~16s，够停在点中段
+        try:
+            run = BenchRun({
+                "gateway_url": f"http://127.0.0.1:{self.port}",
+                "models": ["mock-llm-7b"], "scenarios": ["creative"],
+                "ctx_list": [4096], "concurrencies": [1],
+                "max_tokens": 8, "repeats": 1, "timeout_s": 30,
+                "thinking": "disabled",
+            })
+            run.cpt_calib[("mock-llm-7b", "creative")] = 1.8   # 跳探测，直接进测量批
+            task = asyncio.create_task(run.run())
+            await asyncio.sleep(1.2)   # 已进入 4096 档的 prefill 等待期
+            run.stop()
+            await asyncio.wait_for(task, timeout=20)
+        finally:
+            mock_server.PP = old_pp
+        pts = [e["point"] for e in run.history if e.get("type") == "point"]
+        self.assertEqual(len(pts), 1, f"应留下 1 个中断点: {pts}")
+        p = pts[0]
+        self.assertEqual(p["ctx_target"], 4096)
+        self.assertFalse(p["all_ok"])
+        self.assertTrue(p.get("stopped_mid_point"))
+        self.assertIn("手动停止", p.get("err") or "")
+        # 半截读数不得留档
+        self.assertIsNone(p["ttft_s"])
+        self.assertIsNone(p["prefill_tok_s"])
+        self.assertEqual(p["reqs"], [])
+        # 终态仍是 stopped（收口口径不变）
+        types = [e["type"] for e in run.history]
+        self.assertIn("stopped", types)
+        self.assertNotIn("done", types)
+
     async def test_no_v1_prefix_fallback(self):
         """无前缀 chat 端点（MOCK_NO_V1，DeepSeek 风格）：/v1/chat 404 →
         回退无前缀并锁定，提示恰好一次，点成功。"""
