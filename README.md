@@ -123,6 +123,32 @@ Agent的调用形态和普通聊天不一样，**长对话历史早已躺在服�
 > README）。服务默认只绑 `127.0.0.1`；确需局域网访问时设 `HOST=0.0.0.0`，并在
 > `.env` 用 `ALLOWED_HOSTS=<访问用的主机名或IP>` 显式放行（写接口有 Host/同源校验）。
 
+## 🔌 MCP 服务（agent 入口）
+
+测速台的全部能力以 MCP（Model Context Protocol）开放给 agent 客户端：MCP 服务是与浏览器平级的薄客户端，经运行中的 Web 服务 REST API 工作，凭据不出服务端。
+
+**1️⃣ 前提** — `./start.sh` 已启动测速台（缺省 http://127.0.0.1:8501；非默认地址用环境变量 `LLM_SPEED_BASE` 指定）
+
+**2️⃣ 接入** — MCP 客户端（Claude Code / Kimi Code 等）配置：
+
+```json
+{"mcpServers": {"llm-speed": {"command": "<仓库路径>/.venv/bin/python",
+                              "args": ["<仓库路径>/mcp_server.py"]}}}
+```
+
+**3️⃣ 工具一览**
+
+| 工具 | 干什么 |
+| --- | --- |
+| `list_providers` / `list_models` / `list_scenarios` | 有哪些 provider / 网关后的模型 / 场景与默认阶梯 |
+| `bench_start` / `bench_status` / `bench_stop` | 发起测速（异步，立即返回 run_id）/ 进度与最近状态 / 停止 |
+| `bench_result` | 数据卡片（markdown：部署环境 + 参数 + 每档位 TTFT/prefill/decode/缓存命中；agent 为缓存×指令矩阵） |
+| `bench_history` / `bench_compare` | 历史存档列表 / 多次运行同场景对比表（跨 provider 亦可，贴边裁减点自动归回原档位） |
+
+典型对话：「现在有哪些 provider 的哪些模型」→ `list_providers` + `list_models`；「给模型 A 测速，0K/32K/128K 档」→ `bench_start` → `bench_status` 轮询 → `bench_result` 取卡片；「A 与 B 对比代码生成场景」→ 同 provider 时一次 `bench_start` 带两个模型，跨 provider 用 `bench_compare` 两次运行。
+
+> 测速卡片 **PNG** 仍在 Web 页面历史面板一键生成（卡片渲染在前端）；MCP 产出的是同口径的数据卡片（markdown）。
+
 ## 🗺️ 数据流
 
 ```mermaid
@@ -139,6 +165,7 @@ flowchart LR
 start.sh / start.bat  一键启动（建虚拟环境、装依赖、生成配置、起服务）
 server.py          FastAPI 服务端（provider 解析 + 测速任务 + SSE + 历史 + 配置写入）
 bench.py           测速引擎（prompt 构造、流式计时、矩阵调度）
+mcp_server.py      MCP 服务（stdio）：agent 入口，经运行中的服务 REST API 工作的薄客户端
 static/index.html  单页前端（ECharts 图表 + html2canvas 卡片 + 配置编辑）
 static/vendor/     本地 vendored 的图表/卡片库（离线可用；版本与哈希见其 README）
 mock_server.py     假 OpenAI 网关（自测）

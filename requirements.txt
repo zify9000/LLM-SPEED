@@ -1,4 +1,12 @@
 # 运行时依赖（锁定到本机验证过的版本，升级需全量回归 tests/）
 fastapi==0.115.0
-uvicorn==0.30.6
+uvicorn==0.31.1
 httpx==0.28.1
+# MCP 服务（mcp_server.py，ADR-0086）：
+# - mcp 钉 1.30.x：2.x 起 HTTP 客户端转 httpx2 生态，且会强拉 starlette≥0.49
+#   顶破 fastapi 0.115 的 starlette<0.39 约束；1.30 与上方钉版共存经全量回归
+# - sse-starlette==2.4.1 是兼容性关键钉：mcp 声明 ≥1.6.1，而不钉时 pip 会选
+#   ≥3.4（硬依赖 starlette≥0.49.1）引发同一冲突；stdio 传输运行时并不 import 它
+# - uvicorn 0.30.6→0.31.1 即 mcp 的下界要求（480 例全量回归通过）
+mcp==1.30.0
+sse-starlette==2.4.1
