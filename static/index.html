@@ -10,34 +10,121 @@
      html2canvas 仅导出 PNG 时用到，改为首次点击时按需注入（见 loadHtml2canvas）。
      两库版本与哈希见 static/vendor/README.md；字体走系统栈，不请求外部。 -->
 <script src="/static/vendor/echarts.min.js" defer></script>
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" id="metaTheme" content="#F9FAFB">
+<!-- 主题引导：必须在首次绘制前把 data-theme 定下来，否则用户选了深色而页面先白
+     一下（FOUC）。写成**一行**是门禁要求：tests/ 靠「<script> 与 </script> 各自
+     独占一行」提取主脚本，多行内联脚本会把提取锚点打乱。localStorage 不可用
+     （隐私模式/禁存）时回退系统偏好。 -->
+<script data-boot="theme">(function(){var d="light";try{var t=localStorage.getItem("llmspeed.theme")||"auto";d=t==="auto"?(window.matchMedia&&matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"):t}catch(e){}document.documentElement.dataset.theme=d})();</script>
 <style>
-/* ============ 设计令牌（浅色 BI 风格） ============ */
+/* ============ 设计令牌（语义层 + 双主题） ============
+   两层结构：语义令牌名在两套主题下完全一致，组件规则只写 var(--x)、永不出现主题判断；
+   深色在 html[data-theme="dark"] 里重映射同一批令牌（图表 canvas 不认 CSS 变量，由
+   syncChartTheme() 在主题切换时现读本处值——界面灰与图表灰自此同源）。
+   对比度定标口径（WCAG，数值为实测比值，改值请复测）：
+   · 正文文字 ≥4.5:1（AA）：--ink-3 是最浅的辅助文字，卡各自最差的 tinted 底色
+     （浅：--ink-3 压 --primary-soft ≈5.10、--red 压 --red-soft ≈4.98、--green 压
+     --green-soft ≈4.79；深：--ink-3 压卡面 6.63、--red 压 --red-soft 6.19、--green 压
+     --green-soft 8.73）。这些是满足约束下最浅的取值，别再调浅
+     （--ink-4 别名 --ink-3，单一取值源）
+   · 控件描边 ≥3:1（1.4.11 非文本对比）：新增 --field-border 专供表单控件，浅色
+     #7C8797（对白卡面 3.64）、深色 #64748B（对卡面 3.59）；装饰性分隔线
+     （--border/--border-2/--border-3）不受该条约束，保持轻，别拿它们当控件描边用
+   · 深色下黑阴影几乎不可见，分层靠「页底更暗 + 卡面更亮 + 描边」，故深色同时抬高
+     表面明度差并把 --sh-* 换成更浓的黑，避免「一切都在发光」的玻璃感 */
 :root{
-  /* 文字色令牌按 WCAG AA 正文 4.5:1 定标，卡的是各自最差的 tinted 底色（实测：
-     --ink-3/--ink-4 压 --primary-soft ≈5.10、--red 压 --red-soft ≈4.98、
-     --green 压 --green-soft ≈4.79）。#5F6775 / #CE2020 / #15803D 是满足
-     该约束下最浅的取值，别再调浅（--ink-4 别名 --ink-3，单一取值源） */
+  color-scheme: light;   /* 原生控件（下拉/滚动条/输入框底色）按浅色渲染 */
+  /* 表面与浮层 */
   --bg:#F9FAFB;
   --card:#FFFFFF;
+  --elev:#FFFFFF;        /* 浮层本体（弹窗/抽屉/toast/浮出菜单）：卡面 + 更强的影 */
+  --head-bg:#F9FAFB;     /* 表头底：浅色与页底同色（卡上淡灰带） */
+  --hover:#EFF1F5;       /* 悬停底色：比 --bg 深半档，白卡上可感知 */
+  --track:#E5E7EB;       /* 进度条轨道底 */
+  --scrim:rgba(17,24,39,.45);      /* 遮罩：40~60% 黑，前景要压得住背景 */
+  --sel:rgba(79,70,229,.16);       /* 文本选中底色 */
+  /* 描边 */
   --border:#E5E7EB;
   --border-2:#D1D5DB;
   --border-3:#F3F4F6;    /* 更浅一级分隔：表格行线等 */
-  --hover:#EFF1F5;       /* 悬停底色：比 --bg 深半档，白卡上可感知 */
+  --field-border:#7C8797;
+  /* 文字 */
   --ink:#111827;
   --ink-2:#374151;
   --ink-3:#5F6775;
   --ink-4:var(--ink-3);
+  /* 品牌与语义色（soft = tinted 底色，border = 同族描边） */
   --primary:#4F46E5;
   --primary-hover:#4338CA;
   --primary-soft:#EEF2FF;
+  --primary-ring:rgba(79,70,229,.15);   /* 焦点/激活外扩环 */
+  --chart-amber:#D97706;   /* 副轴（耗时类系列）轴名与刻度色：图表专用，canvas 不认变量、由 syncChartTheme 现读 */
   --green:#15803D; --green-soft:#F0FDF4; --green-border:#BBF7D0;
   --yellow:#92400E; --yellow-soft:#FEFCE8; --yellow-border:#FDE68A;
   --red:#CE2020;   --red-soft:#FEF2F2;   --red-border:#FECACA;
   --blue:#2563EB;  --blue-soft:#EFF6FF;
   --violet:#9333EA; --violet-soft:#F5F3FF;
+  /* 字体与字号阶梯（数字一律配 font-variant-numeric: tabular-nums 防跳动） */
   --font:"Inter","PingFang SC","Microsoft YaHei","Noto Sans CJK SC",system-ui,-apple-system,"Segoe UI",sans-serif;
-  --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
-  --shadow:0 1px 2px rgba(0,0,0,.05);
+  --mono:ui-monospace,SFMono-Regular,Menlo,"Cascadia Mono","Noto Sans Mono CJK SC",monospace;
+  --fs-micro:11.5px;   /* 徽标/单位/列头 */
+  --fs-sm:12.5px;      /* 辅助说明 */
+  --fs-md:13.5px;      /* 控件内文字、表格数值 */
+  --fs-lg:15px;        /* 卡片标题 */
+  --fs-xl:18px;        /* 区块标题 */
+  --fs-2xl:24px;       /* 页面标题 */
+  --fs-num:30px;       /* KPI 主数值 */
+  /* 圆角与动效骨架（主题无关） */
+  --r-xs:6px; --r-sm:8px; --r-md:10px; --r-lg:12px; --r-xl:16px; --r-pill:999px;
+  --t-1:120ms; --t-2:180ms; --t-3:280ms;   /* 微交互 / 状态切换 / 入场 */
+  --ease-std:cubic-bezier(.32,.72,.05,1);  /* 抽屉、位移 */
+  --ease-out:cubic-bezier(.16,1,.3,1);     /* 入场（快进慢出） */
+  /* 阴影阶梯（浅色） */
+  --shadow:0 1px 2px rgba(17,24,39,.05);
+  --sh-1:0 1px 2px rgba(17,24,39,.05);
+  --sh-2:0 2px 8px rgba(17,24,39,.06), 0 1px 2px rgba(17,24,39,.05);
+  --sh-3:0 10px 28px rgba(17,24,39,.10);
+  --sh-pop:0 16px 48px rgba(17,24,39,.18);
+  --nav-h:57px;
+  /* 原生 select 的下拉箭头（appearance:none 后需自画）：随主题换色 */
+  --chevron:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235F6775' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+}
+/* 深色主题：只重映射语义令牌，组件规则一行不动（新增组件请一律用 var(--x)） */
+html[data-theme="dark"]{
+  color-scheme: dark;
+  --bg:#0F1319;
+  --head-bg:#1C222C;     /* 深色下表头要比卡面「亮」一档：沿用页底会看成凹进去的黑洞 */
+  --card:#171C24;
+  --elev:#1E2530;
+  --hover:#232B38;
+  --track:#2B3340;
+  --scrim:rgba(2,6,14,.66);
+  --sel:rgba(129,140,248,.30);
+  --border:#2B3340;
+  --border-2:#3A4453;
+  --border-3:#222933;
+  --field-border:#64748B;
+  --ink:#E9EDF5;
+  --ink-2:#C6CEDB;
+  --ink-3:#97A2B4;
+  --ink-4:var(--ink-3);
+  --primary:#818CF8;
+  --primary-hover:#A5B4FC;
+  --primary-soft:#1E2440;
+  --primary-ring:rgba(129,140,248,.30);
+  --chart-amber:#FBBF24;
+  --green:#4ADE80; --green-soft:#152A1D; --green-border:#24483A;
+  --yellow:#FBBF24; --yellow-soft:#2A2113; --yellow-border:#4A3A12;
+  --red:#F87171;   --red-soft:#2A1618;   --red-border:#5B2626;
+  --blue:#60A5FA;  --blue-soft:#15202E;
+  --violet:#C4B5FD; --violet-soft:#221A2E;
+  --shadow:0 1px 2px rgba(0,0,0,.45);
+  --sh-1:0 1px 2px rgba(0,0,0,.45);
+  --sh-2:0 2px 8px rgba(0,0,0,.45), 0 1px 2px rgba(0,0,0,.40);
+  --sh-3:0 12px 32px rgba(0,0,0,.50);
+  --sh-pop:0 24px 64px rgba(0,0,0,.60);
+  --chevron:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2397A2B4' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
 }
 /* 语义标注与控件变体（替代 JS 模板里的内联样式重复） */
 .flag-warn{color:var(--yellow); cursor:help}
@@ -46,14 +133,29 @@
 .note-muted{color:var(--ink-4)}
 .note-warn{color:var(--yellow)}
 *{box-sizing:border-box; margin:0; padding:0}
-body{background:var(--bg); color:var(--ink); font:14px/1.6 var(--font)}
-button{font-family:inherit; cursor:pointer}
+html{background:var(--bg)}
+body{background:var(--bg); color:var(--ink); font:14px/1.6 var(--font);
+  -webkit-tap-highlight-color:transparent;
+  transition:background-color var(--t-2) var(--ease-std), color var(--t-2) var(--ease-std)}
+button{font-family:inherit; cursor:pointer; touch-action:manipulation}
 input,select,textarea{font-family:inherit}
-:focus-visible{outline:2px solid var(--primary); outline-offset:2px; border-radius:6px}
+::selection{background:var(--sel)}
+:focus-visible{outline:2px solid var(--primary); outline-offset:2px; border-radius:var(--r-xs)}
+/* 主题切换时滚动条/原生控件配色由 color-scheme 接管；这里只统一细滚动条尺寸
+   （Firefox 走 scrollbar-color，Chromium/Safari 走伪元素） */
+*{scrollbar-width:thin; scrollbar-color:var(--border-2) transparent}
+::-webkit-scrollbar{width:10px; height:10px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border-2); border-radius:var(--r-pill);
+  border:2px solid transparent; background-clip:content-box}
+::-webkit-scrollbar-thumb:hover{background:var(--ink-3); background-clip:content-box}
 @media (prefers-reduced-motion: reduce){
   *,*::before,*::after{animation-duration:.01ms!important; transition-duration:.01ms!important}
 }
 [hidden]{display:none!important}
+/* 屏读专用文本（保留语义、视觉隐藏） */
+.sr-only{position:absolute; width:1px; height:1px; padding:0; margin:-1px;
+  overflow:hidden; clip:rect(0 0 0 0); clip-path:inset(50%); white-space:nowrap; border:0}
 /* 跳到主内容：默认屏外，聚焦时浮现（键盘用户绕过导航） */
 .skip-link{position:absolute; left:-9999px; top:8px; z-index:140; background:var(--card);
   color:var(--primary); border:1px solid var(--border-2); border-radius:8px;
@@ -61,22 +163,43 @@ input,select,textarea{font-family:inherit}
 .skip-link:focus-visible{left:12px}
 
 /* ============ 顶部导航 ============ */
+/* 悬浮导航：半透卡面 + 背景模糊（滚动时底下内容掠过，不留硬切边）；
+   先写不透明 --card 再写 color-mix，不认 color-mix 的老浏览器落回实色。
+   滚动态阴影由 JS 给 body 挂 .scrolled（rAF 合帧，见 init 的 scroll 监听） */
 nav{background:var(--card); border-bottom:1px solid var(--border); padding:12px 24px;
-  position:sticky; top:0; z-index:50}
+  position:sticky; top:0; z-index:50; transition:box-shadow var(--t-2) var(--ease-std), border-color var(--t-2)}
+nav{background:color-mix(in srgb, var(--card) 86%, transparent);
+  backdrop-filter:saturate(180%) blur(10px); -webkit-backdrop-filter:saturate(180%) blur(10px)}
+body.scrolled nav{box-shadow:var(--sh-2); border-bottom-color:var(--border-2)}
 .nav-inner{max-width:1440px; margin:0 auto; display:flex; align-items:center; gap:12px}
 /* 窄屏：tag 是纯装饰先隐藏，其余折行兜底（导航是唯一无断点的容器，360px 必溢出） */
 @media (max-width:560px){
   .nav-inner{flex-wrap:wrap}
   .nav-inner .tag{display:none}
 }
-.brand-ic{width:32px; height:32px; border-radius:8px; background:var(--primary-soft);
-  color:var(--primary); display:flex; align-items:center; justify-content:center; flex:none}
-nav h1{font-size:15px; font-weight:600}
+/* 主题控件拿掉右侧自动外边距：它把「Provider 管理 + 状态灯」推到行尾，
+   窄屏折行时仍成立（tag 隐藏后不会多出空隙） */
+.nav-inner .theme-ctl{margin-left:auto}
+.brand-ic{width:34px; height:34px; border-radius:var(--r-md); background:var(--primary-soft);
+  color:var(--primary); display:flex; align-items:center; justify-content:center; flex:none;
+  box-shadow:inset 0 0 0 1px var(--border)}
+nav h1{font-size:15px; font-weight:700; letter-spacing:-.01em}
 nav .tag{font-size:12px; color:var(--ink-4)}
+/* 配色主题分段控件（自动/浅色/深色）：三个互斥按钮，选中态用品牌色 chip；
+   图标-only 但每个按钮带 aria-label + title（图标-only 控件不得无语义） */
+.theme-ctl{display:inline-flex; align-items:center; gap:2px; flex:none; padding:3px;
+  border:1px solid var(--border-2); border-radius:var(--r-pill); background:var(--bg)}
+.theme-ctl button{width:30px; height:26px; padding:0; border-radius:var(--r-pill);
+  justify-content:center; background:transparent; color:var(--ink-3);
+  transition:background var(--t-1), color var(--t-1)}
+.theme-ctl button:hover{color:var(--ink); background:var(--hover)}
+.theme-ctl button[aria-pressed="true"]{background:var(--primary-soft); color:var(--primary);
+  box-shadow:inset 0 0 0 1px var(--primary)}
+.theme-ctl .ic{width:14px; height:14px}
 #statusPill{display:inline-flex; align-items:center; gap:7px;
-  padding:5px 14px; border-radius:999px; font-size:12.5px; font-weight:500;
+  padding:5px 14px; border-radius:var(--r-pill); font-size:var(--fs-sm); font-weight:500;
   background:var(--card); color:var(--ink-3); border:1px solid var(--border-2);
-  transition:color .2s, border-color .2s}
+  transition:color var(--t-2), border-color var(--t-2), background-color var(--t-2)}
 #statusPill .dot{width:8px; height:8px; border-radius:50%; background:var(--border-2); flex:none}
 #statusPill.run{color:var(--green); border-color:var(--green-border); background:var(--green-soft)}
 #statusPill.run .dot{background:var(--green); animation:pulse 1.6s ease-in-out infinite}
@@ -86,9 +209,10 @@ nav .tag{font-size:12px; color:var(--ink-4)}
 
 /* ============ 页面容器 ============ */
 .page{max-width:1440px; margin:0 auto; padding:24px}
-.page-head{display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; gap:16px; flex-wrap:wrap}
-.page-head h2{font-size:22px; font-weight:700}
-.page-head .sub{color:var(--ink-3); font-size:13.5px; margin-top:2px}
+@media (min-width:1440px){ .page{padding:28px 32px} }
+.page-head{display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:8px; gap:16px; flex-wrap:wrap}
+.page-head h2{font-size:var(--fs-2xl); font-weight:700; letter-spacing:-.02em; line-height:1.25}
+.page-head .sub{color:var(--ink-3); font-size:var(--fs-md); margin-top:2px}
 .head-actions{display:flex; align-items:center; gap:8px; flex-wrap:wrap}
 .head-actions .sel-inline{display:flex; align-items:center; gap:6px}
 .head-actions .sel-inline span{color:var(--ink-3); font-size:12.5px}
@@ -97,60 +221,92 @@ nav .tag{font-size:12px; color:var(--ink-4)}
 #statusMsg.err{color:var(--red)}
 /* 运行事件常驻留痕（跳档/重试/失败）：status 行是瞬态的、toast 会自动消失，
    须留痕的事件追加到这里（point_skipped.msg、toast 状态事件） */
-#skipNotes{margin-top:8px; font-size:12px; line-height:1.7; color:var(--yellow);
-  max-height:120px; overflow-y:auto}
+/* 运行事件常驻留痕（跳档/重试/失败）：status 行是瞬态的、toast 会自动消失，
+   须留痕的事件追加到这里（point_skipped.msg、toast 状态事件）。
+   **不放在 KPI 卡里**：日志条目会把「已完成测试点」卡顶到三倍高，整行 KPI 跟着走形 */
+.runlog{background:var(--card); border:1px solid var(--border); border-left:3px solid var(--yellow);
+  border-radius:var(--r-md); padding:10px 14px; margin:-6px 0 20px; box-shadow:var(--sh-1)}
+.runlog .rl-head{font-size:var(--fs-micro); font-weight:600; color:var(--ink-3);
+  letter-spacing:.04em; margin-bottom:4px}
+#skipNotes{font-size:var(--fs-sm); line-height:1.7; color:var(--yellow);
+  max-height:132px; overflow-y:auto}
 #skipNotes .note-fail{color:var(--red)}
 
 /* ============ KPI 卡片行 ============ */
+/* 主数值 = 本视图最大的字（字号阶梯顶格），口径说明退到脚注档；
+   左侧 3px 色条用 --accent 局部变量区分四个指标（颜色不单独承载信息：
+   标题文字已写明 Prefill/Decode/进行中/已完成） */
 .kpis{display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px}
-.kpi{background:var(--card); border:1px solid var(--border); border-radius:12px;
-  padding:18px 20px; box-shadow:var(--shadow)}
-.kpi .k{font-size:13px; color:var(--ink-3); margin-bottom:4px}
-.kpi .v{font-size:26px; font-weight:700; color:var(--ink); font-variant-numeric:tabular-nums; line-height:1.25}
-.kpi .v small{font-size:13px; font-weight:500; color:var(--ink-3)}
-.kpi .d{font-size:12.5px; margin-top:3px; color:var(--ink-3)}
-.kpi.prefill .v{color:var(--primary)}
-.kpi.decode .v{color:var(--green)}
-.kpi.prog .v{color:var(--violet)}
-.progbar{height:8px; background:#E5E7EB; border-radius:999px; overflow:hidden; margin-top:10px}
-.progbar > div{height:100%; background:linear-gradient(90deg,#6366F1,#4F46E5); border-radius:999px;
-  transition:width .3s ease; width:0%}
-#decodeBarWrap > div{background:linear-gradient(90deg,#4ADE80,#16A34A)}
-#prefillBarWrap > div{background:linear-gradient(90deg,#818CF8,#4F46E5)}
+.kpi{position:relative; overflow:hidden; background:var(--card); border:1px solid var(--border);
+  border-radius:var(--r-lg); padding:16px 18px 14px 20px; box-shadow:var(--sh-1)}
+.kpi::before{content:""; position:absolute; left:0; top:0; bottom:0; width:3px;
+  background:var(--accent,var(--border-2))}
+.kpi .k{font-size:var(--fs-sm); font-weight:500; color:var(--ink-3); margin-bottom:2px}
+.kpi .v{font-size:var(--fs-num); font-weight:700; color:var(--ink); font-variant-numeric:tabular-nums;
+  line-height:1.15; letter-spacing:-.02em; display:flex; align-items:baseline; gap:6px}
+.kpi .v small{font-size:var(--fs-md); font-weight:500; color:var(--ink-3); letter-spacing:0}
+.kpi .v .est{font-size:.62em; font-weight:600; color:var(--ink-4); align-self:center;
+  letter-spacing:0; cursor:help}
+.kpi .d{font-size:var(--fs-micro); margin-top:6px; line-height:1.5; color:var(--ink-4)}
+.kpi.prefill{--accent:var(--primary)} .kpi.prefill .v{color:var(--primary)}
+.kpi.decode{--accent:var(--green)} .kpi.decode .v{color:var(--green)}
+.kpi.reqs{--accent:var(--blue)}
+.kpi.prog{--accent:var(--violet)} .kpi.prog .v{color:var(--violet)}
+.progbar{height:6px; background:var(--track); border-radius:var(--r-pill); overflow:hidden; margin-top:10px}
+.progbar > div{height:100%; border-radius:var(--r-pill); width:0%;
+  background:var(--bar,linear-gradient(90deg,var(--primary),var(--primary-hover)));
+  transition:width var(--t-3) var(--ease-std)}
+#decodeBarWrap > div{--bar:linear-gradient(90deg,#4ADE80,#16A34A)}
+#prefillBarWrap > div{--bar:linear-gradient(90deg,#818CF8,#4F46E5)}
+#progWrap > div{--bar:linear-gradient(90deg,#C4B5FD,#9333EA)}
+/* 运行中的进度条走一层流动光泽：静态宽度看不出「还在跑」，但数值本身不得被动画抢戏
+   （只在 body[data-phase=run] 时出现；prefers-reduced-motion 由全局规则归零） */
+body[data-phase="run"] .progbar > div{position:relative}
+body[data-phase="run"] .progbar > div::after{content:""; position:absolute; inset:0;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.5),transparent);
+  transform:translateX(-100%); animation:sheen 1.9s var(--ease-std) infinite}
+@keyframes sheen{to{transform:translateX(100%)}}
 
 /* ============ 布局（配置平铺 + 主区，随阶段聚焦） ============ */
 /* 三张配置卡钉死 3 等分栏：第 4 张卡（部署环境，随勾选模型显隐）整行通铺，
    不再参与 auto-fit 分栏——否则它一出现，前三栏宽度就被重新均分（勾选模型
    时布局跳动） */
 .cfg-grid{display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:20px;
-  align-items:stretch; margin-bottom:20px}
+  align-items:start; margin-bottom:20px}
 .cfg-grid .card{margin-bottom:0}
 #deployCard{grid-column:1/-1}
 @media (max-width:1100px){ .kpis{grid-template-columns:repeat(2,1fr)}
   .cfg-grid{grid-template-columns:1fr 1fr} }
 @media (max-width:720px){ .cfg-grid{grid-template-columns:1fr} }
-.card{background:var(--card); border:1px solid var(--border); border-radius:12px;
-  box-shadow:var(--shadow); margin-bottom:20px}
+.card{background:var(--card); border:1px solid var(--border); border-radius:var(--r-lg);
+  box-shadow:var(--sh-1); margin-bottom:20px}
 .card-head{padding:14px 20px; border-bottom:1px solid var(--border);
   display:flex; align-items:center; gap:8px}
-.card-head h3{font-size:14.5px; font-weight:600}
-.card-head small{color:var(--ink-4); font-weight:400; font-size:12px}
+.card-head h3{font-size:var(--fs-lg); font-weight:600; letter-spacing:-.01em}
+.card-head small{color:var(--ink-4); font-weight:400; font-size:var(--fs-sm)}
 .card-body{padding:20px}
 
 /* ============ 表单 ============ */
-label.f{display:block; color:var(--ink-3); font-size:12.5px; font-weight:500; margin:14px 0 5px}
+label.f{display:block; color:var(--ink-2); font-size:var(--fs-sm); font-weight:500; margin:14px 0 5px}
 label.f:first-child{margin-top:0}
 input[type=text],input[type=password],input[type=number],select,textarea{
-  width:100%; background:var(--card); border:1px solid var(--border-2); color:var(--ink);
-  border-radius:8px; padding:8px 12px; font-size:13.5px; min-height:38px; transition:border-color .15s, box-shadow .15s}
-input:hover,select:hover,textarea:hover{border-color:var(--ink-4)}
+  width:100%; background:var(--card); border:1px solid var(--field-border); color:var(--ink);
+  border-radius:var(--r-sm); padding:8px 12px; font-size:var(--fs-md); min-height:38px;
+  transition:border-color var(--t-1), box-shadow var(--t-1), background-color var(--t-1)}
+input:hover,select:hover,textarea:hover{border-color:var(--ink-3)}
 input:focus,select:focus,textarea:focus{outline:none; border-color:var(--primary);
-  box-shadow:0 0 0 3px rgba(79,70,229,.15)}
+  box-shadow:0 0 0 3px var(--primary-ring)}
+input:disabled,select:disabled,textarea:disabled{opacity:.5; cursor:not-allowed; background:var(--bg)}
 textarea{resize:vertical; min-height:auto}
-.hint{color:var(--ink-4); font-size:11.5px; margin-top:5px; line-height:1.5}
+select{appearance:none; -webkit-appearance:none; padding-right:32px;
+  background-image:var(--chevron); background-repeat:no-repeat;
+  background-position:right 10px center; background-size:14px}
+.hint{color:var(--ink-4); font-size:var(--fs-micro); margin-top:5px; line-height:1.55}
 /* 部署环境（跟随选中模型自动展示，只读） */
 .deploy-item{border:1px solid var(--border); border-radius:10px; padding:12px 14px; background:var(--bg)}
-.deploy-item + .deploy-item{margin-top:10px}
+/* 部署环境条目：短键值块，整宽铺满会留大片空白 —— 宽屏按内容分列，窄屏自然回落单列 */
+#deployList{display:grid; grid-template-columns:repeat(auto-fill, minmax(340px, 1fr)); gap:10px}
+.deploy-item + .deploy-item{margin-top:0}
 .deploy-item .dn{font-size:13px; font-weight:600}
 .deploy-item .dn small{color:var(--ink-4); font-weight:400; margin-left:6px}
 .deploy-item .kv{display:flex; gap:8px; margin-top:6px; font-size:12.5px}
@@ -176,53 +332,74 @@ label.f.m-sep{margin-top:16px; padding-top:14px; border-top:1px solid var(--bord
    漏并入即「子组件贴上上方组件」间距缺陷（translateWrap 曾漏） */
 #ctxWrap > label.f, #translateWrap > label.f, #replyModeWrap > label.f,
 #agentParams label.f, #mediaLadderWrap > label.f{margin-top:16px}
-/* 朴素勾选项（无放大效果） */
+/* 朴素勾选项（无放大效果）：整行可点，min-height 32px 保证触控区不靠猜 */
 .ckrow{display:flex; flex-wrap:wrap; gap:2px 0}
-.ck{display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--ink-2);
-  padding:4px 14px 4px 6px; cursor:pointer; user-select:none; border-radius:6px;
-  transition:background .12s}
+.ck{display:inline-flex; align-items:center; gap:7px; font-size:13px; color:var(--ink-2);
+  min-height:32px; padding:4px 14px 4px 8px; cursor:pointer; user-select:none;
+  border-radius:var(--r-xs); transition:background var(--t-1)}
 .ck:hover{background:var(--hover)}
-.ck input{accent-color:var(--primary); width:14px; height:14px; cursor:pointer}
+.ck input{accent-color:var(--primary); width:16px; height:16px; cursor:pointer; flex:none}
 /* 自定义上下文档位：包裹行承载删除按钮（内置档无包裹、不可删） */
-.ckwrap{display:inline-flex; align-items:center; border-radius:6px; transition:background .12s}
+.ckwrap{display:inline-flex; align-items:center; border-radius:var(--r-xs); transition:background var(--t-1)}
 .ckwrap:hover{background:var(--hover)}
 .ckwrap .ck:hover{background:transparent}
 /* 模型选择器按类型分组（llm 不加标题保持原样，媒体组带小标题） */
-.ckgroup{width:100%; font-size:12px; font-weight:600; color:var(--ink-4);
-  letter-spacing:.03em; margin:6px 0 2px}
-.ctx-del,.tl-del,.ac-del,.ai-del,.ml-del{width:18px; height:18px; padding:0; margin:0 4px 0 -2px; border-radius:4px;
+.ckgroup{width:100%; font-size:var(--fs-sm); font-weight:600; color:var(--ink-4);
+  letter-spacing:.03em; margin:8px 0 2px}
+/* 档位删除小按钮：视觉 18px，但用 ::before 把命中区向外撑到 ≈34px（触控最小尺寸）
+   而不改变布局——不能靠 padding，那一改整行就错位 */
+.ctx-del,.tl-del,.ac-del,.ai-del,.ml-del{position:relative; width:18px; height:18px; padding:0;
+  margin:0 4px 0 -2px; border-radius:var(--r-xs);
   background:transparent; color:var(--ink-4); font-size:14px; line-height:1;
-  display:inline-flex; align-items:center; justify-content:center}
+  display:inline-flex; align-items:center; justify-content:center;
+  transition:background var(--t-1), color var(--t-1)}
+.ctx-del::before,.tl-del::before,.ac-del::before,.ai-del::before,.ml-del::before{content:"";
+  position:absolute; inset:-8px}
 .ctx-del:hover,.tl-del:hover,.ac-del:hover,.ai-del:hover,.ml-del:hover{background:var(--red-soft); color:var(--red)}
 
 /* ============ Provider / 部署配置抽屉（与测速配置完全分离，ADR-0011） ============ */
 #drawerRoot{position:fixed; inset:0; z-index:100}
-#drawerScrim{position:absolute; inset:0; background:rgba(17,24,39,.45);
-  opacity:0; transition:opacity .2s ease; cursor:default}
+#drawerScrim{position:absolute; inset:0; background:var(--scrim);
+  opacity:0; transition:opacity var(--t-2) ease; cursor:default}
 #cfgDrawer{position:absolute; top:0; right:0; height:100vh; height:100dvh; width:min(560px,100vw);
-  background:var(--bg); border-left:1px solid var(--border);
-  box-shadow:-16px 0 40px rgba(17,24,39,.12);
+  background:var(--bg); border-left:1px solid var(--border-2);
+  box-shadow:var(--sh-pop);
   transform:translateX(102%); display:flex; flex-direction:column; visibility:hidden;
   /* 关闭态：visibility 延迟 .28s 生效，滑出动画不被立即隐藏吞掉；
      打开态由 .open 规则把延迟归零，visibility 立即生效 */
-  transition:transform .28s cubic-bezier(.32,.72,.05,1), visibility 0s .28s}
+  transition:transform var(--t-3) var(--ease-std), visibility 0s .28s}
 #drawerRoot.open #drawerScrim{opacity:1}
 #drawerRoot.open #cfgDrawer{transform:none; visibility:visible; transition-delay:0s, 0s}
 /* 历史删除/对比/改名/拼接/通用确认弹窗：居中对话框，复用抽屉的遮罩/头/底样式 */
 #delModalRoot, #cmpModalRoot, #renModalRoot, #spliceModalRoot, #uiDialogRoot{position:fixed; inset:0; z-index:110}
-#delModalScrim, #cmpModalScrim, #renModalScrim, #spliceModalScrim, #uiDialogScrim{position:absolute; inset:0; background:rgba(17,24,39,.45)}
+#delModalScrim, #cmpModalScrim, #renModalScrim, #spliceModalScrim, #uiDialogScrim{position:absolute; inset:0; background:var(--scrim)}
 /* 先写 vh 再写 dvh：不认 dvh 的浏览器落回 vh（至少不塌成 0 高），
    认的浏览器用后一条覆盖（移动端地址栏伸缩时不会被裁掉半截） */
 #delModal, #cmpModal, #renModal, #spliceModal, #uiDialog{position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
   width:min(640px, calc(100vw - 32px)); max-height:80vh; max-height:80dvh; display:flex; flex-direction:column;
-  background:var(--bg); border:1px solid var(--border); border-radius:14px;
-  box-shadow:0 16px 48px rgba(17,24,39,.18)}
+  background:var(--bg); border:1px solid var(--border-2); border-radius:var(--r-xl);
+  box-shadow:var(--sh-pop)}
+/* 弹窗入场：从遮罩里微微浮起（缩放+淡入，150ms 内完成，不得拖慢响应感）；
+   纯 CSS 挂在 :not([hidden]) 上，JS 只管开关 hidden，不需配合动画 */
+#delModalRoot:not([hidden]) #delModal, #cmpModalRoot:not([hidden]) #cmpModal,
+#renModalRoot:not([hidden]) #renModal, #spliceModalRoot:not([hidden]) #spliceModal,
+#uiDialogRoot:not([hidden]) #uiDialog{animation:pop var(--t-2) var(--ease-out)}
+@keyframes pop{from{opacity:0; transform:translate(-50%,-48%) scale(.97)}
+  to{opacity:1; transform:translate(-50%,-50%) scale(1)}}
+#delModalRoot:not([hidden]) #delModalScrim, #cmpModalRoot:not([hidden]) #cmpModalScrim,
+#renModalRoot:not([hidden]) #renModalScrim, #spliceModalRoot:not([hidden]) #spliceModalScrim,
+#uiDialogRoot:not([hidden]) #uiDialogScrim{animation:fade var(--t-2) ease}
+@keyframes fade{from{opacity:0} to{opacity:1}}
 /* 通用确认弹窗体量小一档 */
 #uiDialog{width:min(460px, calc(100vw - 32px))}
 #uiDialogInput{width:100%}
 .del-toolbar{display:flex; align-items:center; gap:8px; padding:10px 20px;
   background:var(--card); border-bottom:1px solid var(--border); flex:none}
-#delList .ck, #cmpList .ck, #spliceList .ck{display:flex; padding:8px 10px; border-radius:8px}
+#delList .ck, #cmpList .ck, #spliceList .ck{display:flex; padding:8px 10px; border-radius:var(--r-sm);
+  transition:background var(--t-1)}
+/* 弹窗里的候选行要能看出“可点”：整行 hover 底色 + 已勾选项淡主色底 */
+#delList .ck:hover, #cmpList .ck:hover, #spliceList .ck:hover{background:var(--hover)}
+#cmpList .ck:has(input:checked), #spliceList .ck:has(input:checked){background:var(--primary-soft)}
 #delList .ck span, #cmpList .ck span, #spliceList .ck span{min-width:0; word-break:break-all}
 .dr-head{display:flex; align-items:flex-start; gap:12px; padding:16px 20px;
   background:var(--card); border-bottom:1px solid var(--border); flex:none}
@@ -305,29 +482,43 @@ label.f.m-sep{margin-top:16px; padding-top:14px; border-top:1px solid var(--bord
   box-shadow:0 0 8px rgba(79,70,229,.55)}
 .g-empty{font-size:12px; color:var(--ink-4); padding:9px 10px; border:1px dashed var(--border);
   border-radius:8px; text-align:center}
-/* 卡片入场（阶段切换时的事实/统计区） */
-@keyframes rise{from{opacity:0; transform:translateY(6px)} to{opacity:1; transform:none}}
-.reveal{animation:rise .25s ease-out}
+/* 卡片入场（阶段切换时的事实/统计区）：同一批卡片按顺序错开 40ms 入场，
+   避免整屏同时闪现（无阶差的批量入场看不出层级、只看出卡页） */
+@keyframes rise{from{opacity:0; transform:translateY(8px)} to{opacity:1; transform:none}}
+.reveal{animation:rise var(--t-3) var(--ease-out)}
+/* 异步区域占位骨架：闪烁只在加载中出现，不得拿空块当加载态（内容不跳位） */
+.skeleton{height:14px; border-radius:var(--r-xs); margin:6px 0;
+  background:linear-gradient(90deg,var(--border-3) 25%,var(--hover) 37%,var(--border-3) 63%);
+  background-size:400% 100%; animation:shimmer 1.4s ease-in-out infinite}
+.skeleton.w-40{width:40%} .skeleton.w-60{width:60%} .skeleton.w-80{width:80%}
+@keyframes shimmer{from{background-position:100% 0} to{background-position:0 0}}
 
 /* ============ 按钮 ============ */
-button{border:none; border-radius:8px; padding:9px 16px; font-size:13px; font-weight:500;
-  display:inline-flex; align-items:center; gap:7px;
-  transition:background .15s, border-color .15s, color .15s, transform .06s}
+button{border:none; border-radius:var(--r-sm); padding:9px 16px; font-size:13px; font-weight:500;
+  display:inline-flex; align-items:center; gap:7px; letter-spacing:.005em;
+  transition:background var(--t-1), border-color var(--t-1), color var(--t-1),
+    box-shadow var(--t-1), transform 60ms}
 button:active:not(:disabled){transform:scale(.97)}
 button:disabled{opacity:.45; cursor:not-allowed}
-.btn-primary{background:var(--primary); color:#fff}
-.btn-primary:hover:not(:disabled){background:var(--primary-hover)}
-.btn-ghost{background:var(--card); border:1px solid var(--border-2); color:var(--ink-2)}
-.btn-ghost:hover:not(:disabled){background:var(--hover)}
+.btn-primary{background:var(--primary); color:#fff; box-shadow:var(--sh-1)}
+.btn-primary:hover:not(:disabled){background:var(--primary-hover); box-shadow:var(--sh-2)}
+.btn-ghost{background:var(--card); border:1px solid var(--field-border); color:var(--ink-2)}
+.btn-ghost:hover:not(:disabled){background:var(--hover); border-color:var(--ink-3); color:var(--ink)}
 /* 危险动作：幽灵按钮红色化（删除/清空/清除 Key），与主操作视觉分离 */
-.btn-ghost.danger:hover:not(:disabled){border-color:var(--red-border); color:var(--red); background:var(--red-soft)}
+.btn-ghost.danger:hover:not(:disabled){border-color:var(--red); color:var(--red); background:var(--red-soft)}
 /* 顶栏小按钮与图标按钮（抽屉关闭/部署删除等） */
-.btn-ghost.nav-btn{padding:7px 12px; font-size:12.5px}
-.icon-btn{width:34px; height:34px; padding:0; justify-content:center; flex:none;
-  background:transparent; border-radius:8px; color:var(--ink-3)}
+.btn-ghost.nav-btn{padding:7px 12px; font-size:var(--fs-sm)}
+.icon-btn{width:36px; height:36px; padding:0; justify-content:center; flex:none;
+  background:transparent; border-radius:var(--r-sm); color:var(--ink-3)}
 .icon-btn:hover:not(:disabled){background:var(--hover); color:var(--ink-2)}
 .icon-btn.danger:hover:not(:disabled){background:var(--red-soft); color:var(--red)}
 .btnrow{display:flex; gap:8px; margin-top:16px; flex-wrap:wrap}
+/* 按钮内加载态：启动/保存等异步动作期间给可见反馈（不得只靠 disabled 默默变灰） */
+.spin{width:14px; height:14px; border-radius:50%; flex:none;
+  border:2px solid currentColor; border-top-color:transparent; animation:rot .7s linear infinite}
+@keyframes rot{to{transform:rotate(360deg)}}
+/* 按钮内图标随文字基线对齐（SVG 默认按基线落位会偏高） */
+button .ic{vertical-align:-2px}
 
 /* ============ 表格 ============ */
 .tablewrap{overflow-x:auto}
@@ -336,12 +527,21 @@ button:disabled{opacity:.45; cursor:not-allowed}
 /* 实时测速表同样不贴边（与明细表一致） */
 #liveCard .tablewrap{padding:14px 20px 20px}
 table{width:100%; border-collapse:collapse; font-size:13px}
-th{color:var(--ink-3); font-weight:500; text-align:left; padding:10px 12px;
-  border-bottom:1px solid var(--border); white-space:nowrap; font-size:12px}
+th{color:var(--ink-3); font-weight:600; text-align:left; padding:9px 12px;
+  border-bottom:1px solid var(--border-2); white-space:nowrap; font-size:var(--fs-micro);
+  letter-spacing:.04em; background:var(--head-bg)}
 td{padding:10px 12px; border-bottom:1px solid var(--border-3); white-space:nowrap;
   font-variant-numeric:tabular-nums; color:var(--ink-2)}
-#liveTable td:nth-child(n+7), .resultTable td:nth-child(n+4){font-family:var(--mono); font-size:12.5px}
-.rt-scen{border:1px solid var(--border); border-radius:10px; overflow:hidden}
+#liveTable td:nth-child(n+7), .resultTable td:nth-child(n+4){font-family:var(--mono); font-size:var(--fs-md)}
+/* 数值列右对齐（仪表类数据的硬要求：位数不同的两个速度值左对齐时个位对不上，
+   眼睛要逐行重算）——只动结构确定的三处：实时表（10 列固定，测量列从第 7 列起）、
+   图末逐档位/逐轮表、卡片矩阵表（首列是行头标题，其余全数值） */
+#liveTable th:nth-child(3), #liveTable td:nth-child(3),
+#liveTable th:nth-child(4), #liveTable td:nth-child(4),
+#liveTable th:nth-child(n+7), #liveTable td:nth-child(n+7),
+.turntable th:nth-child(n+2), .turntable td:nth-child(n+2),
+.sc-tt th:nth-child(n+2), .sc-tt td:nth-child(n+2){text-align:right}
+.rt-scen{border:1px solid var(--border); border-radius:var(--r-md); overflow:hidden}
 /* 表格自身的横向滚动层：表超宽时在场景块内滚动（外层 .rt-scen 的 overflow:hidden
    只管圆角裁切，滚动挂错层级会把超宽内容硬裁掉且不出滚动条）；场景名标题栏
    留在滚动层外，横滚时保持可见 */
@@ -367,8 +567,8 @@ td{padding:10px 12px; border-bottom:1px solid var(--border-3); white-space:nowra
 /* 卡片内 agent 逐轮构成表：圆角描边容器包裹，对齐统计格/图表组件的视觉语言；
    冷启动平铺单行置顶，阶段一/阶段二左右两栏并排 */
 .sc-tt-grid{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:12px}
-.sc-tt-wrap{border:1px solid var(--border); border-radius:12px;
-  padding:10px 14px 12px; background:#fff}
+.sc-tt-wrap{border:1px solid var(--border); border-radius:var(--r-lg);
+  padding:10px 14px 12px; background:var(--card)}
 .sc-tt-title{font-size:12.5px; font-weight:600; color:var(--ink-2); margin-bottom:6px}
 .sc-tt-cold{margin-top:12px; font-size:13px; color:var(--ink-2)}
 .sc-tt-cold .sc-tt-title{margin-bottom:2px}
@@ -390,11 +590,22 @@ td{padding:10px 12px; border-bottom:1px solid var(--border-3); white-space:nowra
 .sc-tt-mx th:first-child, .sc-tt-mx td:first-child{
   background:var(--bg); font-weight:600; color:var(--ink)}
 .sc-tt-mx td:first-child{border-right:1px solid var(--border)}
-tbody tr{transition:background .12s}
+tbody tr{transition:background var(--t-1)}
 tbody tr:hover{background:var(--hover)}
 tr.err td{color:var(--red)}
 tr.fade td{opacity:.45}
 .empty-row td{color:var(--ink-4); text-align:center; padding:28px}
+/* 空态（非表格区）：图标 + 一句话 + 下一步动作，不得留白块让用户猜 */
+.empty{display:flex; flex-direction:column; align-items:center; gap:6px; text-align:center;
+  padding:26px 18px; color:var(--ink-4); font-size:var(--fs-sm); border:1px dashed var(--border-2);
+  border-radius:var(--r-md); background:var(--bg)}
+.empty svg{width:22px; height:22px; color:var(--border-2)}
+.empty b{color:var(--ink-3); font-weight:600; font-size:13px}
+.empty.is-err{border-color:var(--red-border); background:var(--red-soft); color:var(--red)}
+.empty.is-err svg{color:var(--red)}
+.empty.is-err b{color:var(--red)}
+/* 挂在 .ckrow（flex wrap）里时占满整行，否则空态卡片被挤成一列宽 */
+.ckrow .empty{width:100%}
 /* 进行中的测速任务（多标签页入口） */
 .arun{display:flex; align-items:center; gap:10px; border:1px solid var(--green-border);
   background:var(--green-soft); border-radius:10px; padding:10px 14px;
@@ -409,17 +620,30 @@ tr.fade td{opacity:.45}
 /* ============ 图表 ============ */
 .grid2{display:grid; grid-template-columns:1fr 1fr; gap:14px}
 @media (max-width:900px){ .grid2{grid-template-columns:1fr} }
-.cm-title{font-size:14px; font-weight:600; color:var(--ink-2); margin:18px 0 10px}
+.cm-title{font-size:16px; font-weight:600; color:var(--ink); letter-spacing:-.01em; margin:20px 0 10px}
 .chart-model:first-child > .cm-title{margin-top:0}
 .cm-scen{margin-bottom:16px}
-.cm-scen-name{font-size:12.5px; color:var(--ink-4); font-weight:500; margin-bottom:8px}
+.cm-scen-name{font-size:var(--fs-sm); color:var(--ink-3); font-weight:600; margin-bottom:8px;
+  letter-spacing:.02em}
 #cardWrap .speed-card + .speed-card{margin-top:24px}
-.chartbox{height:330px; position:relative; border:1px solid var(--border); border-radius:10px;
-  background:var(--card)}
+.chartbox{height:clamp(300px, 26vw, 380px); position:relative; border:1px solid var(--border);
+  border-radius:var(--r-md); background:var(--card)}
+@media (max-width:720px){ .chartbox{height:300px} }
 
-/* ============ 测速卡片（浅色导出样式） ============ */
+/* ============ 测速卡片（导出物：永远浅色） ============ */
+/* 卡片是分享用的 PNG（html2canvas 截 DOM），不是界面的一部分：在卡片作用域内
+   把语义令牌钉回浅色值，页面主题怎么切它都维持白底黑字（组件规则仍只写 var(--x)）。
+   图表同理：离屏出图走 chartPal(forExport=true) 取浅色主题色，不读实时令牌 */
 #cardWrap{overflow-x:auto}
-.speed-card{width:100%; min-width:1120px; border-radius:20px; padding:40px 44px; color:var(--ink);
+.speed-card{--bg:#F9FAFB; --card:#FFFFFF; --elev:#FFFFFF; --hover:#EFF1F5; --track:#E5E7EB;
+  --border:#E5E7EB; --border-2:#D1D5DB; --border-3:#F3F4F6; --field-border:#7C8797;
+  --ink:#111827; --ink-2:#374151; --ink-3:#5F6775; --ink-4:#5F6775;
+  --primary:#4F46E5; --primary-hover:#4338CA; --primary-soft:#EEF2FF;
+  --green:#15803D; --green-soft:#F0FDF4; --green-border:#BBF7D0;
+  --yellow:#92400E; --yellow-soft:#FEFCE8; --yellow-border:#FDE68A;
+  --red:#CE2020; --red-soft:#FEF2F2; --red-border:#FECACA;
+  --blue:#2563EB; --blue-soft:#EFF6FF; --violet:#9333EA; --violet-soft:#F5F3FF;
+  width:100%; min-width:1120px; border-radius:20px; padding:40px 44px; color:var(--ink);
   background:#FFFFFF; border:1px solid var(--border); box-shadow:0 8px 30px rgba(0,0,0,.08);
   font-family:var(--font)}
 .sc-head{display:flex; justify-content:space-between; align-items:flex-start}
@@ -434,7 +658,7 @@ tr.fade td{opacity:.45}
 .sc-meta{display:grid; grid-template-columns:repeat(3,1fr); gap:14px 28px;
   background:var(--bg); border:1px solid var(--border); border-radius:12px;
   padding:18px 22px; margin-bottom:16px}
-.sc-meta .k{display:block; color:var(--ink-4); font-size:10.5px; font-weight:600;
+.sc-meta .k{display:block; color:var(--ink-4); font-size:11px; font-weight:600;
   letter-spacing:1.2px; text-transform:uppercase}
 .sc-meta .v{display:block; font-size:13.5px; color:var(--ink-2); margin-top:3px; word-break:break-all}
 .sc-scen-block{margin-bottom:18px}
@@ -443,11 +667,11 @@ tr.fade td{opacity:.45}
 .sc-scen-head .name{font-size:15px; font-weight:600}
 .sc-stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px}
 .sc-stat{border-radius:12px; padding:13px 14px; border:1px solid var(--border)}
-.sc-stat .k{font-size:11px; color:var(--ink-3); font-weight:500}
+.sc-stat .k{font-size:11.5px; color:var(--ink-3); font-weight:500}
 .sc-stat .n{font-size:20px; font-weight:700; font-family:var(--mono);
   font-variant-numeric:tabular-nums; line-height:1.3; margin-top:2px}
-.sc-stat .n small{font-size:11px; font-weight:600}
-.sc-stat .t{font-size:11px; color:var(--ink-4); margin-top:3px}
+.sc-stat .n small{font-size:11.5px; font-weight:600}
+.sc-stat .t{font-size:11.5px; color:var(--ink-4); margin-top:3px}
 .sc-stat.s1{background:var(--primary-soft)} .sc-stat.s1 .n{color:var(--primary)}
 .sc-stat.s2{background:var(--blue-soft)}   .sc-stat.s2 .n{color:var(--blue)}
 .sc-stat.s3{background:var(--green-soft)}  .sc-stat.s3 .n{color:var(--green)}
@@ -461,7 +685,7 @@ tr.fade td{opacity:.45}
    被顶下错位），加 .sc-charts 锚点后只剩矩阵卡堆叠的表（矩阵表恒为
    .sc-charts 的兄弟） */
 .sc-charts ~ .sc-tt-wrap + .sc-tt-wrap{margin-top:12px}
-.sc-chart-cell img{width:100%; border-radius:10px; border:1px solid var(--border); background:#fff; display:block}
+.sc-chart-cell img{width:100%; border-radius:var(--r-md); border:1px solid var(--border); background:#fff; display:block}
 .sc-foot{margin-top:18px; color:var(--ink-4); font-size:11.5px; text-align:center}
 /* 卡片配置工具组（图例/明细胶囊按钮）：挂卡片头右上角、时间上方（PNG 导出经
    ignoreElements 整体隐去，见 downloadCard）；浮层挂 body（不进卡片 DOM，
@@ -474,8 +698,8 @@ tr.fade td{opacity:.45}
 .sc-cfg-btn.on, .sc-cfg-btn[aria-expanded="true"]{border-color:var(--primary);
   color:var(--primary); background:var(--primary-soft)}
 .card-legend-pop{position:fixed; z-index:120; width:280px; max-height:60vh; max-height:60dvh; overflow-y:auto;
-  background:var(--card); border:1px solid var(--border); border-radius:12px;
-  box-shadow:0 16px 48px rgba(17,24,39,.18); padding:10px 12px; font-size:12.5px}
+  background:var(--elev); border:1px solid var(--border-2); border-radius:var(--r-lg);
+  box-shadow:var(--sh-pop); padding:10px 12px; font-size:var(--fs-sm)}
 .card-legend-pop .lg-group + .lg-group{margin-top:10px}
 .card-legend-pop .lg-title{font-size:11.5px; font-weight:600; color:var(--ink-4); margin:0 0 2px}
 /* 明细浮层的两行选项（名称 + 说明） */
@@ -488,7 +712,7 @@ tr.fade td{opacity:.45}
    对比专属标识（标题徽标 + 卡面左侧色条） */
 .sc-run-chips{display:flex; flex-wrap:wrap; gap:10px; margin:0 0 16px}
 .sc-run-chip{display:flex; align-items:flex-start; gap:8px; flex:1; min-width:280px;
-  border:1px solid var(--border); border-radius:12px; padding:10px 14px; background:#fff}
+  border:1px solid var(--border); border-radius:var(--r-lg); padding:10px 14px; background:#fff}
 .sc-run-chip .sc-run-dot{margin-top:5px}
 .sc-run-chip-t{font-size:13px; color:var(--ink)}
 .sc-run-chip-t b{font-family:var(--mono)}
@@ -522,17 +746,26 @@ tr.fade td{opacity:.45}
    提醒被遮罩压暗、2.6s 后消失等于没报——告警可见性优先于抽屉视觉完整 */
 #toastRoot{position:fixed; top:12px; left:50%; transform:translateX(-50%); z-index:130;
   display:flex; flex-direction:column; align-items:center; gap:8px; pointer-events:none}
-.toast{display:flex; align-items:flex-start; gap:8px; min-width:240px; max-width:min(480px,86vw);
+/* 严重度分档：默认（黄·提醒）/ .t-err（红·失败）/ .t-ok（绿·完成）——
+   颜色不单独承载信息：左侧色条 + SVG 图标 + 文字本体三者同发 */
+.toast{display:flex; align-items:flex-start; gap:9px; min-width:240px; max-width:min(480px,86vw);
   padding:10px 12px; border:1px solid var(--border-2); border-left:3px solid var(--yellow);
-  border-radius:10px; background:var(--card); box-shadow:0 6px 20px rgba(17,24,39,.16);
-  font-size:12.5px; color:var(--ink-2); pointer-events:auto;
-  opacity:0; transform:translateY(-12px); transition:opacity .18s, transform .18s}
+  border-radius:var(--r-md); background:var(--elev); box-shadow:var(--sh-3);
+  font-size:var(--fs-sm); color:var(--ink-2); pointer-events:auto;
+  opacity:0; transform:translateY(-12px) scale(.98);
+  transition:opacity var(--t-1) ease, transform var(--t-2) var(--ease-out)}
 .toast.show{opacity:1; transform:none}
 .toast.hide{opacity:0; transform:translateY(-12px)}
-.toast .t-msg{flex:1; min-width:0; word-break:break-all}
-.toast .t-close{flex:none; width:18px; height:18px; padding:0; border-radius:4px;
-  color:var(--ink-4); font-size:14px; line-height:18px;
-  transition:background .12s, color .12s}
+.toast.t-err{border-left-color:var(--red)}
+.toast.t-ok{border-left-color:var(--green)}
+.toast .t-ic{flex:none; width:16px; height:16px; margin-top:2px; color:var(--yellow)}
+.toast.t-err .t-ic{color:var(--red)}
+.toast.t-ok .t-ic{color:var(--green)}
+.toast .t-msg{flex:1; min-width:0; word-break:break-all; line-height:1.5}
+.toast .t-close{flex:none; position:relative; width:18px; height:18px; padding:0; border-radius:var(--r-xs);
+  color:var(--ink-4); font-size:15px; line-height:18px;
+  transition:background var(--t-1), color var(--t-1)}
+.toast .t-close::before{content:""; position:absolute; inset:-7px}
 .toast .t-close:hover{background:var(--hover); color:var(--ink-2)}
 </style>
 </head>
@@ -553,7 +786,20 @@ tr.fade td{opacity:.45}
     </div>
     <h1>LLM-SPEED</h1>
     <span class="tag">LLM Benchmark Console</span>
-    <button class="btn-ghost nav-btn" style="margin-left:auto" onclick="openCfgDrawer()">
+    <!-- 配色主题：三档互斥（自动跟随系统 / 强制浅色 / 强制深色），选择记在
+         localStorage；图标-only 按钮全部带 aria-label，选中态用 aria-pressed -->
+    <div class="theme-ctl" role="group" aria-label="配色主题">
+      <button type="button" data-theme-set="auto" aria-pressed="false"
+              title="跟随系统" aria-label="配色主题：跟随系统">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.75"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg></button>
+      <button type="button" data-theme-set="light" aria-pressed="false"
+              title="浅色" aria-label="配色主题：浅色">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4"/></svg></button>
+      <button type="button" data-theme-set="dark" aria-pressed="false"
+              title="深色" aria-label="配色主题：深色">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 14.2A8.6 8.6 0 1 1 9.8 3.5a6.9 6.9 0 0 0 10.7 10.7z"/></svg></button>
+    </div>
+    <button class="btn-ghost nav-btn" onclick="openCfgDrawer()">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
       Provider 管理</button>
     <span id="statusPill" role="status"><span class="dot"></span><span id="statusText">空闲</span></span>
@@ -571,7 +817,8 @@ tr.fade td{opacity:.45}
         <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         <span id="btnToggleCfgText">收起配置</span></button>
       <button id="btnStart" class="btn-primary" onclick="startRun()">
-        <svg class="ic" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><polygon points="6 3 20 12 6 21 6 3"/></svg>开始测速</button>
+        <span class="spin" id="btnStartSpin" hidden aria-hidden="true"></span>
+        <svg class="ic" id="btnStartIc" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><polygon points="6 3 20 12 6 21 6 3"/></svg><span id="btnStartText">开始测速</span></button>
       <button id="btnStop" class="btn-ghost" onclick="stopRun()" hidden
         title="终止本次测速；已完成的测点保留在服务端，可从历史记录载入查看">
         <svg class="ic" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg><span>停止</span></button>
@@ -748,7 +995,7 @@ tr.fade td{opacity:.45}
       <p class="d">随 token 流持续刷新</p>
       <div class="progbar" id="decodeBarWrap" hidden><div id="decodeBarFill"></div></div>
     </div>
-    <div class="kpi">
+    <div class="kpi reqs">
       <p class="k">进行中请求</p>
       <p class="v" id="kpiReqs">0 <small>个</small></p>
       <p class="d">当前并发的流式请求数</p>
@@ -758,9 +1005,13 @@ tr.fade td{opacity:.45}
       <p class="v" id="kpiPoints">0 <small>/ 0</small></p>
       <p class="d">模型 × 场景 × 上下文/轮次 × 并发</p>
       <div class="progbar" id="progWrap" role="progressbar" aria-label="测速进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><div id="progFill"></div></div>
-      <div id="skipNotes" aria-live="polite" hidden></div>
       <div class="hint" id="runElapsed" hidden></div>
     </div>
+  </div>
+  <!-- 运行留痕（跳档/弃测重试/失败）：KPI 行只放读数，需回溯的事件单独一条 -->
+  <div class="runlog" id="skipNotesWrap" hidden>
+    <div class="rl-head">运行留痕</div>
+    <div id="skipNotes" aria-live="polite"></div>
   </div>
 
   <!-- ================= 主区 ================= -->
@@ -1074,6 +1325,40 @@ const state = {points:new Map(), es:null, runId:null, running:false, cfg:null, m
   charts:[]};   // 平铺图表的 echarts 实例（重建/resize 用）
 let offChart;
 
+/* ---------------- 配色主题（自动 / 浅色 / 深色） ----------------
+   单一事实源 = html[data-theme]（<head> 里的引导脚本在首帧前就按 localStorage +
+   系统偏好把它定下来，避免选深色却先白一下）。本模块只做三件事：
+   ① 写 data-theme（组件样式全靠语义令牌，切换时一行组件 CSS 也不动）；
+   ② 把令牌同步给图表（canvas 不认 CSS 变量，syncChartTheme 现读）；
+   ③ 重绘受主题影响的区域（仅页内曲线）。测速卡片与导出 PNG 不跟随主题
+   （.speed-card 作用域把令牌钉回浅色 + 导出图走 chartPal(true)），故无需重生卡片。 */
+const THEME_KEY = "llmspeed.theme";
+function themePref(){
+  try { return localStorage.getItem(THEME_KEY) || "auto"; } catch { return "auto"; }
+}
+const systemDark = () => !!(window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches);
+const resolvedTheme = pref => pref === "auto" ? (systemDark() ? "dark" : "light") : pref;
+const isDarkUI = () => document.documentElement.dataset.theme === "dark";
+/* 落地（不写存储）：init 与系统偏好变更走这里；用户点按钮才经 setTheme 写存储 */
+function applyTheme(pref, {rerender = false} = {}){
+  document.documentElement.dataset.theme = resolvedTheme(pref);
+  const meta = $("#metaTheme");
+  if(meta) meta.setAttribute("content", isDarkUI() ? "#0F1319" : "#F9FAFB");
+  for(const b of document.querySelectorAll(".theme-ctl [data-theme-set]"))
+    b.setAttribute("aria-pressed", String(b.dataset.themeSet === pref));
+  syncChartTheme();
+  if(rerender) rethemeCharts();
+}
+function setTheme(pref){
+  try { localStorage.setItem(THEME_KEY, pref); } catch { /* 隐私模式：本会话生效即可 */ }
+  applyTheme(pref, {rerender: true});
+}
+/* 只有页内交互曲线需跟着重绘（明细表/卡片靠 CSS 令牌自动到位） */
+function rethemeCharts(){
+  const cc = $("#chartCard");
+  if(cc && !cc.hidden && window.echarts) renderCharts();
+}
+
 /* ---------------- 初始化 ---------------- */
 async function init(){
   let cfg;
@@ -1100,6 +1385,9 @@ async function init(){
   if(agentScen) $("#agentScen").innerHTML = ckHtml("scen", agentScen.key, agentScen.label, true);
   $("#mediaScen").innerHTML = cfg.scenarios.filter(isMediaSc)
     .map(s => ckHtml("scen", s.key, s.label, true)).join("");
+  // 网关场景表里没有该分区时整块收起（只留标题与分割线 = 看着像坏了的空区）
+  $("#mediaWrap").hidden = !cfg.scenarios.some(isMediaSc);
+  $("#agentWrap").hidden = !agentScen;
   // 场景勾选联动：无通用场景时隐藏上下文档位区；Agent 勾选才展开链参数
   $("#scenarioList").addEventListener("change", syncMatrixForm);
   $("#agentScen").addEventListener("change", syncMatrixForm);
@@ -1149,7 +1437,28 @@ async function init(){
       + "测速、配置与历史记录不受影响（检查 static/vendor/ 是否完整、/static 是否可访问）";
     w.hidden = false;
   }
-  syncChartTheme();   // 图表主题色从 CSS 令牌现读（界面灰与图表灰同源）
+  applyTheme(themePref());   // 主题落地（内含 syncChartTheme：图表色与 CSS 令牌同源）
+  // 主题控件：三档互斥（事件委托，不内联 onclick）；auto 档跟随系统偏好实时变更
+  $(".theme-ctl").addEventListener("click", e => {
+    const b = e.target.closest("[data-theme-set]");
+    if(b) setTheme(b.dataset.themeSet);
+  });
+  if(window.matchMedia){
+    const mq = matchMedia("(prefers-color-scheme: dark)");
+    const onSys = () => { if(themePref() === "auto") applyTheme("auto", {rerender: true}); };
+    if(mq.addEventListener) mq.addEventListener("change", onSys);
+    else if(mq.addListener) mq.addListener(onSys);   // Safari <14 无 addEventListener
+  }
+  // 导航滚动态：只在跨越阈值时改类名，rAF 合帧（与图表 resize 同一手法）
+  let _scrollRaf = 0;
+  const syncScrolled = () => {
+    _scrollRaf = 0;
+    document.body.classList.toggle("scrolled", window.scrollY > 4);
+  };
+  window.addEventListener("scroll", () => {
+    if(!_scrollRaf) _scrollRaf = requestAnimationFrame(syncScrolled);
+  }, {passive: true});
+  syncScrolled();
   offChart = window.echarts ? echarts.init($("#offChart")) : null;
   // 窗口拖拽缩放高频触发：rAF 合帧，每帧至多一次全图表 resize
   let _resizeRaf = 0;
@@ -1178,6 +1487,8 @@ function ckHtml(group, val, label, on){
   // 模型名等外部字符串统一转义：网关响应、历史存档均可控面之外
   return `<label class="ck"><input type="checkbox" data-g="${esc(group)}" value="${esc(val)}" ${on?"checked":""}> ${esc(label)}</label>`;
 }
+/* 空态图标（SVG，不用 emoji）：列表类空态共用 */
+const EMPTY_IC = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 7.5 12 4l8.5 3.5v9L12 20l-8.5-3.5z"/><path d="M3.5 7.5 12 11l8.5-3.5M12 11v9"/></svg>';
 const checkedVals = g => [...document.querySelectorAll(`.ck input[data-g=${g}]:checked`)].map(i => i.value);
 /* 测试矩阵表单联动：Agent 与通用场景分区布局——勾选通用场景（创意/代码）
    才展示上下文档位区与回复模式；Agent 分区勾选后才展开缓存×指令阶梯；
@@ -1219,6 +1530,12 @@ function syncScenByKind(){
     i.closest(".ck").style.display = show ? "" : "none";
     if(!show && i.checked) i.checked = false;
   });
+  // 分区里一个可选项都不剩时整块收起：只留「场景三：多模态」标题与分割线的空区，
+  // 看着像页面坏了（选中文本模型时 asr/ocr/tts 全被 kind 过滤掉即此形态）
+  const anyVisible = sel => [...document.querySelectorAll(sel + " .ck")]
+    .some(el => el.style.display !== "none");
+  $("#agentWrap").hidden = !anyVisible("#agentScen");
+  $("#mediaWrap").hidden = !anyVisible("#mediaScen");
   syncMatrixForm();
   saveMatrixCfg();   // 隐藏时取消的勾选同步进矩阵记忆
 }
@@ -2429,11 +2746,14 @@ async function refreshModels(){
   const box = $("#modelList");
   const pv = $("#fProvider").value;   // 竞态防护基准：慢 provider 的响应后到时作废
   if(!currentProvider()){   // 空 provider 列表：不请求后端，直接引导新增（ADR-0001）
-    box.innerHTML = '<span class="hint" style="margin:0">新增 Provider 后在此选择被测模型</span>';
+    box.innerHTML = EMPTY_IC + '<b>还没有 Provider</b><span>先在「Provider 管理」里新增一个，再回到这里选被测模型</span>';
+    box.classList.add("empty");
     syncDeployCard();
     return;
   }
-  box.innerHTML = '<span class="hint" style="margin:0">加载中…</span>';
+  box.classList.remove("empty");
+  box.innerHTML = '<div class="skeleton w-60"></div><div class="skeleton w-80"></div>'
+    + '<div class="skeleton w-40"></div>';   // 骨架屏：拉模型列表要等网关 RTT，不得只留一行字
   try{
     const r = await fetch(`/api/models?provider=${encodeURIComponent($("#fProvider").value)}`);
     const d = await r.json();
@@ -2456,10 +2776,11 @@ async function refreshModels(){
           ? g.models.map(ckOf).join("")
           : `<div class="ckgroup">${g.kinds.map(k => KIND_LABEL[k] || esc(k)).join("＋")}</div>`
             + g.models.map(ckOf).join("")).join("")
-      : '<span class="hint" style="margin:0">网关未返回模型</span>';
+      : `<div class="empty">${EMPTY_IC}<b>网关未返回模型</b><span>确认服务已启动、网关地址可达（地址按顺序取第一个可达）</span></div>`;
   }catch(e){
     if($("#fProvider").value !== pv) return;   // 期间已切走：失败提示同样作废
-    box.innerHTML = `<span class="hint" style="margin:0;color:var(--red)">拉取失败：${esc(e.message)}</span>`;
+    box.innerHTML = `<div class="empty is-err"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="13"/><line x1="12" y1="16.5" x2="12.01" y2="16.5"/></svg><b>模型列表拉取失败</b><span>${esc(e.message)}</span>`
+      + '<button class="btn-ghost nav-btn" style="margin-top:8px" onclick="refreshModels()">重试</button></div>';
   }
   syncScenByKind();
   syncDeployCard();
@@ -2512,6 +2833,7 @@ async function startRun(){
   // 一次运行只允许一种 kind：所选场景必须同属一种类型，且每个被测模型的能力集
   // 都含该类型（多能力模型 kinds 为数组，如文本生成+图像识别；服务端 400 兜底）
   const scenKinds = [...new Set(cfg.scenarios.map(scenKind))];
+  // 分区里一个可选项都不剩时整块收起（只剩标题 + 分割线的空区看着像坏了）
   if(scenKinds.length > 1){
     return setPill("一次运行只能测同一种类型的场景（文本生成/语音转写/图像识别/语音合成不可混选）", "err");
   }
@@ -2570,26 +2892,27 @@ async function startRun(){
   $("#progWrap").hidden = false;
   $("#progFill").style.width = "0%";
   // 发请求前先禁用：fetch 飞行期间按钮不可再点（防孤儿并发任务）；
-  // 失败路径必须恢复可用
-  $("#btnStart").disabled = true;
+  // 失败路径必须恢复可用。按钮同时换文案 + 转圈：只默默变灰看不出「在等谁」
+  setStartBusy(true);
   let r;
   try{ r = await fetch("/api/bench/start", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(cfg)}); }
-  catch(e){ $("#btnStart").disabled = false; setPill("启动请求发送失败：" + e.message, "err"); return; }
+  catch(e){ setStartBusy(false); setPill("启动请求发送失败：" + e.message, "err"); return; }
   if(!r.ok){
     const d = await r.json().catch(() => ({}));   // 错误体未必是 JSON
-    $("#btnStart").disabled = false;
+    setStartBusy(false);
     setPill(d.detail || "启动失败", "err");
     return;
   }
   let d;
   try{ d = await r.json(); }
-  catch(e){ $("#btnStart").disabled = false; setPill("启动响应解析失败：" + e.message, "err"); return; }
+  catch(e){ setStartBusy(false); setPill("启动响应解析失败：" + e.message, "err"); return; }
   state.runId = d.run_id; state.running = true;
   state.runStartTs = Date.now();   // 运行时长/ETA 起点
   // 本地先记一份（cfg 事件到达后即被服务端权威配置覆盖）
   const cp = currentProvider();
   state.cfg = {...cfg, provider_label: cp?.label, provider_local: cp?.local,
                gateway_url: cp?.gateway_url};
+  setStartBusy(false);   // 按钮即将整体隐去，先把文案复位（否则下次 finishRun 唤回时还挂着「启动中…」）
   $("#btnStart").hidden = true; $("#btnStop").hidden = false; setStopBtn(false); $("#btnDl").disabled = true;
   setPhase("run");         // 测速中：隐藏配置，只展实时事实
   setPill("测速运行中…", "run");
@@ -2673,6 +2996,14 @@ function setStopBtn(stopping){
   btn.disabled = stopping;
   btn.querySelector("span").textContent = stopping ? "停止中…" : "停止";
 }
+/* 启动按钮忙态：禁用 + 图标换转圈 + 文案改「启动中…」（与 setStopBtn 同一手法）；
+   启动成功后按钮整体隐去，此处无需再恢复 */
+function setStartBusy(busy){
+  $("#btnStart").disabled = busy;
+  $("#btnStartSpin").hidden = !busy;
+  $("#btnStartIc").hidden = busy;
+  $("#btnStartText").textContent = busy ? "启动中…" : "开始测速";
+}
 function setPill(msg, cls){
   $("#statusText").textContent = msg;
   $("#statusPill").className = cls || "";
@@ -2681,8 +3012,9 @@ function setPill(msg, cls){
   m.className = cls==="err" ? "err" : "";
 }
 function clearSkipNotes(){
-  const box = $("#skipNotes");
-  box.innerHTML = ""; box.hidden = true;
+  $("#skipNotes").innerHTML = "";
+  const wrap = $("#skipNotesWrap");
+  if(wrap) wrap.hidden = true;
 }
 /* 运行事件留痕（skipNotes 的泛化）：超窗跳档/弃测重试/请求失败等需要回溯的
    事件常驻追加——status 行是瞬态的、toast 2.6s 即消失，无人值守长跑回来
@@ -2690,6 +3022,8 @@ function clearSkipNotes(){
    上限 60 条超出挤最旧，防超长运行无限膨胀 */
 function addRunNote(msg, kind){
   const box = $("#skipNotes");
+  const wrap = $("#skipNotesWrap");
+  if(wrap) wrap.hidden = false;
   box.hidden = false;
   const div = document.createElement("div");
   if(kind === "fail") div.className = "note-fail";
@@ -2706,7 +3040,13 @@ function addRunNote(msg, kind){
 const _toastTimers = new WeakMap();   // 横幅节点 → 自动关闭定时器（手动关时清掉）
 const _toastRecent = new Map();       // msg → 上次弹出时间：并发请求同因失败会连发
                                       // N 条同文 toast，4s 窗口内去重只留一条
-function showToast(msg){
+/* 严重度图标（SVG，不用 emoji）：颜色不单独承载信息，色条 + 图标 + 文字三者同发 */
+const TOAST_ICON = {
+  warn: '<svg class="t-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13.5"/><line x1="12" y1="17.5" x2="12.01" y2="17.5"/></svg>',
+  err: '<svg class="t-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>',
+  ok: '<svg class="t-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><polyline points="8 12.5 11 15.5 16.5 9.5"/></svg>',
+};
+function showToast(msg, kind = "warn"){
   const now = Date.now();
   if(now - (_toastRecent.get(msg) || 0) < 4000) return;
   if(_toastRecent.size > 64) _toastRecent.clear();
@@ -2718,10 +3058,11 @@ function showToast(msg){
     document.body.appendChild(root);
   }
   const t = document.createElement("div");
-  t.className = "toast";
+  t.className = "toast" + (kind === "err" ? " t-err" : kind === "ok" ? " t-ok" : "");
   t.setAttribute("role", "status");
   t.setAttribute("aria-live", "polite");
-  t.innerHTML = `<span class="t-msg">${esc(msg)}</span>`
+  t.innerHTML = (TOAST_ICON[kind] || TOAST_ICON.warn)
+    + `<span class="t-msg">${esc(msg)}</span>`
     + `<button type="button" class="t-close" aria-label="关闭提醒">×</button>`;
   root.appendChild(t);
   while(root.children.length > 3) root.firstChild.remove();   // 超堆叠上限挤掉最旧
@@ -2748,7 +3089,7 @@ function onEvent(ev){
         const m = $("#statusMsg");
         if(m.className !== "err") m.textContent = "▶ " + ev.msg;   // err 态不被瞬态日志覆盖（新 run 的 setPill 才清除）
         if(ev.toast){
-          showToast(ev.msg);   // 兜底重试等瞬时事件额外弹顶部横幅提醒
+          showToast(ev.msg, ev.level === "error" ? "err" : "warn");   // 兜底重试等瞬时事件额外弹顶部横幅提醒
           addRunNote(ev.msg, ev.level === "error" ? "fail" : "warn");   // 同事件常驻留痕（toast 2.6s 即消失）
         }
       }
@@ -2841,7 +3182,8 @@ function kpiPush(vSel, wrapSel, fillSel, val, label){
    实测帧与点级权威值推进），既动态又不污染峰值 */
 function kpiPushEst(vSel, val){
   const el = $(vSel);
-  el.innerHTML = `≈ ${val} <small>tok/s</small>`;
+  // 「≈」单独包一档：主数值保持最大字号，估值标记退到辅助档并带口径悬浮
+  el.innerHTML = `<span class="est" title="估值：按速率曲线先验推算，首 token 到达后将被实测覆盖">≈</span>${val} <small>tok/s</small>`;
 }
 
 /* ---------------- 实时表格 ---------------- */
@@ -3836,12 +4178,17 @@ function renderMediaTable(sc, scRows, kind, withReps = true, titled = true, rete
    默认并发 [1,2,5] 时第 3 档起回退同一绿色，多条线同色不可区分 */
 const CONC_COLORS = ["#4F46E5", "#9333EA", "#DB2777", "#DC2626", "#0D9488",
   "#A16207", "#16A34A", "#2563EB", "#7C3AED", "#0891B2"];
+/* 深色主题下的同色相亮阶变体（与 CONC_COLORS 逐项对齐，不改变色相语义） */
+const CONC_COLORS_DARK = ["#818CF8", "#C084FC", "#F472B6", "#F87171", "#2DD4BF",
+  "#FBBF24", "#4ADE80", "#60A5FA", "#A78BFA", "#22D3EE"];
 const CONC_SYMBOLS = ["circle", "triangle", "rect", "diamond", "emptyCircle", "pin"];
 /* agent 矩阵系列（缓存档）高对比调色板：默认矩阵 3~5 个缓存档，相邻序号必须
    一眼可辨——前四色跨色相取 蓝/红/黄/绿（CONC_COLORS 的 #1 靛 #2 紫 是同色系
    相邻色，用户实测分不清）。黄色取暗金 #CA8A04：纯黄在白底上不可读 */
 const MX_COLORS = ["#2563EB", "#DC2626", "#A16207", "#16A34A", "#9333EA",
   "#0891B2", "#DB2777", "#EA580C", "#4F46E5", "#0D9488"];
+const MX_COLORS_DARK = ["#60A5FA", "#F87171", "#FBBF24", "#4ADE80", "#C084FC",
+  "#22D3EE", "#F472B6", "#FB923C", "#818CF8", "#2DD4BF"];
 /* 辅助系列（TTFT/均速/总吞吐/耗时）基色的深浅阶：索引 0 = 旧版原色（单并发矩阵
    观感不变），多并发档逐档加深，避免跨并发档同色同型 */
 const AUX_SHADES = {
@@ -3849,16 +4196,36 @@ const AUX_SHADES = {
   green:  ["#16A34A", "#15803D", "#14532D", "#052E16", "#166534", "#3F6212"],
   orange: ["#EA580C", "#C2410C", "#9A3412", "#7C2D12", "#431407", "#854D0E"],
 };
-/* 图表主题色：canvas 不认 CSS 变量，集中定义且与 :root 令牌同源（此处字面值是
-   回退；init 时 syncChartTheme() 从 getComputedStyle 现读令牌覆盖——界面灰与
-   图表灰自此同源，暗色改造也只需动令牌） */
-const CHART = {ink:"#111827", gray:"#5F6775", border:"#D1D5DB", soft:"#E5E7EB",
-  grid:"#F3F4F6", amber:"#D97706"};
+/* 深色变体：浅色靠「越档越深」拉开，深色反过来靠「越档越亮」拉开（深色底上
+   深色辅助线会直接消失） */
+const AUX_SHADES_DARK = {
+  amber:  ["#FBBF24", "#F59E0B", "#FCD34D", "#FDE68A", "#F59E0B", "#FBBF24"],
+  green:  ["#4ADE80", "#22C55E", "#86EFAC", "#BBF7D0", "#22C55E", "#4ADE80"],
+  orange: ["#FB923C", "#F97316", "#FDBA74", "#FED7AA", "#F97316", "#FB923C"],
+};
+/* 系列调色板解析：导出（白底 PNG）与非深色界面走浅色，页内深色图走亮阶 */
+function seriesPal(forExport){
+  if(!forExport && isDarkUI())
+    return {conc:CONC_COLORS_DARK, mx:MX_COLORS_DARK, aux:AUX_SHADES_DARK};
+  return {conc:CONC_COLORS, mx:MX_COLORS, aux:AUX_SHADES};
+}
+/* 图表主题色：canvas 不认 CSS 变量，此处集中定义且与 :root 令牌同源——
+   CHART_LIGHT 是**浅色字面值**（导出图专用：卡片是分享物，页面切深色不得把
+   PNG 一起改黑），CHART 是**实时主题下的图色**，由 syncChartTheme() 从
+  getComputedStyle 现读令牌覆盖（界面灰与图表灰自此同源，主题切换只需重跑）。
+   系列调色板同理分两套：浅色沿用原色（单并发矩阵观感不变），深色换成同色相的
+   亮阶变体（深色底上 #4F46E5 接近不可见，indigo-400 以上才够 3:1 非文本对比） */
+const CHART_LIGHT = {ink:"#111827", gray:"#5F6775", border:"#D1D5DB", soft:"#E5E7EB",
+  grid:"#F3F4F6", amber:"#D97706", tip:"#FFFFFF"};
+const CHART = {...CHART_LIGHT};
+/* 导出路径（forExport=true）与离屏卡片出图恒取浅色；页内交互图取实时主题 */
+const chartPal = forExport => forExport ? CHART_LIGHT : CHART;
 function syncChartTheme(){
   try{
     const cs = getComputedStyle(document.documentElement);
     const t = n => cs.getPropertyValue(n).trim();
-    const map = {ink:"--ink", gray:"--ink-3", border:"--border-2", soft:"--border", grid:"--border-3"};
+    const map = {ink:"--ink", gray:"--ink-3", border:"--border-2", soft:"--border",
+      grid:"--border-3", amber:"--chart-amber", tip:"--elev"};
     for(const k in map) if(t(map[k])) CHART[k] = t(map[k]);
   }catch(e){ /* 无真 DOM 的环境（测试桩）：留字面值回退 */ }
 }
@@ -3871,6 +4238,11 @@ const chartAnim = () => !window.matchMedia || !matchMedia("(prefers-reduced-moti
 /* forExport=true 用于卡片离屏出图：静态 PNG 里 scroll 图例的翻页器点不动，
    第二页系列会永久丢失，故图例改回自动换行的普通型并按行数抬高 grid */
 function buildChartOpt(pts, metric, title, forExport){
+  /* 主题解析：在本函数内**遮蔽**全局 CHART/调色板——导出（白底 PNG）恒取浅色常量，
+   页内交互图取实时主题色。函数体里的 CHART.gray / CONC_COLORS 等引用因此无需逐处改 */
+  const CHART = chartPal(forExport);
+  const {conc:CONC_COLORS, mx:MX_COLORS, aux:AUX_SHADES} = seriesPal(forExport);
+  const C = CHART;   // 短别名：tooltip 底色等只在本函数内用到的主题字段
   // 媒体场景（asr/ocr/tts）：左格=主指标（倍速/单张时延），右格=并发吞吐；
   // 点自带 kind 字段，旧存档无 kind 时按场景 key 判别（媒体场景 key 必在 scenMeta 内）
   const kind = pts[0] ? (pts[0].kind || scenKind(pts[0].scenario)) : "llm";
@@ -3898,8 +4270,8 @@ function buildChartOpt(pts, metric, title, forExport){
     backgroundColor:"transparent",
     animation: chartAnim(), aria:{enabled:true},
     title:{text:title, textStyle:{color:CHART.ink, fontSize:14, fontFamily:"Inter"}, left:12, top:6},
-    tooltip:{trigger:"axis", backgroundColor:"#fff", borderColor:CHART.soft,
-      textStyle:{color:CHART.ink, fontSize:12}, extraCssText:"box-shadow:0 4px 12px rgba(0,0,0,.08)",
+    tooltip:{trigger:"axis", backgroundColor:C.tip, borderColor:C.soft,
+      textStyle:{color:C.ink, fontSize:12}, extraCssText:"box-shadow:0 4px 12px rgba(0,0,0,.12)",
       valueFormatter: v => v==null ? "-" : round1(v).toLocaleString("en-US")},
     // 图例独占一行排在标题下方、右对齐：同处 top 行时 scroll 型图例（多系列触发
     // 翻页器）会横贯顶部压到左上角标题；scroll 型恒为单行，grid 顶距无需随系列数变化
@@ -4027,6 +4399,10 @@ function buildChartOpt(pts, metric, title, forExport){
    倍速跨度大时用对数轴），"decode" 槽位画并发吞吐（audio_min_per_min / img_per_s）。
    多线叠加与空值跳过沿用 llm 图的既有逻辑 */
 function buildMediaChartOpt(pts, metric, title, forExport, kind){
+  /* 主题解析同 buildChartOpt：导出恒浅色，页内随主题 */
+  const CHART = chartPal(forExport);
+  const {conc:CONC_COLORS} = seriesPal(forExport);
+  const C = CHART;
   const main = metric === "prefill";
   const unit = state.scenMeta[pts[0].scenario]?.unit || "";
   const xs = [...new Set(pts.map(p => p.ctx_target))].sort((a,b) => a-b);
@@ -4058,7 +4434,7 @@ function buildMediaChartOpt(pts, metric, title, forExport, kind){
     backgroundColor:"transparent",
     animation: chartAnim(), aria:{enabled:true},
     title:{text:title, textStyle:{color:CHART.ink, fontSize:14, fontFamily:"Inter"}, left:12, top:6},
-    tooltip:{trigger:"axis", backgroundColor:"#fff", borderColor:CHART.soft,
+    tooltip:{trigger:"axis", backgroundColor:CHART.tip, borderColor:CHART.soft,
       textStyle:{color:CHART.ink, fontSize:12}, extraCssText:"box-shadow:0 4px 12px rgba(0,0,0,.08)",
       valueFormatter: v => v==null ? "-" : round1(v).toLocaleString("en-US")},
     legend: forExport
@@ -5426,6 +5802,8 @@ function cmpScenSummaryHTML(sc, entries){
    三系列）；单并发档保持经典（Prefill/TTFT、净速/净耗时）。图已按并发档
    拆分，系列名不再缀 ·并发N */
 function buildCmpChartOpt(entries, metric, title, conc){
+  /* 对比图只服务卡片/PNG（captureCmpCharts 与图例槽位枚举）：恒取浅色主题 */
+  const CHART = CHART_LIGHT;
   const ents = entries.map(e => ({...e, pts: e.pts.filter(p => p.concurrency === conc)}))
     .filter(e => e.pts.length);
   if(!ents.length) return null;
@@ -5474,7 +5852,7 @@ function buildCmpChartOpt(entries, metric, title, conc){
     backgroundColor:"transparent",
     animation: chartAnim(), aria:{enabled:true},
     title:{text:title, textStyle:{color:CHART.ink, fontSize:14, fontFamily:"Inter"}, left:12, top:6},
-    tooltip:{trigger:"axis", backgroundColor:"#fff", borderColor:CHART.soft,
+    tooltip:{trigger:"axis", backgroundColor:CHART.tip, borderColor:CHART.soft,
       textStyle:{color:CHART.ink, fontSize:12}, extraCssText:"box-shadow:0 4px 12px rgba(0,0,0,.08)",
       valueFormatter: v => v==null ? "-" : round1(v).toLocaleString("en-US")},
     legend:{textStyle:{color:CHART.gray}, top:30, right:12},
@@ -5496,6 +5874,8 @@ function buildCmpChartOpt(entries, metric, title, conc){
    口径）。指标集与单次卡片一致：TTFT/总时长（s）取小为优、Prefill/Decode
    净口径速度。该并发档无矩阵点返回 null（调用方不出图） */
 function buildCmpAgentMxChartOpt(entries, metric, title, conc){
+  /* 同上：agent 矩阵对比图也只出到卡片，恒浅色 */
+  const CHART = CHART_LIGHT;
   const ents = entries.map(e => ({...e,
       pts: e.pts.filter(p => p.concurrency === conc && p.inst_tokens != null)}))
     .filter(e => e.pts.length);
@@ -5531,7 +5911,7 @@ function buildCmpAgentMxChartOpt(entries, metric, title, conc){
     backgroundColor:"transparent",
     animation: chartAnim(), aria:{enabled:true},
     title:{text:title, textStyle:{color:CHART.ink, fontSize:14, fontFamily:"Inter"}, left:12, top:6},
-    tooltip:{trigger:"axis", backgroundColor:"#fff", borderColor:CHART.soft,
+    tooltip:{trigger:"axis", backgroundColor:CHART.tip, borderColor:CHART.soft,
       textStyle:{color:CHART.ink, fontSize:12}, extraCssText:"box-shadow:0 4px 12px rgba(0,0,0,.08)",
       valueFormatter: v => v==null ? "-" : round1(v).toLocaleString("en-US")},
     legend:{textStyle:{color:CHART.gray}, top:30, right:12},
