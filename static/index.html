@@ -36,24 +36,24 @@
 :root{
   color-scheme: light;   /* 原生控件（下拉/滚动条/输入框底色）按浅色渲染 */
   /* 表面与浮层 */
-  --bg:#F9FAFB;
+  --bg:#F7F8FA;
   --card:#FFFFFF;
   --elev:#FFFFFF;        /* 浮层本体（弹窗/抽屉/toast/浮出菜单）：卡面 + 更强的影 */
-  --head-bg:#F9FAFB;     /* 表头底：浅色与页底同色（卡上淡灰带） */
-  --hover:#EFF1F5;       /* 悬停底色：比 --bg 深半档，白卡上可感知 */
-  --track:#E5E7EB;       /* 进度条轨道底 */
+  --head-bg:#F8F9FB;     /* 表头底：浅色与页底同色（卡上淡灰带） */
+  --hover:#EEF0F5;       /* 悬停底色：比 --bg 深半档，白卡上可感知 */
+  --track:#E9EBF0;       /* 进度条轨道底 */
   --scrim:rgba(17,24,39,.45);      /* 遮罩：40~60% 黑，前景要压得住背景 */
   --sel:rgba(79,70,229,.16);       /* 文本选中底色 */
-  /* 描边 */
-  --border:#E5E7EB;
-  --border-2:#D1D5DB;
-  --border-3:#F3F4F6;    /* 更浅一级分隔：表格行线等 */
+  /* 描边（带蓝调的发丝级中性色：纯灰 hex 是「模板感」的来源之一） */
+  --border:#E7EAF0;
+  --border-2:#D5DAE3;
+  --border-3:#F1F3F7;    /* 更浅一级分隔：表格行线、KPI 指标带格线等 */
   --field-border:#7C8797;
-  --field-line:#D6DCE4;    /* 控件静止态描边（轻）：硬描边全场铺开会吃掉“柔和”，故强描边留给交互态 */
-  --field-fill:#F7F9FC;    /* 控件填充：靠“填色”而非靠“黑框”把输入框从卡面上区分出来 */
+  --field-line:#D7DCE4;    /* 控件静止态描边（轻）：硬描边全场铺开会吃掉“柔和”，故强描边留给交互态 */
+  --field-fill:#FFFFFF;    /* 控件填充：浅色下与卡面同白，靠描边区分（灰填充铺全场发闷） */
   /* 文字 */
-  --ink:#111827;
-  --ink-2:#374151;
+  --ink:#0F172A;
+  --ink-2:#334155;
   --ink-3:#5F6775;
   --ink-4:var(--ink-3);
   /* 品牌与语义色（soft = tinted 底色，border = 同族描边） */
@@ -82,12 +82,17 @@
   --t-1:120ms; --t-2:180ms; --t-3:280ms;   /* 微交互 / 状态切换 / 入场 */
   --ease-std:cubic-bezier(.32,.72,.05,1);  /* 抽屉、位移 */
   --ease-out:cubic-bezier(.16,1,.3,1);     /* 入场（快进慢出） */
-  /* 阴影阶梯（浅色） */
-  --shadow:0 1px 2px rgba(17,24,39,.05);
-  --sh-1:0 1px 2px rgba(17,24,39,.05);
-  --sh-2:0 1px 3px rgba(17,24,39,.05), 0 1px 2px rgba(17,24,39,.04);
-  --sh-3:0 8px 24px rgba(17,24,39,.08);
-  --sh-pop:0 14px 40px rgba(17,24,39,.14);
+  /* 阴影阶梯（浅色）：双层 = 贴地线影 + 环境光晕，单层 1px 影线显「纸片」 */
+  --shadow:0 1px 2px rgba(16,24,40,.04), 0 4px 10px -4px rgba(16,24,40,.06);
+  --sh-1:0 1px 2px rgba(16,24,40,.04), 0 4px 10px -4px rgba(16,24,40,.06);
+  --sh-2:0 2px 4px rgba(16,24,40,.05), 0 8px 20px -8px rgba(16,24,40,.10);
+  --sh-3:0 8px 24px rgba(17,24,39,.08), 0 2px 6px rgba(17,24,39,.05);
+  --sh-pop:0 14px 40px rgba(17,24,39,.14), 0 4px 10px rgba(17,24,39,.06);
+  /* 卡面顶部高光：浅色下透明（白卡自带亮边），深色下卡面一道顶光才显得「立」起来 */
+  --card-hi:inset 0 1px 0 rgba(255,255,255,0);
+  /* 主按钮用品牌色投影（中性灰影会让彩色按钮发脏） */
+  --btn-sh:0 1px 2px rgba(79,70,229,.28), 0 4px 12px -4px rgba(79,70,229,.38);
+  --btn-sh-hi:0 2px 4px rgba(79,70,229,.30), 0 8px 20px -6px rgba(79,70,229,.45);
   --nav-h:57px;
   /* 原生 select 的下拉箭头（appearance:none 后需自画）：随主题换色 */
   --chevron:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235F6775' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
@@ -128,6 +133,9 @@ html[data-theme="dark"]{
   --sh-2:0 2px 6px rgba(0,0,0,.32), 0 1px 2px rgba(0,0,0,.28);
   --sh-3:0 10px 26px rgba(0,0,0,.40);
   --sh-pop:0 20px 52px rgba(0,0,0,.48);
+  --card-hi:inset 0 1px 0 rgba(255,255,255,.06);
+  --btn-sh:0 1px 2px rgba(0,0,0,.40), 0 4px 14px -4px rgba(129,140,248,.35);
+  --btn-sh-hi:0 2px 5px rgba(0,0,0,.42), 0 8px 22px -6px rgba(129,140,248,.45);
   --chevron:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2397A2B4' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
 }
 /* 语义标注与控件变体（替代 JS 模板里的内联样式重复） */
@@ -138,9 +146,14 @@ html[data-theme="dark"]{
 .note-warn{color:var(--yellow)}
 *{box-sizing:border-box; margin:0; padding:0}
 html{background:var(--bg)}
-body{background:var(--bg); color:var(--ink); font:14px/1.6 var(--font);
+/* 页底不是死平灰：顶部 180px 向卡面色微微提亮后落回 --bg（两个主题共用一条
+   规则，color-mix 自动跟主题）；字体开灰阶抗锯齿，中文笔画边缘更干净 */
+body{background:linear-gradient(180deg, color-mix(in srgb, var(--card) 55%, var(--bg)), var(--bg) 180px) no-repeat, var(--bg);
+  color:var(--ink); font:14px/1.6 var(--font);
+  -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;
+  text-rendering:optimizeLegibility;
   -webkit-tap-highlight-color:transparent;
-  transition:background-color var(--t-2) var(--ease-std), color var(--t-2) var(--ease-std)}
+  transition:color var(--t-2) var(--ease-std)}
 button{font-family:inherit; cursor:pointer; touch-action:manipulation}
 input,select,textarea{font-family:inherit}
 ::selection{background:var(--sel)}
@@ -184,21 +197,23 @@ body.scrolled nav{box-shadow:var(--sh-2); border-bottom-color:var(--border-2)}
 /* 主题控件拿掉右侧自动外边距：它把「Provider 管理 + 状态灯」推到行尾，
    窄屏折行时仍成立（tag 隐藏后不会多出空隙） */
 .nav-inner .theme-ctl{margin-left:auto}
-.brand-ic{width:34px; height:34px; border-radius:var(--r-md); background:var(--primary-soft);
+.brand-ic{width:34px; height:34px; border-radius:var(--r-md);
+  background:linear-gradient(135deg, color-mix(in srgb, var(--primary-soft) 55%, var(--card)), var(--primary-soft));
   color:var(--primary); display:flex; align-items:center; justify-content:center; flex:none;
   box-shadow:inset 0 0 0 1px var(--border)}
-nav h1{font-size:15px; font-weight:700; letter-spacing:-.01em}
+nav h1{font-size:15px; font-weight:600}
 nav .tag{font-size:12px; color:var(--ink-4)}
-/* 配色主题分段控件（自动/浅色/深色）：三个互斥按钮，选中态用品牌色 chip；
-   图标-only 但每个按钮带 aria-label + title（图标-only 控件不得无语义） */
+/* 配色主题分段控件（自动/浅色/深色）：滑块式分段——轨道用 --track 沉下去，
+   选中项用卡面白 + 微影「浮」出来（iOS/Linear 式分段控件）；图标-only 但每个
+   按钮带 aria-label + title（图标-only 控件不得无语义） */
 .theme-ctl{display:inline-flex; align-items:center; gap:2px; flex:none; padding:3px;
-  border:1px solid var(--border-2); border-radius:var(--r-pill); background:var(--bg)}
+  border-radius:var(--r-pill); background:var(--track)}
 .theme-ctl button{width:30px; height:26px; padding:0; border-radius:var(--r-pill);
   justify-content:center; background:transparent; color:var(--ink-3);
-  transition:background var(--t-1), color var(--t-1)}
-.theme-ctl button:hover{color:var(--ink); background:var(--hover)}
-.theme-ctl button[aria-pressed="true"]{background:var(--primary-soft); color:var(--primary);
-  box-shadow:inset 0 0 0 1px var(--primary)}
+  transition:background var(--t-1), color var(--t-1), box-shadow var(--t-1)}
+.theme-ctl button:hover{color:var(--ink)}
+.theme-ctl button[aria-pressed="true"]{background:var(--card); color:var(--ink);
+  box-shadow:var(--sh-1)}
 .theme-ctl .ic{width:14px; height:14px}
 #statusPill{display:inline-flex; align-items:center; gap:7px;
   padding:5px 14px; border-radius:var(--r-pill); font-size:var(--fs-sm); font-weight:500;
@@ -215,7 +230,7 @@ nav .tag{font-size:12px; color:var(--ink-4)}
 .page{max-width:1440px; margin:0 auto; padding:24px}
 @media (min-width:1440px){ .page{padding:28px 32px} }
 .page-head{display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:8px; gap:16px; flex-wrap:wrap}
-.page-head h2{font-size:var(--fs-2xl); font-weight:700; letter-spacing:-.02em; line-height:1.25}
+.page-head h2{font-size:var(--fs-2xl); font-weight:700; line-height:1.25}
 .page-head .sub{color:var(--ink-3); font-size:var(--fs-md); margin-top:2px}
 .head-actions{display:flex; align-items:center; gap:8px; flex-wrap:wrap}
 .head-actions .sel-inline{display:flex; align-items:center; gap:6px}
@@ -227,7 +242,7 @@ nav .tag{font-size:12px; color:var(--ink-4)}
    须留痕的事件追加到这里（point_skipped.msg、toast 状态事件）。
    **不放在 KPI 卡里**：日志条目会把「已完成测试点」卡顶到三倍高，整行 KPI 跟着走形 */
 .runlog{background:var(--card); border:1px solid var(--border); border-left:2px solid var(--yellow-border);
-  border-radius:var(--r-md); padding:10px 14px; margin:-6px 0 20px; box-shadow:var(--sh-1)}
+  border-radius:var(--r-md); padding:10px 14px; margin:-6px 0 20px; box-shadow:var(--card-hi), var(--sh-1)}
 .runlog .rl-head{font-size:var(--fs-micro); font-weight:600; color:var(--ink-3);
   letter-spacing:.02em; margin-bottom:4px}
 #skipNotes{font-size:var(--fs-sm); line-height:1.7; color:var(--yellow);
@@ -236,15 +251,17 @@ nav .tag{font-size:12px; color:var(--ink-4)}
 
 /* ============ KPI 卡片行 ============ */
 /* 主数值 = 本视图最大的字（字号阶梯顶格），口径说明退到脚注档；
-   左侧 3px 色条用 --accent 局部变量区分四个指标（颜色不单独承载信息：
+   指标区分靠数值本身的颜色（prefill 靛/decode 绿/完成点数 紫），卡面不再加
+   左侧色条——整排白卡上的色竖条显硬，像被选中（颜色不单独承载信息：
    标题文字已写明 Prefill/Decode/进行中/已完成） */
-.kpis{display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px}
-.kpi{position:relative; overflow:hidden; background:var(--card); border:1px solid var(--border);
-  border-radius:var(--r-lg); padding:16px 18px 14px 20px; box-shadow:var(--sh-1)}
-.kpi::before{content:""; position:absolute; left:0; top:0; bottom:0; width:2px;
-  /* 色条做上实下浅的渐退：3px 实色竖条在整排白卡上显得硬，像选中了边框 */
-  background:linear-gradient(180deg, var(--accent,var(--border-2)),
-    color-mix(in srgb, var(--accent,var(--border-2)) 30%, transparent))}
+/* 四张浮卡 → 一条通栏指标带：格子间的分隔用发丝线不用空隙（Stripe/Linear 式
+   指标条）。容器承担边框/圆角/阴影，格子本身扁平——四个散卡是「模板感」，
+   一条带才是「仪表」 */
+.kpis{display:grid; grid-template-columns:repeat(4,1fr); margin-bottom:24px;
+  background:var(--card); border:1px solid var(--border); border-radius:var(--r-lg);
+  box-shadow:var(--card-hi), var(--sh-1); overflow:hidden}
+.kpi{padding:16px 20px 14px}
+.kpi + .kpi{border-left:1px solid var(--border-3)}
 .kpi .k{font-size:var(--fs-sm); font-weight:500; color:var(--ink-3); margin-bottom:2px}
 .kpi .v{font-size:var(--fs-num); font-weight:700; color:var(--ink); font-variant-numeric:tabular-nums;
   line-height:1.15; letter-spacing:-.02em; display:flex; align-items:baseline; gap:6px}
@@ -252,13 +269,13 @@ nav .tag{font-size:12px; color:var(--ink-4)}
 .kpi .v .est{font-size:.62em; font-weight:600; color:var(--ink-4); align-self:center;
   letter-spacing:0; cursor:help}
 .kpi .d{font-size:var(--fs-sm); margin-top:6px; line-height:1.5; color:var(--ink-4)}
-.kpi.prefill{--accent:var(--primary)} .kpi.prefill .v{color:var(--primary)}
-.kpi.decode{--accent:var(--green)} .kpi.decode .v{color:var(--green)}
-.kpi.reqs{--accent:var(--blue)}
-.kpi.prog{--accent:var(--violet)} .kpi.prog .v{color:var(--violet)}
-.progbar{height:6px; background:var(--track); border-radius:var(--r-pill); overflow:hidden; margin-top:10px}
+.kpi.prefill .v{color:var(--primary)}
+.kpi.decode .v{color:var(--green)}
+.kpi.prog .v{color:var(--violet)}
+.progbar{height:8px; background:var(--track); border-radius:var(--r-pill); overflow:hidden; margin-top:10px}
 .progbar > div{height:100%; border-radius:var(--r-pill); width:0%;
   background:var(--bar,linear-gradient(90deg,var(--primary),var(--primary-hover)));
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.30);   /* 填充条顶部一道光泽：实心色块显呆板 */
   transition:width var(--t-3) var(--ease-std)}
 /* 进度条走同色相的渐增（从轨道色淡入到语义色）：硬撞的双色渐变在浅色卡上偏艳，
    且旧写法的固定十六进位在浅色主题下比 --green/--primary 本身亮得多（跨主题串色） */
@@ -282,26 +299,31 @@ body[data-phase="run"] .progbar > div::after{content:""; position:absolute; inse
 .cfg-grid .card{margin-bottom:0}
 #deployCard{grid-column:1/-1}
 @media (max-width:1100px){ .kpis{grid-template-columns:repeat(2,1fr)}
+  /* 两列排布时第三格回到行首：格线从「竖缝」换成「横缝」 */
+  .kpis .kpi:nth-child(3){border-left:none}
+  .kpis .kpi:nth-child(n+3){border-top:1px solid var(--border-3)}
   .cfg-grid{grid-template-columns:1fr 1fr} }
 @media (max-width:720px){ .cfg-grid{grid-template-columns:1fr} }
 .card{background:var(--card); border:1px solid var(--border); border-radius:var(--r-lg);
-  box-shadow:var(--sh-1); margin-bottom:20px}
+  box-shadow:var(--card-hi), var(--sh-1); margin-bottom:20px}
 .card-head{padding:14px 20px; border-bottom:1px solid var(--border);
   display:flex; align-items:center; gap:8px}
-.card-head h3{font-size:var(--fs-lg); font-weight:600; letter-spacing:-.01em}
+.card-head h3{font-size:var(--fs-lg); font-weight:600}
 .card-head small{color:var(--ink-4); font-weight:400; font-size:var(--fs-sm)}
 .card-body{padding:20px}
 
 /* ============ 表单 ============ */
-label.f{display:block; color:var(--ink-2); font-size:var(--fs-sm); font-weight:500; margin:14px 0 5px}
+label.f{display:block; color:var(--ink-3); font-size:var(--fs-sm); font-weight:500; margin:14px 0 5px}
 label.f:first-child{margin-top:0}
 input[type=text],input[type=password],input[type=number],select,textarea{
   width:100%; background:var(--field-fill); border:1px solid var(--field-line); color:var(--ink);
   border-radius:var(--r-sm); padding:8px 12px; font-size:var(--fs-md); min-height:38px;
+  box-shadow:inset 0 1px 2px rgba(17,24,39,.03);   /* 内凹微影：输入框略低于卡面，深色下不可见 */
   transition:border-color var(--t-1), box-shadow var(--t-1), background-color var(--t-1)}
 input:hover,select:hover,textarea:hover{border-color:var(--field-border)}
 input:focus,select:focus,textarea:focus{outline:none; border-color:var(--primary);
-  box-shadow:0 0 0 3px var(--primary-ring)}
+  box-shadow:inset 0 1px 2px rgba(17,24,39,.03), 0 0 0 3px var(--primary-ring)}
+::placeholder{color:var(--ink-4); opacity:.75}
 input:disabled,select:disabled,textarea:disabled{opacity:.5; cursor:not-allowed; background:var(--bg)}
 textarea{resize:vertical; min-height:auto}
 select{appearance:none; -webkit-appearance:none; padding-right:32px;
@@ -344,7 +366,24 @@ label.f.m-sep{margin-top:16px; padding-top:14px; border-top:1px solid var(--bord
   min-height:32px; padding:4px 14px 4px 8px; cursor:pointer; user-select:none;
   border-radius:var(--r-xs); transition:background var(--t-1)}
 .ck:hover{background:var(--hover)}
-.ck input{accent-color:var(--primary); width:15px; height:15px; cursor:pointer; flex:none}
+/* 自绘勾选/单选：浏览器原生 accent-color 控件是最显眼的「默认感」来源。
+   静止 = 白底 + 控件描边；hover 描边上主色；选中 = 主色填充 + 白对勾/白点；
+   焦点环与输入框同规格（--primary-ring）。对勾用双边框旋转画，免图片/字体 */
+input[type=checkbox],input[type=radio]{appearance:none; -webkit-appearance:none; margin:0;
+  width:15px; height:15px; flex:none; cursor:pointer; position:relative;
+  border:1.5px solid var(--field-border); background:var(--card);
+  transition:background var(--t-1), border-color var(--t-1), box-shadow var(--t-1)}
+input[type=checkbox]{border-radius:4.5px}
+input[type=radio]{border-radius:50%}
+input[type=checkbox]:hover,input[type=radio]:hover{border-color:var(--primary)}
+input[type=checkbox]:checked,input[type=radio]:checked{background:var(--primary); border-color:var(--primary)}
+input[type=checkbox]:checked::after{content:""; position:absolute; left:4px; top:1px;
+  width:4px; height:8px; border:solid #FFF; border-width:0 1.8px 1.8px 0; transform:rotate(43deg)}
+input[type=radio]:checked::after{content:""; position:absolute; inset:0; margin:auto;
+  width:5px; height:5px; border-radius:50%; background:#FFF}
+input[type=checkbox]:focus-visible,input[type=radio]:focus-visible{outline:none;
+  box-shadow:0 0 0 3px var(--primary-ring)}
+input[type=checkbox]:disabled,input[type=radio]:disabled{opacity:.45; cursor:not-allowed}
 /* 自定义上下文档位：包裹行承载删除按钮（内置档无包裹、不可删） */
 .ckwrap{display:inline-flex; align-items:center; border-radius:var(--r-xs); transition:background var(--t-1)}
 .ckwrap:hover{background:var(--hover)}
@@ -506,9 +545,14 @@ button{border:none; border-radius:var(--r-sm); padding:9px 16px; font-size:13px;
     box-shadow var(--t-1), transform 60ms}
 button:active:not(:disabled){transform:scale(.97)}
 button:disabled{opacity:.45; cursor:not-allowed}
-.btn-primary{background:var(--primary); color:#fff; box-shadow:var(--sh-1)}
-.btn-primary:hover:not(:disabled){background:var(--primary-hover); box-shadow:var(--sh-2)}
-.btn-ghost{background:var(--card); border:1px solid var(--border-2); color:var(--ink-2)}
+/* 主按钮：顶亮底实的微渐变 + 品牌色投影 + 悬停浮起 1px——纯色平涂是「素」的
+   主要来源；按压缩放走全局 button:active（scale .97），此处不重复 */
+.btn-primary{background:linear-gradient(180deg, color-mix(in srgb, var(--primary) 88%, #FFF), var(--primary));
+  color:#fff; box-shadow:var(--btn-sh)}
+.btn-primary:hover:not(:disabled){background:linear-gradient(180deg, var(--primary),
+  color-mix(in srgb, var(--primary) 88%, #000)); box-shadow:var(--btn-sh-hi); transform:translateY(-1px)}
+.btn-ghost{background:var(--card); border:1px solid var(--border-2); color:var(--ink-2);
+  box-shadow:0 1px 2px rgba(16,24,40,.05)}   /* 微影让按钮「坐」在页面上，而非描边纸片 */
 .btn-ghost:hover:not(:disabled){background:var(--hover); border-color:var(--field-border); color:var(--ink)}
 /* 危险动作：幽灵按钮红色化（删除/清空/清除 Key），与主操作视觉分离 */
 .btn-ghost.danger:hover:not(:disabled){border-color:var(--red); color:var(--red); background:var(--red-soft)}
@@ -533,10 +577,10 @@ button .ic{vertical-align:-2px}
 /* 实时测速表同样不贴边（与明细表一致） */
 #liveCard .tablewrap{padding:14px 20px 20px}
 table{width:100%; border-collapse:collapse; font-size:13px}
-th{color:var(--ink-3); font-weight:600; text-align:left; padding:9px 12px;
-  border-bottom:1px solid var(--border-2); white-space:nowrap; font-size:var(--fs-micro);
-  letter-spacing:.02em; background:var(--head-bg)}
-td{padding:10px 12px; border-bottom:1px solid var(--border-3); white-space:nowrap;
+th{color:var(--ink-3); font-weight:500; text-align:left; padding:10px 12px;
+  border-bottom:1px solid var(--border); white-space:nowrap; font-size:var(--fs-micro);
+  background:var(--head-bg)}
+td{padding:11px 12px; border-bottom:1px solid var(--border-3); white-space:nowrap;
   font-variant-numeric:tabular-nums; color:var(--ink-2)}
 #liveTable td:nth-child(n+7), .resultTable td:nth-child(n+4){font-family:var(--mono); font-size:var(--fs-md)}
 /* 数值列右对齐（仪表类数据的硬要求：位数不同的两个速度值左对齐时个位对不上，
@@ -626,7 +670,7 @@ tr.fade td{opacity:.45}
 /* ============ 图表 ============ */
 .grid2{display:grid; grid-template-columns:1fr 1fr; gap:14px}
 @media (max-width:900px){ .grid2{grid-template-columns:1fr} }
-.cm-title{font-size:16px; font-weight:600; color:var(--ink); letter-spacing:-.01em; margin:20px 0 10px}
+.cm-title{font-size:16px; font-weight:600; color:var(--ink); margin:20px 0 10px}
 .chart-model:first-child > .cm-title{margin-top:0}
 .cm-scen{margin-bottom:16px}
 .cm-scen-name{font-size:var(--fs-sm); color:var(--ink-3); font-weight:600; margin-bottom:8px;
@@ -641,11 +685,11 @@ tr.fade td{opacity:.45}
    把语义令牌钉回浅色值，页面主题怎么切它都维持白底黑字（组件规则仍只写 var(--x)）。
    图表同理：离屏出图走 chartPal(forExport=true) 取浅色主题色，不读实时令牌 */
 #cardWrap{overflow-x:auto}
-.speed-card{--bg:#F9FAFB; --card:#FFFFFF; --elev:#FFFFFF; --hover:#EFF1F5; --track:#E5E7EB;
-  --border:#E5E7EB; --border-2:#D1D5DB; --border-3:#F3F4F6; --field-border:#7C8797;
-  --head-bg:#F9FAFB;   /* 卡片内矩阵表表头走全局 th{background:var(--head-bg)}：
+.speed-card{--bg:#F7F8FA; --card:#FFFFFF; --elev:#FFFFFF; --hover:#EEF0F5; --track:#E9EBF0;
+  --border:#E7EAF0; --border-2:#D5DAE3; --border-3:#F1F3F7; --field-border:#7C8797;
+  --head-bg:#F8F9FB;   /* 卡片内矩阵表表头走全局 th{background:var(--head-bg)}：
                         不在卡片作用域钉回浅色，深色主题下白卡里会嵌一排深灰带（导出图同错） */
-  --ink:#111827; --ink-2:#374151; --ink-3:#5F6775; --ink-4:#5F6775;
+  --ink:#0F172A; --ink-2:#334155; --ink-3:#5F6775; --ink-4:#5F6775;
   --primary:#4F46E5; --primary-hover:#4338CA; --primary-soft:#EEF2FF;
   --green:#15803D; --green-soft:#F0FDF4; --green-border:#BBF7D0;
   --yellow:#92400E; --yellow-soft:#FEFCE8; --yellow-border:#FDE68A;
