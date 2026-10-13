@@ -49,6 +49,8 @@
   --border-2:#D1D5DB;
   --border-3:#F3F4F6;    /* 更浅一级分隔：表格行线等 */
   --field-border:#7C8797;
+  --field-line:#D6DCE4;    /* 控件静止态描边（轻）：硬描边全场铺开会吃掉“柔和”，故强描边留给交互态 */
+  --field-fill:#F7F9FC;    /* 控件填充：靠“填色”而非靠“黑框”把输入框从卡面上区分出来 */
   /* 文字 */
   --ink:#111827;
   --ink-2:#374151;
@@ -74,7 +76,7 @@
   --fs-lg:15px;        /* 卡片标题 */
   --fs-xl:18px;        /* 区块标题 */
   --fs-2xl:24px;       /* 页面标题 */
-  --fs-num:30px;       /* KPI 主数值 */
+  --fs-num:28px;       /* KPI 主数值 */
   /* 圆角与动效骨架（主题无关） */
   --r-xs:6px; --r-sm:8px; --r-md:10px; --r-lg:12px; --r-xl:16px; --r-pill:999px;
   --t-1:120ms; --t-2:180ms; --t-3:280ms;   /* 微交互 / 状态切换 / 入场 */
@@ -83,9 +85,9 @@
   /* 阴影阶梯（浅色） */
   --shadow:0 1px 2px rgba(17,24,39,.05);
   --sh-1:0 1px 2px rgba(17,24,39,.05);
-  --sh-2:0 2px 8px rgba(17,24,39,.06), 0 1px 2px rgba(17,24,39,.05);
-  --sh-3:0 10px 28px rgba(17,24,39,.10);
-  --sh-pop:0 16px 48px rgba(17,24,39,.18);
+  --sh-2:0 1px 3px rgba(17,24,39,.05), 0 1px 2px rgba(17,24,39,.04);
+  --sh-3:0 8px 24px rgba(17,24,39,.08);
+  --sh-pop:0 14px 40px rgba(17,24,39,.14);
   --nav-h:57px;
   /* 原生 select 的下拉箭头（appearance:none 后需自画）：随主题换色 */
   --chevron:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235F6775' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
@@ -105,6 +107,8 @@ html[data-theme="dark"]{
   --border-2:#3A4453;
   --border-3:#222933;
   --field-border:#64748B;
+  --field-line:#39424F;
+  --field-fill:#131821;
   --ink:#E9EDF5;
   --ink-2:#C6CEDB;
   --ink-3:#97A2B4;
@@ -121,9 +125,9 @@ html[data-theme="dark"]{
   --violet:#C4B5FD; --violet-soft:#221A2E;
   --shadow:0 1px 2px rgba(0,0,0,.45);
   --sh-1:0 1px 2px rgba(0,0,0,.45);
-  --sh-2:0 2px 8px rgba(0,0,0,.45), 0 1px 2px rgba(0,0,0,.40);
-  --sh-3:0 12px 32px rgba(0,0,0,.50);
-  --sh-pop:0 24px 64px rgba(0,0,0,.60);
+  --sh-2:0 2px 6px rgba(0,0,0,.32), 0 1px 2px rgba(0,0,0,.28);
+  --sh-3:0 10px 26px rgba(0,0,0,.40);
+  --sh-pop:0 20px 52px rgba(0,0,0,.48);
   --chevron:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2397A2B4' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
 }
 /* 语义标注与控件变体（替代 JS 模板里的内联样式重复） */
@@ -220,14 +224,12 @@ nav .tag{font-size:12px; color:var(--ink-4)}
 #statusMsg{color:var(--ink-3); font-size:12.5px; min-height:20px; margin-bottom:12px; transition:color .15s}
 #statusMsg.err{color:var(--red)}
 /* 运行事件常驻留痕（跳档/重试/失败）：status 行是瞬态的、toast 会自动消失，
-   须留痕的事件追加到这里（point_skipped.msg、toast 状态事件） */
-/* 运行事件常驻留痕（跳档/重试/失败）：status 行是瞬态的、toast 会自动消失，
    须留痕的事件追加到这里（point_skipped.msg、toast 状态事件）。
    **不放在 KPI 卡里**：日志条目会把「已完成测试点」卡顶到三倍高，整行 KPI 跟着走形 */
-.runlog{background:var(--card); border:1px solid var(--border); border-left:3px solid var(--yellow);
+.runlog{background:var(--card); border:1px solid var(--border); border-left:2px solid var(--yellow-border);
   border-radius:var(--r-md); padding:10px 14px; margin:-6px 0 20px; box-shadow:var(--sh-1)}
 .runlog .rl-head{font-size:var(--fs-micro); font-weight:600; color:var(--ink-3);
-  letter-spacing:.04em; margin-bottom:4px}
+  letter-spacing:.02em; margin-bottom:4px}
 #skipNotes{font-size:var(--fs-sm); line-height:1.7; color:var(--yellow);
   max-height:132px; overflow-y:auto}
 #skipNotes .note-fail{color:var(--red)}
@@ -239,15 +241,17 @@ nav .tag{font-size:12px; color:var(--ink-4)}
 .kpis{display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px}
 .kpi{position:relative; overflow:hidden; background:var(--card); border:1px solid var(--border);
   border-radius:var(--r-lg); padding:16px 18px 14px 20px; box-shadow:var(--sh-1)}
-.kpi::before{content:""; position:absolute; left:0; top:0; bottom:0; width:3px;
-  background:var(--accent,var(--border-2))}
+.kpi::before{content:""; position:absolute; left:0; top:0; bottom:0; width:2px;
+  /* 色条做上实下浅的渐退：3px 实色竖条在整排白卡上显得硬，像选中了边框 */
+  background:linear-gradient(180deg, var(--accent,var(--border-2)),
+    color-mix(in srgb, var(--accent,var(--border-2)) 30%, transparent))}
 .kpi .k{font-size:var(--fs-sm); font-weight:500; color:var(--ink-3); margin-bottom:2px}
 .kpi .v{font-size:var(--fs-num); font-weight:700; color:var(--ink); font-variant-numeric:tabular-nums;
   line-height:1.15; letter-spacing:-.02em; display:flex; align-items:baseline; gap:6px}
 .kpi .v small{font-size:var(--fs-md); font-weight:500; color:var(--ink-3); letter-spacing:0}
 .kpi .v .est{font-size:.62em; font-weight:600; color:var(--ink-4); align-self:center;
   letter-spacing:0; cursor:help}
-.kpi .d{font-size:var(--fs-micro); margin-top:6px; line-height:1.5; color:var(--ink-4)}
+.kpi .d{font-size:var(--fs-sm); margin-top:6px; line-height:1.5; color:var(--ink-4)}
 .kpi.prefill{--accent:var(--primary)} .kpi.prefill .v{color:var(--primary)}
 .kpi.decode{--accent:var(--green)} .kpi.decode .v{color:var(--green)}
 .kpi.reqs{--accent:var(--blue)}
@@ -256,15 +260,17 @@ nav .tag{font-size:12px; color:var(--ink-4)}
 .progbar > div{height:100%; border-radius:var(--r-pill); width:0%;
   background:var(--bar,linear-gradient(90deg,var(--primary),var(--primary-hover)));
   transition:width var(--t-3) var(--ease-std)}
-#decodeBarWrap > div{--bar:linear-gradient(90deg,#4ADE80,#16A34A)}
-#prefillBarWrap > div{--bar:linear-gradient(90deg,#818CF8,#4F46E5)}
-#progWrap > div{--bar:linear-gradient(90deg,#C4B5FD,#9333EA)}
+/* 进度条走同色相的渐增（从轨道色淡入到语义色）：硬撞的双色渐变在浅色卡上偏艳，
+   且旧写法的固定十六进位在浅色主题下比 --green/--primary 本身亮得多（跨主题串色） */
+#decodeBarWrap > div{--bar:linear-gradient(90deg, color-mix(in srgb, var(--green) 45%, var(--track)), var(--green))}
+#prefillBarWrap > div{--bar:linear-gradient(90deg, color-mix(in srgb, var(--primary) 45%, var(--track)), var(--primary))}
+#progWrap > div{--bar:linear-gradient(90deg, color-mix(in srgb, var(--violet) 45%, var(--track)), var(--violet))}
 /* 运行中的进度条走一层流动光泽：静态宽度看不出「还在跑」，但数值本身不得被动画抢戏
    （只在 body[data-phase=run] 时出现；prefers-reduced-motion 由全局规则归零） */
 body[data-phase="run"] .progbar > div{position:relative}
 body[data-phase="run"] .progbar > div::after{content:""; position:absolute; inset:0;
-  background:linear-gradient(90deg,transparent,rgba(255,255,255,.5),transparent);
-  transform:translateX(-100%); animation:sheen 1.9s var(--ease-std) infinite}
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.32),transparent);
+  transform:translateX(-100%); animation:sheen 2.6s var(--ease-std) infinite}
 @keyframes sheen{to{transform:translateX(100%)}}
 
 /* ============ 布局（配置平铺 + 主区，随阶段聚焦） ============ */
@@ -290,10 +296,10 @@ body[data-phase="run"] .progbar > div::after{content:""; position:absolute; inse
 label.f{display:block; color:var(--ink-2); font-size:var(--fs-sm); font-weight:500; margin:14px 0 5px}
 label.f:first-child{margin-top:0}
 input[type=text],input[type=password],input[type=number],select,textarea{
-  width:100%; background:var(--card); border:1px solid var(--field-border); color:var(--ink);
+  width:100%; background:var(--field-fill); border:1px solid var(--field-line); color:var(--ink);
   border-radius:var(--r-sm); padding:8px 12px; font-size:var(--fs-md); min-height:38px;
   transition:border-color var(--t-1), box-shadow var(--t-1), background-color var(--t-1)}
-input:hover,select:hover,textarea:hover{border-color:var(--ink-3)}
+input:hover,select:hover,textarea:hover{border-color:var(--field-border)}
 input:focus,select:focus,textarea:focus{outline:none; border-color:var(--primary);
   box-shadow:0 0 0 3px var(--primary-ring)}
 input:disabled,select:disabled,textarea:disabled{opacity:.5; cursor:not-allowed; background:var(--bg)}
@@ -338,7 +344,7 @@ label.f.m-sep{margin-top:16px; padding-top:14px; border-top:1px solid var(--bord
   min-height:32px; padding:4px 14px 4px 8px; cursor:pointer; user-select:none;
   border-radius:var(--r-xs); transition:background var(--t-1)}
 .ck:hover{background:var(--hover)}
-.ck input{accent-color:var(--primary); width:16px; height:16px; cursor:pointer; flex:none}
+.ck input{accent-color:var(--primary); width:15px; height:15px; cursor:pointer; flex:none}
 /* 自定义上下文档位：包裹行承载删除按钮（内置档无包裹、不可删） */
 .ckwrap{display:inline-flex; align-items:center; border-radius:var(--r-xs); transition:background var(--t-1)}
 .ckwrap:hover{background:var(--hover)}
@@ -502,8 +508,8 @@ button:active:not(:disabled){transform:scale(.97)}
 button:disabled{opacity:.45; cursor:not-allowed}
 .btn-primary{background:var(--primary); color:#fff; box-shadow:var(--sh-1)}
 .btn-primary:hover:not(:disabled){background:var(--primary-hover); box-shadow:var(--sh-2)}
-.btn-ghost{background:var(--card); border:1px solid var(--field-border); color:var(--ink-2)}
-.btn-ghost:hover:not(:disabled){background:var(--hover); border-color:var(--ink-3); color:var(--ink)}
+.btn-ghost{background:var(--card); border:1px solid var(--border-2); color:var(--ink-2)}
+.btn-ghost:hover:not(:disabled){background:var(--hover); border-color:var(--field-border); color:var(--ink)}
 /* 危险动作：幽灵按钮红色化（删除/清空/清除 Key），与主操作视觉分离 */
 .btn-ghost.danger:hover:not(:disabled){border-color:var(--red); color:var(--red); background:var(--red-soft)}
 /* 顶栏小按钮与图标按钮（抽屉关闭/部署删除等） */
@@ -529,7 +535,7 @@ button .ic{vertical-align:-2px}
 table{width:100%; border-collapse:collapse; font-size:13px}
 th{color:var(--ink-3); font-weight:600; text-align:left; padding:9px 12px;
   border-bottom:1px solid var(--border-2); white-space:nowrap; font-size:var(--fs-micro);
-  letter-spacing:.04em; background:var(--head-bg)}
+  letter-spacing:.02em; background:var(--head-bg)}
 td{padding:10px 12px; border-bottom:1px solid var(--border-3); white-space:nowrap;
   font-variant-numeric:tabular-nums; color:var(--ink-2)}
 #liveTable td:nth-child(n+7), .resultTable td:nth-child(n+4){font-family:var(--mono); font-size:var(--fs-md)}
@@ -637,6 +643,8 @@ tr.fade td{opacity:.45}
 #cardWrap{overflow-x:auto}
 .speed-card{--bg:#F9FAFB; --card:#FFFFFF; --elev:#FFFFFF; --hover:#EFF1F5; --track:#E5E7EB;
   --border:#E5E7EB; --border-2:#D1D5DB; --border-3:#F3F4F6; --field-border:#7C8797;
+  --head-bg:#F9FAFB;   /* 卡片内矩阵表表头走全局 th{background:var(--head-bg)}：
+                        不在卡片作用域钉回浅色，深色主题下白卡里会嵌一排深灰带（导出图同错） */
   --ink:#111827; --ink-2:#374151; --ink-3:#5F6775; --ink-4:#5F6775;
   --primary:#4F46E5; --primary-hover:#4338CA; --primary-soft:#EEF2FF;
   --green:#15803D; --green-soft:#F0FDF4; --green-border:#BBF7D0;
