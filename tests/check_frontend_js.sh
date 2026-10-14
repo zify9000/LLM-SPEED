@@ -3,6 +3,8 @@
 #   ① node --check 语法检查（从 static/index.html 提取 <script> 主体）
 #   ② 两条注入门禁（纯文本匹配，专防已修过的属性逃逸类 XSS 回归）
 #   ③ §pure 纯函数区域存在且非空门禁（tests/run_frontend_pure.sh 依赖它提取用例）
+#   ④ HTML 注释收尾形式门禁（注释体里写 */ 会让 DOM 结构静默错位）
+#   ⑤ CSS 令牌存在性门禁（引用未定义的 var(--x) 会静默失效，底变透明）
 # 提取前提：假定 static/index.html 只有一个内联 <script> 块（标签独占一行）。
 # 运行：bash tests/check_frontend_js.sh
 set -euo pipefail
@@ -66,4 +68,84 @@ if grep -nE '<(script|link|img|iframe|source|video|audio)[^>]*[[:space:]](src|hr
   exit 1
 fi
 
-echo "frontend JS syntax OK · 注入门禁通过 · 无外部资源"
+# 门禁：HTML 注释必须"包住的只是注释"。三类同一个后果——浏览器把中间的标记当
+# 注释吞掉，DOM 结构整体错位，而**标签配平检查照样会过**（浏览器眼里那就是一个
+# 超长注释），肉眼看页面常常"正常"：
+#   ① 注释体内出现 CSS 风格收尾 */（HTML 不认它，注释一路吞到下一个 -->）
+#      ——自定义档位添加器首版踩过：translateWrap 及后续分区全成了 #ctxList 的子节点
+#   ② 注释未收尾（漏了 -->）——合并基础设置卡时踩过：#fProvider 与整张测试矩阵卡
+#      的层级全错
+#   ③ 注释吞掉了整行标记（行首只有空白紧跟 <tag>）——①② 的直接症状，也是可靠的
+#      静态信号。判据只认"行首标记"：本文件的注释正文是中文说明，会从行首写标签；
+#      而正文里提到 `<script>` 这类字样是合法的（只作说明），不算吞标记
+# 只扫 <script> 之前的标记段：注释全在那儿，脚本里的字符串不参与。
+if bad_comment=$(python3 - static/index.html <<'PYEOF'
+import re, sys
+lines = open(sys.argv[1], encoding='utf-8').read().split('\n')
+inc, opened_at = False, 0
+for n, line in enumerate(lines, 1):
+    if line.strip() == '<script>':
+        break
+    i = 0
+    while i < len(line):
+        if inc:
+            if re.match(r'\s*</?[A-Za-z]', line[i:]) and line[i:].strip():
+                print('static/index.html:%d: HTML 注释（起于第 %d 行）吞掉了整行标记'
+                      '「%s」——收尾符写错或漏了 -->，中间标记会被浏览器当注释吃掉'
+                      % (n, opened_at, line.strip()[:40]))
+                sys.exit(1)
+            e = line.find('-->', i)
+            seg = line[i:] if e < 0 else line[i:e]
+            if '*/' in seg:
+                print('static/index.html:%d: HTML 注释体内出现 */'
+                      '（注释会一路吞到下一个 -->，中间的标签被当注释吃掉）' % n)
+                sys.exit(1)
+            if e < 0:
+                break
+            i, inc = e + 3, False
+        else:
+            st = line.find('<!--', i)
+            if st < 0:
+                break
+            i, inc, opened_at = st + 4, True, n
+if inc:
+    print('static/index.html:%d: HTML 注释未收尾（缺 -->），它会一路吞到下一个 -->，'
+          '中间的标签全被当注释吃掉' % opened_at)
+    sys.exit(1)
+PYEOF
+); then
+  :
+else
+  echo "ERROR: $bad_comment" >&2
+  exit 1
+fi
+
+# 门禁：CSS 自定义属性（设计令牌）引用必须**有定义或有兜底值**。写错令牌名是最阴的
+# 一类错：浏览器不报错、控制台无警告，只是那条声明静默失效——历史记录「…」菜单首版
+# 把底色写成 var(--surface)（本项目根本没有这个令牌），结果浮层没有卡面，三个菜单项
+# 直接压在页面内容上（用户截图才发现）。参照上面「无外部资源」门禁的教训：能静态判的
+# 就不要靠人眼。
+# 判据：剥掉 CSS/HTML 注释后（注释正文里写 var(--x) 是说明，不是引用，会误报），收集
+# 全部 `--name:` 定义，再找 `var(--name)`——**带兜底值**（`var(--x, #fff)`）的放过，
+# 那本来就是合法的降级写法。
+if bad_token=$(python3 - static/index.html <<'PYEOF'
+import re, sys
+raw = open(sys.argv[1], encoding='utf-8').read()
+body = re.sub(r'/\*.*?\*/', '', re.sub(r'<!--.*?-->', '', raw, flags=re.S), flags=re.S)
+defined = set(re.findall(r'(--[A-Za-z0-9-]+)\s*:', body))
+for n, line in enumerate(body.split('\n'), 1):
+    for m in re.finditer(r'var\((--[A-Za-z0-9-]+)(\s*,)?', line):
+        if m.group(1) not in defined and not m.group(2):
+            print('static/index.html（剥注释后第 %d 行）引用了未定义的 CSS 令牌 %s'
+                  '，且没有兜底值——该声明会静默失效（底色变透明、边框消失这类），'
+                  '请改用已定义的令牌或写 var(%s, 兜底值)' % (n, m.group(1), m.group(1)))
+            sys.exit(1)
+PYEOF
+); then
+  :
+else
+  echo "ERROR: $bad_token" >&2
+  exit 1
+fi
+
+echo "frontend JS syntax OK · 注入门禁通过 · 无外部资源 · HTML 注释收尾形式 OK · CSS 令牌存在性 OK"

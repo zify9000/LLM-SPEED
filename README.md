@@ -205,7 +205,7 @@ python -m pytest -q                 # 或 python -m unittest discover -s tests -
 # e2e 全组慢，排障时单文件跑更快（10~60 秒）：
 # python -m pytest tests/e2e/test_e2e_ctx.py -q
 
-# 前端门禁：内联脚本语法 + 注入防护 + 「无外部资源」（需 node）
+# 前端门禁：内联脚本语法 + 注入防护 + 「无外部资源」+ 注释收尾 + CSS 令牌存在性（需 node）
 bash tests/check_frontend_js.sh
 
 # 前端展示层纯函数单测（提取内联脚本 §pure 区域，零依赖无构建，需 node）
