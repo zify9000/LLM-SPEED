@@ -353,10 +353,13 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         # （cfg.agent_cache_ladder / agent_inst_ladder 覆盖），出点循环见
         # _run_agent_matrix
         "cache_ladder": [0, 4096, 8192, 16384, 32768, 65536, 131072, 262144],   # 已缓存上下文（tokens）
-        "inst_ladder": [64, 128, 256, 512, 1024, 2048, 4096, 8192],             # 单步指令长度（tokens）
+        "inst_ladder": [128, 256, 512, 1024, 2048, 4096, 8192, 16384],          # 单步指令长度（tokens）
+        # 2026-10-14 用户调整：撤 64 档（真实 agent 单步新输入极少这么短，测出来
+        # 的 TTFT 更像"空请求基线"而不是 agent 单步），补 16K 档（长工具输出/
+        # 整文件回填进单步的形态）。仍是 8 档，矩阵规模 8×8 不变
         # 指令模板：夹一段接续上下文之后的轨迹新材料（模拟新到的工具输出/日志），
-        # 材料长度随档位伸缩；模板刻意精简（~30 tokens），64 tokens 小档不被
-        # 固定开销淹没
+        # 材料长度随档位伸缩；模板刻意精简（~30 tokens），最小档 128 也不被
+        # 固定开销淹没（30/128 ≈ 23%）
         "inst_prefix": "New information from the ongoing task:\n\n",
         # suffix 要求 thorough/detailed/comprehensive：实测模型会以「任务上下文
         # 不完整/文件内容被截断」为由如实短答（308/310/401 tokens 即 finish=
@@ -3365,7 +3368,7 @@ class BenchRun:
             elif mode == "auto":
                 await self.emit({"type": "status", "msg":
                     f"检测到 {model} 默认输出思考流，按模型默认形态测速："
-                    "思考流计入测速（只需正文速度请切换「禁用思考」）"})
+                    "思考流计入测速（只需正文速度请切换思考模式「关闭」）"})
         # prefill 等待期估值先验：探测实测的净 prefill 速率播种曲线，x 坐标
         # 取实测未命中量（命中时 prompt_tokens − cache_hit；名义 2048 与真实
         # 值可有数倍差）。探测 prompt 确定——cache=stable 第二跑可能命中缓存，
