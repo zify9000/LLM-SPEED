@@ -581,3 +581,34 @@ test("depOfModel：模型未映射到任何部署 / provider 不存在 → null�
   assert.equal(depLabel(depOfModel({modelInfo:undefined, providers:PROVS,
     provider:"local", providerLocal:true, model:"Qwen3.8-27B"})), "alt");
 });
+
+/* ── 模型声明的上限单位（ADR-0117）──────────────────────────────────── */
+test("fmtCtx：整 K/整 M 走单位，其他原样", () => {
+  assert.equal(fmtCtx(262144), "256K");
+  assert.equal(fmtCtx(1048576), "1M");
+  assert.equal(fmtCtx(131072), "128K");
+  assert.equal(fmtCtx(1500), "1500");
+  assert.equal(fmtCtx(null), "");
+  assert.equal(fmtCtx(0), "");
+  assert.equal(fmtCtx(-5), "");
+});
+
+test("parseCtx：K/M/裸数字/大小写与空格，留空为 null", () => {
+  assert.equal(parseCtx("128K"), 131072);
+  assert.equal(parseCtx(" 256k "), 262144);
+  assert.equal(parseCtx("1M"), 1048576);
+  assert.equal(parseCtx("131072"), 131072);
+  assert.equal(parseCtx("1.5K"), 1536);
+  assert.equal(parseCtx(""), null);
+  assert.equal(parseCtx(null), null);
+  assert.equal(parseCtx(undefined), null);
+});
+
+test("parseCtx：非法一律 NaN（不得当成留空悄悄写盘）", () => {
+  for(const bad of ["abc", "12KB", "K", "-8", "0", "0K", "1e5", "1 2"])
+    assert.ok(Number.isNaN(parseCtx(bad)), `应判非法: ${bad}`);
+});
+
+test("fmtCtx ↔ parseCtx 往返幂等（预设档位都要能读回原值）", () => {
+  for(const n of MP_PRESETS) assert.equal(parseCtx(fmtCtx(n)), n);
+});

@@ -201,7 +201,7 @@ def load_providers() -> list[dict]:
             continue
         name = p.get("name") or urls[0]
         key = os.environ.get(_env_key_name(name), "") or GLOBAL_API_KEY
-        providers.append({
+        prov = {
             "name": name,
             "label": p.get("label") or name,
             "gateway_url": urls[0],          # 首选/回退地址（兼容字段）
@@ -210,7 +210,12 @@ def load_providers() -> list[dict]:
             "local": bool(p.get("local")),   # 本地 provider：跑并发测试；云端不跑
             "deployment_groups": p.get("deployment_groups") or [],   # 部署环境分组（仅组织用）
             "deployments": p.get("deployments") or [],   # 模型→部署环境（硬件/框架/参数）映射
-        })
+            # 模型级「上限 + 类型」声明（ADR-0117）：上限与类型的**唯一**计算来源
+            "model_profiles": p.get("model_profiles") or [],
+        }
+        # 旧配置的上限/类型只写在部署环境里：读取时物化成声明（ADR-0118，不写盘）
+        prov["model_profiles"] = _migrate_profiles(prov)
+        providers.append(prov)
     return providers
 
 
@@ -228,6 +233,9 @@ def resolve_provider(name: str | None) -> dict:
 
 # 模型类型白名单（ADR-0020）：部署的 kind/kinds 取值空间
 _KINDS = ("llm", "asr", "ocr", "tts")
+# 每个 provider 的模型声明条数上限（ADR-0117）：定位是"只声明要测的模型"。
+# 校验侧拒 400、迁移侧（_migrate_profiles）到数即停，两边必须同一个数
+_MAX_MODEL_PROFILES = 64
 
 
 def _dep_kinds(dep: dict) -> list[str]:
@@ -237,6 +245,66 @@ def _dep_kinds(dep: dict) -> list[str]:
     if isinstance(kinds, list) and kinds:
         return [str(k) for k in kinds]
     return [str(dep["kind"])] if dep.get("kind") else ["llm"]
+
+
+def _resolve_model_profile(provider: dict, model: str) -> dict | None:
+    # 模型级声明（model_profiles，ADR-0117）：按模型名直取「上限 + 类型」。与部署环境
+    # 并列的第二来源，命中即优先，缺的字段回退部署环境（合并点在 match_deployments）
+    for f in provider.get("model_profiles") or []:
+        if isinstance(f, dict) and f.get("model") == model:
+            return f
+    return None
+
+
+def _profile_kinds(prof: dict) -> list[str]:
+    # 模型声明的能力集，缺省 ["llm"]（与 _dep_kinds 同口径）
+    kinds = prof.get("kinds")
+    if isinstance(kinds, list) and kinds:
+        return [str(k) for k in kinds]
+    return ["llm"]
+
+
+def _migrate_profiles(provider: dict) -> list[dict]:
+    """把旧部署环境里的 `max_ctx`/`kinds` 物化成模型声明（ADR-0118，**内存迁移**）。
+
+    计算口径已收敛到 `model_profiles` 一处，`deployments` 里的同名字段停止被读取。
+    但既有配置（尤其本地 provider）的上限与类型只写在部署环境里，直接切换会让
+    `max_ctx` 钳制与 OCR/ASR 类型当场静默失效——静默失效比报错更糟。这里在**读取时**
+    按模型补一条声明：已有声明的模型一律不动（声明优先）；其余取"该模型命中的那套
+    部署"，选择规则与 `_resolve_deployment` 完全一致（active 优先，否则首个命中），
+    避免同一模型挂多套时把两套的说法混着搬。
+
+    两条边界：
+    - 部署里的原值**保留不动**，从此只作历史/报告用——两份数据允许分叉（ADR-0118）；
+    - 只在内存生效：`config.json` 不会在启动/读取时被改写，用户点「保存配置」才落盘。
+    """
+    deps = [d for d in (provider.get("deployments") or []) if isinstance(d, dict)]
+    out = [dict(f) for f in (provider.get("model_profiles") or []) if isinstance(f, dict)]
+    known = {f.get("model") for f in out}
+    for dep in deps:
+        if len(out) >= _MAX_MODEL_PROFILES:
+            break   # 撞上限就停：宁可少迁几条，也不造出服务端会拒（400）的配置
+        for m in dep.get("models") or []:
+            if not isinstance(m, str) or not m.strip() or m in known:
+                continue
+            if len(out) >= _MAX_MODEL_PROFILES:
+                break
+            if _resolve_deployment(provider, m) is not dep:
+                continue      # 多套命中同一模型：只有生效那套的说法被搬走
+            entry: dict = {"model": m}
+            kinds = [k for k in _dep_kinds(dep) if k in _KINDS]
+            if (dep.get("kinds") or dep.get("kind")) and kinds:
+                entry["kinds"] = kinds
+            try:
+                mc = int(dep.get("max_ctx") or 0)
+            except (TypeError, ValueError):
+                mc = 0
+            if mc > 0:
+                entry["max_ctx"] = mc
+            if len(entry) > 1:      # 只有 model = 没什么可声明的，不造空条目
+                out.append(entry)
+                known.add(m)
+    return out
 
 
 def _dep_quants(dep: dict) -> list[str]:
@@ -260,8 +328,10 @@ def _resolve_deployment(provider: dict, model: str) -> dict | None:
     """模型的生效部署：一个模型允许映射多套部署环境（1 对多），但激活
     （active=true）的只有一套——激活者生效；无 active 标记回退首个命中
     （兼容旧配置）。"""
+    # 手改过的 config.json 里可能混进非对象条目（字符串/null）：这里不挡就会
+    # AttributeError 把整次测速打成 500，跳过即可（写入侧本来就会拒）
     hits = [d for d in provider.get("deployments") or []
-            if model in (d.get("models") or [])]
+            if isinstance(d, dict) and model in (d.get("models") or [])]
     if not hits:
         return None
     for d in hits:
@@ -277,26 +347,32 @@ def match_deployments(provider: dict, models: list[str]) -> dict[str, dict]:
     一个 provider 可挂多套部署（deployments），每套声明其适用的 models；
     同一模型命中多套时激活的那套生效（无 active 标记回退首个命中）；
     只有被选中的模型命中映射时才携带部署信息（本地多部署场景）。
+
+    字段分工（ADR-0118）：本函数从 `deployments` 只取**报告来源**（deploy_label /
+    quant / kv_quant / hardware / framework / params）；`max_ctx` 与 `kinds` 一律只取
+    `model_profiles`，**不再兜底**——两处都能算同一字段迟早排出两种结果。旧配置里写
+    在部署环境的值已由 `_migrate_profiles` 在读取时物化成声明，行为与迁移前等价。
     """
     out: dict[str, dict] = {}
     for m in models:
         dep = _resolve_deployment(provider, m)
-        if dep:
+        prof = _resolve_model_profile(provider, m)
+        if dep or prof:
             out[m] = {
-                "deploy_label": dep.get("label") or "",
+                "deploy_label": (dep.get("label") or "") if dep else "",
                 # 本次测速生效的模型量化（quants 首项，兼容旧 quant 单值回退）
                 # 与 KV 缓存量化（kv_quants 首项）：一次测速只有一个生效值
-                "quant": (_dep_quants(dep) or [""])[0],
-                "kv_quant": (_dep_kv_quants(dep) or [""])[0],
-                # 部署上下文上限（tokens）：测速卡片 meta「模型」格的上下文段
-                # 来源；未配置为 None（前端省略该段，与 model_max_ctx 同门槛）
-                "max_ctx": int(dep["max_ctx"]) if dep.get("max_ctx") else None,
-                "hardware": dep.get("hardware") or "",
-                "framework": dep.get("framework") or "",
-                "params": dep.get("params") or "",
-                # 部署的模型能力集（llm/asr/ocr/tts 多选，缺省 [llm]）：场景按
-                # kind 匹配（ADR-0020），随结果存档、供前端分组与引擎校验
-                "kinds": _dep_kinds(dep),
+                "quant": ((_dep_quants(dep) or [""])[0] if dep else ""),
+                "kv_quant": ((_dep_kv_quants(dep) or [""])[0] if dep else ""),
+                # 上下文上限（tokens）：测速卡片 meta「模型」格的上下文段来源，
+                # 也是 model_max_ctx 钳制的输入；未配置为 None（前端省略该段）
+                "max_ctx": int(prof["max_ctx"]) if prof and prof.get("max_ctx") else None,
+                "hardware": (dep.get("hardware") or "") if dep else "",
+                "framework": (dep.get("framework") or "") if dep else "",
+                "params": (dep.get("params") or "") if dep else "",
+                # 模型能力集（llm/asr/ocr/tts 多选，缺省 [llm]）：场景按 kind 匹配
+                # （ADR-0020），随结果存档、供前端分组与引擎校验
+                "kinds": _profile_kinds(prof) if prof else ["llm"],
             }
     return out
 
@@ -571,6 +647,8 @@ def _validate_providers(providers) -> list[dict]:
         for d in p.get("deployments") or []:
             if not isinstance(d, dict):
                 raise HTTPException(400, f"{name} 的部署条目必须是对象")
+            # 部署环境仍接受 max_ctx/kinds（旧配置与手改的 config.json 要能读能存），
+            # 但**解析层不再读它们**（ADR-0118）：新增按模型的字段请写到 model_profiles
             max_ctx = d.get("max_ctx")
             dep = {
                 "label": str(d.get("label") or "").strip()[:64],
@@ -667,6 +745,43 @@ def _validate_providers(providers) -> list[dict]:
                              f"（{active_by_model[m]}、{dep['label'] or '未命名部署'}），"
                              f"同一模型只能激活一套")
                 active_by_model[m] = dep["label"] or "未命名部署"
+        # 模型级「上限 + 类型」声明（ADR-0117）：云端只声明要测的模型，不必填部署卡
+        profiles = []
+        for f in p.get("model_profiles") or []:
+            if not isinstance(f, dict):
+                raise HTTPException(400, f"{name} 的模型声明条目必须是对象")
+            m = str(f.get("model") or "").strip()
+            if not m:
+                raise HTTPException(400, f"{name} 的模型声明缺少模型名")
+            if len(m) > 128:
+                raise HTTPException(400, f"{name} 的模型声明模型名 ≤128 字符: {m!r}")
+            if any(x["model"] == m for x in profiles):
+                raise HTTPException(400, f"{name} 的模型 {m} 重复声明（同一模型只允许一条）")
+            prof: dict = {"model": m}
+            kinds_in = f.get("kinds")
+            if kinds_in is not None and not isinstance(kinds_in, list):
+                raise HTTPException(
+                    400, f"{name} 的模型 {m} kinds 须为数组（{'/'.join(_KINDS)} 多选）")
+            kinds = []
+            for k in kinds_in or []:
+                k = str(k).strip().lower()
+                if k not in _KINDS:
+                    raise HTTPException(
+                        400, f"{name} 的模型 {m} kinds 元素须取自 {'/'.join(_KINDS)}: {k!r}")
+                if k not in kinds:
+                    kinds.append(k)
+            kinds = [k for k in _KINDS if k in kinds]   # 按白名单归序，存储与比较同口径
+            if kinds and kinds != ["llm"]:
+                prof["kinds"] = kinds   # 缺省 [llm] 不落盘，旧配置保持零字段
+            mc = f.get("max_ctx")
+            # 非有限值（NaN/Infinity）与非正数同口径：视为未配置（与 deployments 一致）
+            if isinstance(mc, (int, float)) and not isinstance(mc, bool) \
+                    and math.isfinite(mc) and int(mc) > 0:
+                prof["max_ctx"] = int(mc)
+            profiles.append(prof)
+        if len(profiles) > _MAX_MODEL_PROFILES:
+            raise HTTPException(400,
+                                f"{name} 的模型声明最多 {_MAX_MODEL_PROFILES} 条（只声明要测的模型）")
         out.append({
             "name": name,
             "label": (str(p.get("label") or "").strip() or name)[:64],
@@ -675,6 +790,7 @@ def _validate_providers(providers) -> list[dict]:
             "local": bool(p.get("local")),
             "deployment_groups": _provider_deploy_groups(p),
             "deployments": deps,
+            "model_profiles": profiles,
         })
     return out
 
@@ -732,6 +848,31 @@ async def put_config_key(body: dict):
         os.environ[env_name] = ""   # 空值回退全局 API_KEY（load_providers 语义）
     await asyncio.to_thread(_atomic_write, env_path, "\n".join(lines) + "\n", True)
     return {"ok": True}
+
+
+@app.post("/api/probe")
+async def probe_gateway_url(body: dict):
+    """Provider 抽屉里的「测这条网关地址通不通」：只测**单条地址**的可达性与延迟，
+    让编辑时就知道地址敲没敲错，不必等保存 + 刷模型列表那一圈。
+
+    口径与 `pick_gateway_url` 严格一致（同一个 `_probe_url`）：GET /v1/models 与
+    /models 两种前缀都试，**非 404 且 <500 即算可达**（无鉴权拿到 401 也算——可达性
+    与凭据无关，ADR-0081），两条都 404 记为不可达（多半填成了根路径或非 OpenAI
+    兼容接口，故前端文案写"不可达或非兼容接口"而不谎报原因）。
+
+    安全边界（这是把"保存后本来就会发生的那次探测"提前到保存前，不新增暴露面）：
+    ① POST 属 `_UNSAFE_METHODS`，走 ADR-0081 的同源 Origin/Sec-Fetch-Site + 请求体
+    上限中间件，跨源页面打不进来；② **不带 Authorization**，key 不出服务端（同
+    ADR-0081 对 `pick_gateway_url` 的同一要求）；③ 只回 `{ok, ms}` 两个标量，不回
+    状态码、响应体、异常文本——它是个可达性开关，不是响应内容读取通道；④ 3s 超时
+    且只测一条地址，构不成对内网的批量扫描放大（真要扫可以直接连发，但那必须先过
+    同源关，即攻击者已能读写本机配置，探测不再是升级路径）。
+    """
+    url = str(body.get("url") or "").strip()
+    if not re.match(r"https?://[^/\s]+", url, re.I):
+        raise HTTPException(400, "仅支持 http/https 网关地址")
+    lat = await _probe_url(url, {})
+    return {"ok": lat is not None, "ms": None if lat is None else max(1, round(lat * 1000))}
 
 
 @app.get("/api/models")
@@ -977,10 +1118,10 @@ async def bench_start(cfg: dict):
         # 部署的实际上下文上限（deployments[].max_ctx）：超限档位由测速引擎跳过，
         # 避免构造出必然 400 的超窗 prompt（ADR-0005）。同一模型多套部署时
         # 取激活的那套（与 match_deployments 同口径）
+        # 从 model_info 派生（match_deployments 里已合并过模型声明与部署环境），不再
+        # 自己解析一遍 deployments——两处各算一份，口径迟早分叉（ADR-0117）
         cfg["model_max_ctx"] = {
-            m: int(dep["max_ctx"])
-            for m in (cfg.get("models") or [])
-            if (dep := _resolve_deployment(p, m)) and dep.get("max_ctx")
+            m: v["max_ctx"] for m, v in cfg["model_info"].items() if v.get("max_ctx")
         }
         # 未命中显式告警（不静默）：provider 配了 deployments 但被测模型一个都
         # 没命中时，model_info/model_max_ctx 为空、引擎失去 max_ctx 钳制保护，
@@ -988,10 +1129,10 @@ async def bench_start(cfg: dict):
         # 不一致，静默丢保护）——这里显式提示用户去补映射
         if p.get("deployments"):
             for m in (cfg.get("models") or []):
-                if not _resolve_deployment(p, m):
+                if not _resolve_deployment(p, m) and not _resolve_model_profile(p, m):
                     warnings.append(
                         f"⚠ {m}：模型未映射部署环境，max_ctx 钳制不可用"
-                        "（请在「部署环境」中核对模型名后补映射）")
+                        "（在「部署环境」补映射，或在「模型上限与类型」声明该模型）")
         # agent 矩阵最大组合校验（不阻断）：最大缓存档 + 最大指令档超出部署
         # 预算（max_ctx − max_tokens − 余量）时引擎会整档跳过（point_skipped），
         # 预先告知用户会有组合被跳过
