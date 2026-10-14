@@ -21,7 +21,7 @@
 | 单块字符数 | min 3,680 ／ 中位 34,434 ／ **max 40,183** |
 | 超 40,000 字符的块 | **3 个**（`traj-0015`(40183)、`traj-0097`(40036)、`traj-0011`(40033)） |
 
-清单算法（与 `tests/test_engine_unit.py -k corpus` 内断言一致）：文件按相对路径
+清单算法（与 `tests/unit/test_engine_persistence.py -k corpus` 内断言一致）：文件按相对路径
 排序，逐个累积 `相对路径 + "\0" + 文件内容` 的 sha256（流式，1MB 分块）。
 
 ## ⚠ 语料与生成器不同源（已知，勿"顺手重建"）
@@ -56,6 +56,6 @@
 
 ```bash
 cd /home/zify/myLog/projectRepo/LLM-SPEED
-python -m pytest -q tests/test_engine_unit.py -k corpus -v      # 清单 + 统计区间
+python -m pytest -q tests/unit/test_engine_persistence.py -k corpus -v   # 清单 + 统计区间
 python scripts/build_agent_corpus.py --verify                   # 块长契约（不写盘）
 ```

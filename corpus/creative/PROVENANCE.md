@@ -72,10 +72,10 @@
 
 ```bash
 cd /home/zify/myLog/projectRepo/LLM-SPEED
-python -m pytest -q tests/test_engine_unit.py -k corpus -v
+python -m pytest -q tests/unit/test_engine_persistence.py -k corpus -v
 # 断言：文件 sha256、去空白字符数、以及"不得超过/低于"区间。
 # 改语料 = 同时改 PROVENANCE 与测试里的期望值，让改动显式发生。
-python -m pytest -q tests/test_engine_unit.py -k creative -v
+python -m pytest -q tests/unit -k creative -v
 ```
 
 ## 与测量口径的关系

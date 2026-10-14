@@ -1,4 +1,6 @@
-"""MCP 服务（mcp_server.py）回归：三层。
+"""mcp_api 组：MCP 服务（mcp_server.py）回归——纯格式化 / 工具层端到端 / stdio 握手。
+
+自 tests/test_mcp_server.py 拆分，组内就这一个文件，三层分工：
 
 1. 纯格式化函数：喂合成存档断言数据卡片/对比表渲染（含贴边裁减点归一到
    原档位的 cmpGearOf 同口径对齐、agent 缓存×指令矩阵、媒体表）。
@@ -7,14 +9,17 @@
 3. stdio 协议握手：子进程拉起 mcp_server.py，按 JSON-RPC 帧 initialize →
    notifications/initialized → tools/list → tools/call，验证真实线协议。
 
-运行：python3 -m unittest tests.test_mcp_server -v
+两个入口都在仓库根目录跑（mock 子进程路径与 `tests._shared` 导入都以此为基准）：
+
+    .venv/bin/python -m pytest tests/mcp_api/test_mcp_server.py -q
+    .venv/bin/python -m unittest tests.mcp_api.test_mcp_server -v
+    .venv/bin/python -m unittest discover -s tests/mcp_api -p test_mcp_server.py
 """
 import asyncio
 import json
 import os
 import queue
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -22,22 +27,17 @@ import threading
 import time
 import unittest
 
-# mock_server 在 import 时读取 MOCK_* 环境变量：与 test_e2e_mock 保持同值，
-# 避免 pytest 同进程下「先 import 者生效」导致的口径分裂
-os.environ["MOCK_PP"] = "3000"
-os.environ["MOCK_TG"] = "300"
-os.environ["MOCK_CPT"] = "1.8"
+# 顺序是硬约束：mock_server 在 import 时读取 MOCK_* 环境变量，而播种落在
+# tests._shared 的模块级——先 import 它（触发播种），再 import mock_server。
+# 反过来播种就晚了：pytest 同进程下「先 import 者生效」，口径分裂成默认值
+# 而非与 test_e2e_mock 一致的 3000/300/1.8。
+import tests._shared                    # noqa: E402,F401  —— 触发 MOCK_* 播种
+from tests._shared import _free_port    # noqa: E402
 
-import mock_server          # noqa: E402
-import server               # noqa: E402
-import uvicorn              # noqa: E402
-import mcp_server           # noqa: E402
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+import mock_server                      # noqa: E402
+import server                           # noqa: E402
+import uvicorn                          # noqa: E402
+import mcp_server                       # noqa: E402
 
 
 class _StripMockHeader:
@@ -262,9 +262,13 @@ class TestFormatting(unittest.TestCase):
 # 2. 工具层端到端（mock 网关 + 真实 server）
 # ---------------------------------------------------------------------------
 
-class TestToolsEndToEnd(unittest.IsolatedAsyncioTestCase):
-    """起真服务器打真 HTTP：工具函数逐个过。server.CONFIG_PATH/RESULTS_DIR
-    指向临时目录，不碰工作区真实配置与存档。"""
+class _ServerPair:
+    """进程内服务器对：mock 网关 + 真实测速台服务（非 TestCase，不参与收集）。
+
+    TestToolsEndToEnd 与 TestStdioHandshake 各挂一次、各起各的一对（unittest 对
+    每个测试类分别调 setUpClass）。原先 stdio 类**继承**工具层类，把 8 个工具层
+    用例连带跑第二遍；架设逻辑抽到这里后两个类只装自己的用例。
+    """
 
     @classmethod
     def setUpClass(cls):
@@ -312,6 +316,11 @@ class TestToolsEndToEnd(unittest.IsolatedAsyncioTestCase):
         cls.mock.should_exit = True
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
+
+class TestToolsEndToEnd(_ServerPair, unittest.IsolatedAsyncioTestCase):
+    """起真服务器打真 HTTP：工具函数逐个过。server.CONFIG_PATH/RESULTS_DIR
+    指向临时目录，不碰工作区真实配置与存档。"""
+
     async def test_list_providers(self):
         text = await mcp_server.list_providers()
         self.assertIn("mockp", text)
@@ -324,10 +333,6 @@ class TestToolsEndToEnd(unittest.IsolatedAsyncioTestCase):
         text = await mcp_server.list_models("mockp")
         self.assertIn("mock-llm-7b", text)
         self.assertIn("mock-llm-14b", text)
-
-    async def test_list_models_unknown_provider(self):
-        with self.assertRaises(RuntimeError):
-            await mcp_server.list_models("no-such-provider")
 
     async def test_list_scenarios(self):
         text = await mcp_server.list_scenarios()
@@ -344,9 +349,23 @@ class TestToolsEndToEnd(unittest.IsolatedAsyncioTestCase):
         finally:
             mcp_server.BASE = old
 
-    async def test_stop_unknown_run_404(self):
-        with self.assertRaisesRegex(RuntimeError, "404"):
-            await mcp_server.bench_stop("20260101-000000-zz99")
+    async def test_api_error_mapping(self):
+        """_api 错误面：未知 provider 的模型列表 / 未知 run 的 404 / 活跃或不
+        存在 run 的结果请求，一律翻成 RuntimeError 上交（404、「服务端拒绝」
+        文案透传）。原三条同测 _api 错误映射，合并为 subTest 参数化。"""
+        cases = [
+            # (标签, 期望消息片段或 None=原断言只查异常类型, 工具函数, 参数)
+            ("list_models 未知 provider", None,
+             mcp_server.list_models, "no-such-provider"),
+            ("bench_stop 未知 run 404", "404",
+             mcp_server.bench_stop, "20260101-000000-zz99"),
+            ("bench_result 活跃或不存在的 run", "服务端拒绝",
+             mcp_server.bench_result, "20260101-000000-zz99"),
+        ]
+        for label, pattern, fn, arg in cases:
+            with self.subTest(label):
+                with self.assertRaisesRegex(RuntimeError, pattern or ""):
+                    await fn(arg)
 
     async def _run_tiny_bench(self) -> str:
         """最小矩阵起测并等到存档落盘，返回 run_id（mock 网关秒级完成）。"""
@@ -388,17 +407,13 @@ class TestToolsEndToEnd(unittest.IsolatedAsyncioTestCase):
         self.assertIn(run_id2[-4:], cmp_text)
         self.assertIn("0K", cmp_text)
 
-    async def test_result_while_active_or_missing(self):
-        with self.assertRaisesRegex(RuntimeError, "服务端拒绝"):
-            await mcp_server.bench_result("20260101-000000-zz99")
-
 
 # ---------------------------------------------------------------------------
 # 3. stdio 协议握手（真实线协议，子进程）
 # ---------------------------------------------------------------------------
 
-class TestStdioHandshake(TestToolsEndToEnd):
-    """复用工具层的服务器对：以子进程拉起 mcp_server.py 走 stdio JSON-RPC。"""
+class TestStdioHandshake(_ServerPair, unittest.IsolatedAsyncioTestCase):
+    """复用 _ServerPair 的服务器对：以子进程拉起 mcp_server.py 走 stdio JSON-RPC。"""
 
     def _rpc(self, proc, out_q, msg, expect_id, timeout=20):
         proc.stdin.write(json.dumps(msg) + "\n")
@@ -420,7 +435,7 @@ class TestStdioHandshake(TestToolsEndToEnd):
         env = dict(os.environ)
         env["LLM_SPEED_BASE"] = f"http://127.0.0.1:{self.srv_port}"
         proc = subprocess.Popen(
-            [sys.executable, os.path.join(os.path.dirname(__file__), "..",
+            [sys.executable, os.path.join(os.path.dirname(__file__), "..", "..",
                                           "mcp_server.py")],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, env=env)

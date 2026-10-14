@@ -1,10 +1,19 @@
-"""历史存档单点复测回归：POST /api/bench/history/{run_id}/retest 的校验与
-cfg 窄化（文本/翻译/媒体/agent 矩阵四类点、ctx_edge 贴边档按裁前原档位
+"""api 组 · 历史存档单点复测回归：POST /api/bench/history/{run_id}/retest 的
+校验与 cfg 窄化（文本/翻译/媒体/agent 矩阵四类点、ctx_edge 贴边档按裁前原档位
 下发），以及 _merge_retest 守望合并（产出点替换原存档 + retests 审计留痕
 + 复测独立存档删除；未产出/原存档失踪时不合并、复测存档保留）。
 
-测试内把 server.BASE/CONFIG_PATH/RESULTS_DIR 指向临时目录，bench_start
-打桩不真跑测速，不触碰真实配置与存档。
+自 tests/test_history_retest.py 拆分：TestRetestApi 的目录重定向改用共享基类
+tests._shared.ServerDirCase（BASE/CONFIG_PATH/RESULTS_DIR 三全局，config.json
+由本文件 setUp 自己写）。存档工厂 _archive_point / _write_archive 语义与共享的
+_point / write_archive 不同（前者按路径写、cfg 默认 repeats=3 且带 note），
+按「helper 随类走」保留在本文件。TestMergeRetest 是 IsolatedAsyncioTestCase，
+与 ServerDirCase（TestCase 子类）不能共继承，且它原本只重定向 RESULTS_DIR，
+故保留自有 setUp/tearDown。
+
+运行（仓库根目录）：
+    python -m pytest tests/api/test_history_retest.py -q
+    python -m unittest discover -s tests/api -p test_history_retest.py
 """
 import json
 import os
@@ -14,7 +23,7 @@ import types
 import unittest
 from unittest import mock
 
-from fastapi.testclient import TestClient
+from tests._shared import ServerDirCase
 
 import server
 
@@ -39,26 +48,14 @@ def _write_archive(path, points, **cfg_extra):
     return d
 
 
-class TestRetestApi(unittest.TestCase):
+class TestRetestApi(ServerDirCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self._base, self._cfgp, self._res = (server.BASE, server.CONFIG_PATH,
-                                             server.RESULTS_DIR)
-        server.BASE = self.tmp.name
-        server.CONFIG_PATH = os.path.join(self.tmp.name, "config.json")
-        server.RESULTS_DIR = os.path.join(self.tmp.name, "results")
-        os.makedirs(server.RESULTS_DIR, exist_ok=True)
+        super().setUp()
         with open(server.CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump({"providers": [{
                 "name": "p1", "label": "P1",
                 "gateway_url": "http://127.0.0.1:4000", "local": True,
                 "deployments": []}]}, f)
-        self.client = TestClient(server.app)
-
-    def tearDown(self):
-        server.BASE, server.CONFIG_PATH, server.RESULTS_DIR = (
-            self._base, self._cfgp, self._res)
-        self.tmp.cleanup()
 
     def _archive(self, points, **cfg_extra) -> str:
         rid = "20260914-210120-72a8"
@@ -184,6 +181,13 @@ class TestRetestApi(unittest.TestCase):
 
 
 class TestMergeRetest(unittest.IsolatedAsyncioTestCase):
+    """_merge_retest 守望合并：不走 HTTP，直调协程。
+
+    只重定向 RESULTS_DIR（共享基类 ServerDirCase 是 TestCase 子类，与本类的
+    IsolatedAsyncioTestCase 无法共继承），tmp 与 results 子目录形态与
+    ServerDirCase 一致。
+    """
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self._res = server.RESULTS_DIR

@@ -172,8 +172,8 @@ mock_server.py     假 OpenAI 网关（自测）
 corpus/            语料：code（llama.cpp 源码）/ creative（公版《红楼梦》）/ agent（SWE-agent 真实执行轨迹）/ asr（自有 wav，可选）
 scripts/           语料构建脚本（agent 轨迹提取，仅构建期用）
 case/              测速卡片示例图（README 引用）
-tests/             回归测试（unittest/pytest）
-.github/           CI（pytest + 前端语法/注入门禁）
+tests/             回归测试按改动面分组：unit/（bench.py 纯逻辑）· api/（server.py 端点/守卫/存档）· e2e/（mock 网关真跑）· mcp_api/（mcp_server.py）
+.github/           CI（后端四组 pytest + 前端三套门禁）
 requirements.txt   运行时依赖（锁定到本机验证过的版本）
 requirements-dev.txt  测试依赖（pytest）
 config.json / .env  provider 配置与凭据（不入库）
@@ -187,15 +187,32 @@ results/           历次测速结果 JSON
 pip install -r requirements.txt
 # 测试依赖（pytest）
 pip install -r requirements-dev.txt
+```
 
-# 回归测试：引擎纯逻辑 + mock 端到端 + 接口契约 + SSE 回放（约 4 分钟）
+回归测试按改动面分四组，**改哪块跑哪组**（命令都在仓库根目录执行；两种入口等价）：
+
+| 组 | 目录 | 何时跑 | 本机耗时 | 命令 |
+| --- | --- | --- | --- | --- |
+| unit | `tests/unit/` | 改 `bench.py` 的纯逻辑/口径 | ~5 秒 | `python -m pytest tests/unit -q` / `python -m unittest discover -s tests/unit` |
+| api | `tests/api/` | 改 `server.py` 的端点/守卫/历史存档 | ~2 秒 | `python -m pytest tests/api -q` / `python -m unittest discover -s tests/api` |
+| mcp_api | `tests/mcp_api/` | 改 `mcp_server.py` | ~4 秒 | `python -m pytest tests/mcp_api -q` / `python -m unittest discover -s tests/mcp_api` |
+| e2e | `tests/e2e/` | 改 `bench.py` 的测量路径或 `mock_server.py` | 全组 ~4 分钟 | `python -m pytest tests/e2e -q` / `python -m unittest discover -s tests/e2e` |
+
+```bash
+# 全量（494 例，本机约 4 分钟；两种入口等价）
 python -m pytest -q                 # 或 python -m unittest discover -s tests -v
+
+# e2e 全组慢，排障时单文件跑更快（10~60 秒）：
+# python -m pytest tests/e2e/test_e2e_ctx.py -q
 
 # 前端门禁：内联脚本语法 + 注入防护 + 「无外部资源」（需 node）
 bash tests/check_frontend_js.sh
 
 # 前端展示层纯函数单测（提取内联脚本 §pure 区域，零依赖无构建，需 node）
 bash tests/run_frontend_pure.sh
+
+# 前端渲染基准 + 合帧等价性（需 node）
+bash tests/run_frontend_render.sh
 
 # 本地自测用的假网关（无需真实模型）
 python mock_server.py               # 缺省 :8901；MOCK_PP / MOCK_TG / MOCK_STALL 等旋钮见文件头

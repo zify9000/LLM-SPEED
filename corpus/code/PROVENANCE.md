@@ -33,7 +33,7 @@
 | 总字节 | 1,766,874 |
 | 内容清单 sha256 | `06b408c7b5d00a2c5d8bb0160f9705d500425ca5802086a06feba162dff8d887` |
 
-清单算法（与 `tests/test_engine_unit.py -k corpus` 内断言完全一致）：
+清单算法（与 `tests/unit/test_engine_persistence.py -k corpus` 内断言完全一致）：
 把文件按**相对本目录的路径排序**，逐个累积 `相对路径 + "\0" + 文件内容` 的
 sha256（流式，1MB 分块）。
 
@@ -60,7 +60,7 @@ src/llama-model.cpp          src/llama-sampler.cpp        src/llama-vocab.cpp
 
 ```bash
 cd /home/zify/myLog/projectRepo/LLM-SPEED
-python -m pytest -q tests/test_engine_unit.py -k corpus -v   # 断言清单 sha256
+python -m pytest -q tests/unit/test_engine_persistence.py -k corpus -v   # 断言清单 sha256
 ```
 
 `bench.py` 的 `_load_code_pool()` 在目录缺失时回退内置合成模块池——所以

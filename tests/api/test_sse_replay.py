@@ -1,4 +1,4 @@
-"""SSE 回放与 seq 契约回归（ADR-0009）：GET /api/bench/events/{run_id}。
+"""api 组 · SSE 回放与 seq 契约回归（ADR-0009）：GET /api/bench/events/{run_id}。
 
 用 TestClient 读流（进程内 ASGI，不起真实端口），向 server.RUNS 注入鸭式假
 run（仅带端点读取的 history/subs/finished_at）验证：
@@ -9,7 +9,13 @@ run（仅带端点读取的 history/subs/finished_at）验证：
 （stream().__enter__ 阻塞至生成器结束），故「回放后到达的新事件/终止帧」
 由生产者线程在订阅注册后经 call_soon_threadsafe 注入，读取侧再断言完整流。
 
-运行：python3 -m unittest tests.test_sse_replay -v
+自 tests/test_sse_replay.py 拆分：本文件不碰存档目录，用不上
+tests._shared.ServerDirCase（也不改 server.BASE/CONFIG_PATH/RESULTS_DIR），
+设施（_Subs / _FakeRun / _history / _data 与 setUp 里的 RUNS 替换）随类自带。
+
+运行（仓库根目录）：
+    python -m pytest tests/api/test_sse_replay.py -q
+    python -m unittest discover -s tests/api -p test_sse_replay.py
 """
 import asyncio
 import json

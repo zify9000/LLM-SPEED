@@ -1,41 +1,46 @@
-"""历史存档环境编辑端点回归：POST /api/bench/history/{run_id}/env。
+"""api 组 · 历史存档环境编辑端点回归：POST /api/bench/history/{run_id}/env。
 
 只更新 cfg.model_info[model] 的六个环境字段（kinds 等保留、旧 quants 数组
 键移除），原子写回；穿越/不存在/损坏 与 note 端点同口径。
 
-测试内把 server.RESULTS_DIR 指向临时目录，不触碰真实 results/。
+自 tests/test_history_env.py 拆分：目录重定向改用共享基类
+tests._shared.ServerDirCase，并置 REDIRECT_CONFIG=False——本文件原本只把
+server.RESULTS_DIR 指向临时目录，不碰 BASE/CONFIG_PATH，与该开关语义一致
+（RESULTS_DIR 落在 <tmp>/results 子目录，路径形态与其它 api 文件统一）。
+
+运行（仓库根目录）：
+    python -m pytest tests/api/test_history_env.py -q
+    python -m unittest discover -s tests/api -p test_history_env.py
 """
 import json
 import os
-import tempfile
 import unittest
 
-from fastapi.testclient import TestClient
+from tests._shared import ServerDirCase
 
 import server
 
 
-class TestHistoryEnv(unittest.TestCase):
+class TestHistoryEnv(ServerDirCase):
+    REDIRECT_CONFIG = False
+
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self._results = server.RESULTS_DIR
-        server.RESULTS_DIR = self.tmp.name
-        self.client = TestClient(server.app)
+        super().setUp()
         self.rid = "r-env"
-        self.path = os.path.join(self.tmp.name, f"{self.rid}.json")
+        self.path = os.path.join(server.RESULTS_DIR, f"{self.rid}.json")
+        # m1 条目刻意带上历史遗留的 quants 数组键：更新写回时必须被移除
+        # （老存档里是数组，现行条目只有单个 quant 字符串）
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump({"run_id": self.rid,
                        "cfg": {"provider": "p1", "models": ["m1", "other"],
-                               "model_info": {"m1": {"deploy_label": "旧部署",
-                                                     "quant": "Q8_0",
-                                                     "kinds": ["llm", "ocr"],
-                                                     "hardware": "旧机"}},
+                               "model_info": {"m1": {
+                                   "deploy_label": "旧部署",
+                                   "quant": "Q8_0",
+                                   "quants": [{"quant": "Q4_0"}],
+                                   "kinds": ["llm", "ocr"],
+                                   "hardware": "旧机"}},
                                "note": "备注不动"}},
                       f)
-
-    def tearDown(self):
-        server.RESULTS_DIR = self._results
-        self.tmp.cleanup()
 
     def _env(self, model="m1", **info):
         return self.client.post(f"/api/bench/history/{self.rid}/env",
@@ -61,7 +66,7 @@ class TestHistoryEnv(unittest.TestCase):
         self.assertEqual(entry["kinds"], ["llm", "ocr"])   # 未提交字段保留
         self.assertEqual(d["cfg"]["note"], "备注不动")
         self.assertNotIn("other", d["cfg"]["model_info"])   # 其他模型条目不受影响
-        self.assertFalse([f for f in os.listdir(self.tmp.name)
+        self.assertFalse([f for f in os.listdir(server.RESULTS_DIR)
                           if f.endswith(".tmp")])       # 原子写无残渣
 
     def test_env_quant_fields_stripped_and_optional(self):
@@ -133,7 +138,7 @@ class TestHistoryEnv(unittest.TestCase):
             self.assertEqual(r.status_code, 400, rid)
         r = self.client.post("/api/bench/history/ghost/env", json=body)
         self.assertEqual(r.status_code, 404, r.text)
-        with open(os.path.join(self.tmp.name, "broken.json"), "w",
+        with open(os.path.join(server.RESULTS_DIR, "broken.json"), "w",
                   encoding="utf-8") as f:
             f.write("{not json")
         r = self.client.post("/api/bench/history/broken/env", json=body)

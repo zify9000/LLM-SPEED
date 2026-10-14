@@ -1,91 +1,40 @@
-"""异常输入全文侧车回归：下载端点、生命周期（单档删除 / 清空）、
+"""api 组 · 异常输入全文侧车回归：下载端点、生命周期（单档删除 / 清空）、
 splice 引用迁移，以及 splice / _merge_retest 共用的 _relocate_anomaly_refs。
 
 背景（ADR-0053 + ADR-0082）：超长 in_text 落 <run_id>.anomaly.txt 侧车，
 存档只留头尾摘要 + in_text_ref 字节切片；本文件钉住"存档可见 ⇒ 切片可取"
 这条不变量在各生命周期操作后仍然成立。
 
-与 test_history_edit.py 同口径：把 server.BASE/CONFIG_PATH/RESULTS_DIR 指向
-临时目录，不碰真实存档、不走网络。
+自 tests/test_anomaly_text.py 拆分：目录重定向改用共享基类
+tests._shared.ServerDirCase（BASE/CONFIG_PATH/RESULTS_DIR 三全局），合成存档
+与侧车 helper 改用共享的 _point / write_archive / read_archive / _side /
+_put_sidecar / _ref_for。
+
+运行（仓库根目录）：
+    python -m pytest tests/api/test_anomaly_text.py -q
+    python -m unittest discover -s tests/api -p test_anomaly_text.py
 """
 import hashlib
-import json
 import os
-import tempfile
 import unittest
 
-from fastapi.testclient import TestClient
+from tests._shared import (ServerDirCase, _point, _put_sidecar, _ref_for,
+                           _side, read_archive, write_archive)
 
 import bench
 import server
 
 
-def _point(**kw):
-    p = {"model": "m1", "scenario": "code", "kind": "llm", "ctx_target": 4096,
-         "concurrency": 1, "reqs": [{"req": 0, "err": None}], "all_ok": True,
-         "ttft_s": 1.0}
-    p.update(kw)
-    return p
-
-
-def _write(rid, points, **cfg_extra):
-    cfg = {"provider": "p1", "models": ["m1"], "scenarios": ["code"],
-           "ctx_list": [4096], "concurrencies": [1], "max_tokens": 512,
-           "repeats": 1}
-    cfg.update(cfg_extra)
-    d = {"run_id": rid, "started_at": "2026-09-16 22:00:00",
-         "cfg": cfg, "results": points}
-    with open(os.path.join(server.RESULTS_DIR, f"{rid}.json"), "w",
-              encoding="utf-8") as f:
-        json.dump(d, f, ensure_ascii=False)
-    return d
-
-
-def _read(rid):
-    with open(os.path.join(server.RESULTS_DIR, f"{rid}.json"),
-              encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _side(rid):
-    return os.path.join(server.RESULTS_DIR, f"{rid}{bench.ANOMALY_TEXT_SUFFIX}")
-
-
-def _put_sidecar(rid, data: bytes):
-    with open(_side(rid), "wb") as f:
-        f.write(data)
-
-
-def _ref_for(rid, data: bytes, text: str):
-    return {"file": f"{rid}{bench.ANOMALY_TEXT_SUFFIX}", "off": 0,
-            "len": len(data), "chars": len(text),
-            "sha1": hashlib.sha1(data).hexdigest()}
-
-
-class TestAnomalyTextApi(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self._base, self._cfgp, self._res = (server.BASE, server.CONFIG_PATH,
-                                             server.RESULTS_DIR)
-        server.BASE = self.tmp.name
-        server.CONFIG_PATH = os.path.join(self.tmp.name, "config.json")
-        server.RESULTS_DIR = os.path.join(self.tmp.name, "results")
-        os.makedirs(server.RESULTS_DIR, exist_ok=True)
-        self.client = TestClient(server.app)
-
-    def tearDown(self):
-        server.BASE, server.CONFIG_PATH, server.RESULTS_DIR = (
-            self._base, self._cfgp, self._res)
-        self.tmp.cleanup()
-
+class TestAnomalyTextApi(ServerDirCase):
     # ---------- 下载端点 ----------
 
     def test_endpoint_returns_exact_text(self):
         """有侧车：200 + text/plain; charset=utf-8 + 原文逐字节一致。"""
         full = "异常输入全文" * 100
         data = full.encode("utf-8")
-        _write("r1", [_point(reqs=[{"in_text": "……截断……",
-                                    "in_text_ref": _ref_for("r1", data, full)}])])
+        write_archive("r1", [_point(reqs=[{
+            "in_text": "……截断……",
+            "in_text_ref": _ref_for("r1", data, full)}])])
         _put_sidecar("r1", data)
         r = self.client.get("/api/bench/history/r1/anomaly-text")
         self.assertEqual(r.status_code, 200, r.text)
@@ -96,7 +45,7 @@ class TestAnomalyTextApi(unittest.TestCase):
         self.assertIn("inline", r.headers["content-disposition"])
 
     def test_endpoint_404_when_no_sidecar(self):
-        _write("r1", [_point()])
+        write_archive("r1", [_point()])
         r = self.client.get("/api/bench/history/r1/anomaly-text")
         self.assertEqual(r.status_code, 404)
         self.assertIn("异常文本存档", r.json()["detail"])
@@ -109,7 +58,13 @@ class TestAnomalyTextApi(unittest.TestCase):
     # ---------- 生命周期：单档删除 / 清空 ----------
 
     def test_delete_one_removes_sidecar(self):
-        _write("r1", [_point()])
+        """单档删除：无侧车时 anomaly_text_removed=False（如实上报），有侧车
+        时删侧车且 JSON 存档一并删除、计数为 True。"""
+        write_archive("r1", [_point()])
+        r = self.client.delete("/api/bench/history/r1")
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()["anomaly_text_removed"])
+        write_archive("r1", [_point()])
         _put_sidecar("r1", b"abc")
         r = self.client.delete("/api/bench/history/r1")
         self.assertEqual(r.status_code, 200)
@@ -118,17 +73,11 @@ class TestAnomalyTextApi(unittest.TestCase):
         self.assertFalse(os.path.exists(
             os.path.join(server.RESULTS_DIR, "r1.json")))
 
-    def test_delete_one_without_sidecar_reports_false(self):
-        _write("r1", [_point()])
-        r = self.client.delete("/api/bench/history/r1")
-        self.assertEqual(r.status_code, 200)
-        self.assertFalse(r.json()["anomaly_text_removed"])
-
     def test_clear_removes_sidecars_and_counts_separately(self):
         """清空：JSON 与侧车都删；removed 语义不变（只计 JSON），侧车数另报
         anomaly_text_removed；目录名以 .anomaly.txt 结尾仍跳过不删。"""
-        _write("r1", [_point()])
-        _write("r2", [_point()])
+        write_archive("r1", [_point()])
+        write_archive("r2", [_point()])
         _put_sidecar("r1", b"aaa")
         _put_sidecar("r2", b"bb")
         os.makedirs(os.path.join(server.RESULTS_DIR, "dir.anomaly.txt"))
@@ -150,17 +99,16 @@ class TestAnomalyTextApi(unittest.TestCase):
         full = "来源异常全文" * 500
         data = full.encode("utf-8")
         src_ref = _ref_for("src", data, full)
-        _write("src", [_point(ctx_target=8192,
-                              reqs=[{"in_text": "……截断……",
-                                     "in_text_ref": src_ref}])])
+        write_archive("src", [_point(ctx_target=8192, reqs=[
+            {"in_text": "……截断……", "in_text_ref": src_ref}])])
         _put_sidecar("src", data)
-        _write("dst", [_point()])
+        write_archive("dst", [_point()])
         r = self.client.post("/api/bench/history/dst/splice",
                              json={"source_run_id": "src"})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertFalse(any("异常输入全文" in w for w in r.json()["warnings"]))
         self.assertEqual(open(_side("dst"), "rb").read(), data)
-        spl = next(p for p in _read("dst")["results"]
+        spl = next(p for p in read_archive("dst")["results"]
                    if p["ctx_target"] == 8192)
         ref = spl["reqs"][0]["in_text_ref"]
         self.assertEqual(ref["file"], f"dst{bench.ANOMALY_TEXT_SUFFIX}")
@@ -179,16 +127,15 @@ class TestAnomalyTextApi(unittest.TestCase):
         full = "丢失的全文" * 300
         data = full.encode("utf-8")
         src_ref = _ref_for("src", data, full)
-        _write("src", [_point(ctx_target=8192,
-                              reqs=[{"in_text": "……截断……",
-                                     "in_text_ref": src_ref}])])
-        _write("dst", [_point()])
+        write_archive("src", [_point(ctx_target=8192, reqs=[
+            {"in_text": "……截断……", "in_text_ref": src_ref}])])
+        write_archive("dst", [_point()])
         r = self.client.post("/api/bench/history/dst/splice",
                              json={"source_run_id": "src"})
         self.assertEqual(r.status_code, 200)
         w = r.json()["warnings"]
         self.assertTrue(any("异常输入全文缺失" in x and "src" in x for x in w), w)
-        spl = next(p for p in _read("dst")["results"]
+        spl = next(p for p in read_archive("dst")["results"]
                    if p["ctx_target"] == 8192)
         self.assertEqual(spl["reqs"][0]["in_text_ref"], src_ref,
                          "来源不可读时不得改写 ref")
@@ -196,8 +143,8 @@ class TestAnomalyTextApi(unittest.TestCase):
                          "没有可复制切片时不得创建空侧车")
 
     def test_splice_without_refs_creates_no_sidecar(self):
-        _write("dst", [_point()])
-        _write("src", [_point(ctx_target=8192)])
+        write_archive("dst", [_point()])
+        write_archive("src", [_point(ctx_target=8192)])
         r = self.client.post("/api/bench/history/dst/splice",
                              json={"source_run_id": "src"})
         self.assertEqual(r.status_code, 200)
