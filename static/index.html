@@ -1022,7 +1022,14 @@ tr.fade td{opacity:.45}
   letter-spacing:.02em}
 #cardWrap .speed-card + .speed-card{margin-top:24px}
 .chartbox{height:clamp(300px, 26vw, 380px); position:relative; border:1px solid var(--border);
-  border-radius:var(--r-md); background:var(--card)}
+  border-radius:var(--r-md); background:var(--card);
+  /* min-width:0 不能省：`.grid2` 的 `1fr` 其实是 `minmax(auto,1fr)`，而 ECharts 绘出的
+     `<canvas>` 是替换元素，固有宽度就是这一列的**自动最小宽度**——不写这行，窗口缩小时
+     画布会把列宽钉在自己当前的像素宽上（实测两列死咬 690px、容器 890px 时溢出 504px），
+     还能锁成一窄一宽：左图停在 196px、右图占 770px，永远不会自愈 */
+  min-width:0;
+  /* 重排那一帧画布可能比盒子宽，不让它溢到隔壁格子上去 */
+  overflow:hidden}
 @media (max-width:720px){ .chartbox{height:300px} }
 
 /* ============ 测速卡片（跟随界面主题） ============ */
@@ -2006,12 +2013,8 @@ async function init(){
   }, {passive: true});
   syncScrolled();
   offChart = window.echarts ? echarts.init($("#offChart")) : null;
-  // 窗口拖拽缩放高频触发：rAF 合帧，每帧至多一次全图表 resize
-  let _resizeRaf = 0;
-  window.addEventListener("resize", () => {
-    if(_resizeRaf) return;
-    _resizeRaf = requestAnimationFrame(() => { _resizeRaf = 0; state.charts.forEach(c => c.resize()); });
-  });
+  // 窗口拖拽缩放高频触发：rAF 合帧，每帧至多一次全图表重排（重排本体见 refitCharts）
+  window.addEventListener("resize", queueChartRefit);
   $("#modelList").addEventListener("change", () => { saveModelSel(); syncDeployCard(); syncScenByKind(); });   // 勾选模型→记忆选择+联动部署环境展示+场景按 kind 过滤
   // 单请求最大输出 tokens：选项式（256/512/1024），记忆最近一次选择
   const savedMt = loadMaxTokens();
@@ -5701,11 +5704,38 @@ function buildMediaChartOpt(pts, metric, title, forExport, kind){
   };
 }
 /* 速度曲线按模型 × 场景平铺：两个场景同屏对比，多模型各自成块 */
+/* ---------------- 图表按容器盒宽自适应 ----------------
+   以前只挂在 window resize 上，而 resize 事件**不保证是布局落定的最后一刻**：
+   系统把窗口从全屏贴边换成半屏、断点塌成单列、滚动条消失……都可能在最后一次 resize
+   事件之后才把容器尺寸定下来，图就停在旧尺寸上再没人管（现象：半屏后左图压成窄条，
+   而半屏直接加载没问题）。ResizeObserver 盯的是**盒子本身**，只要容器尺寸变过就会
+   再量一次，不管背后有没有 resize 事件。 */
+let _refitRaf = 0;
+let _chartRO = null;
+function refitCharts(){
+  _refitRaf = 0;
+  if(!window.echarts) return;
+  for(const c of state.charts){
+    if(c.isDisposed()) continue;           // 单个实例异常不能拖累后面的一图（以前 forEach 里报错就断了）
+    const el = c.getDom();
+    if(!el || !el.clientWidth || !el.clientHeight) continue;   // 隐藏/折叠时不量，留待可见时再自适应
+    if(Math.abs(el.clientWidth - c.getWidth()) > 0.5 ||
+       Math.abs(el.clientHeight - c.getHeight()) > 0.5) c.resize();
+  }
+}
+function queueChartRefit(){ if(!_refitRaf) _refitRaf = requestAnimationFrame(refitCharts); }
+// 惰性建：旧内核没有 ResizeObserver 时退回“只靠 window resize”，不能因此报错
+function chartObserver(){
+  if(_chartRO === null && window.ResizeObserver) _chartRO = new ResizeObserver(queueChartRefit);
+  return _chartRO;
+}
+
 function renderCharts(){
   const box = $("#chartList");
   if(!box || $("#chartCard").hidden || !window.echarts) return;   // echarts 缺失（图表库缺失）跳过
   state.charts.forEach(c => c.dispose());
   state.charts = [];
+  if(_chartRO) _chartRO.disconnect();   // 容器整批重建，旧观察目标已成垃圾
   box.innerHTML = "";
   const rows = allPoints();   // 排一次序，模型分组复用（原先每模型各排一遍）
   const models = [...new Set(rows.map(p => p.model))];
@@ -5751,6 +5781,8 @@ function renderCharts(){
       // 不随视口宽度误估换行行数；仅离屏导出路径用换行估算（captureScenarioCharts）
       ch.setOption(buildChartOpt(scPts, el.dataset.metric, titles[el.dataset.metric]), false);
       state.charts.push(ch);
+      const ro = chartObserver();
+      if(ro) ro.observe(el);   // 首次 observe 会回调一次，顺手把“初始化时还没布局好”的图也量对
     });
     // 图末详细数据表：agent 旧链给逐轮输入构成（输入 = 缓存命中 + 增量计算）；
     // 媒体场景给逐档位媒体读数；通用场景给逐档位读数表
