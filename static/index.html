@@ -138,6 +138,13 @@ html[data-theme="dark"]{
   --btn-sh-hi:0 2px 5px rgba(0,0,0,.42), 0 8px 22px -6px rgba(129,140,248,.45);
   --chevron:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2397A2B4' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
 }
+/* 换肤那一帧关掉一切过渡（`html[data-theming]` 由 applyTheme 打上、两帧后摘掉）。
+   必需：全站过渡时长本来就是按「微交互」定的（输入框背景 --t-1=120ms、导航描边
+   --t-2=180ms、卡面/主背景无过渡），切主题时主背景瞬切而输入框、按钮慢慢染→
+   白底残影飘在半换肤的状态里，体感就是「卡了一下」。主题切换不是一次状态微交互，
+   应当同帧到位；两帧后恢复，hover/focus 等微交互的过渡一律不变 */
+html[data-theming] *, html[data-theming] *::before, html[data-theming] *::after{
+  transition:none !important}
 /* 语义标注与控件变体（替代 JS 模板里的内联样式重复） */
 .flag-warn{color:var(--yellow); cursor:help}
 .flag-muted{color:var(--ink-4); cursor:help}
@@ -316,7 +323,7 @@ body[data-phase="run"] .progbar > div::after{content:""; position:absolute; inse
 /* ============ 表单 ============ */
 label.f{display:block; color:var(--ink-3); font-size:var(--fs-sm); font-weight:500; margin:14px 0 5px}
 label.f:first-child{margin-top:0}
-input[type=text],input[type=password],input[type=number],select,textarea{
+input[type=text],input[type=password],input[type=number],input[type=search],select,textarea{
   width:100%; background:var(--field-fill); border:1px solid var(--field-line); color:var(--ink);
   border-radius:var(--r-sm); padding:8px 12px; font-size:var(--fs-md); min-height:38px;
   box-shadow:inset 0 1px 2px rgba(17,24,39,.03);   /* 内凹微影：输入框略低于卡面，深色下不可见 */
@@ -537,11 +544,33 @@ input[type=checkbox]:disabled,input[type=radio]:disabled{opacity:.45; cursor:not
 .dr-sub{color:var(--ink-4); font-size:12px; margin-top:2px}
 .dr-body{flex:1; overflow-y:auto; padding:20px; overscroll-behavior:contain}
 .dr-foot{padding:14px 20px; background:var(--card); border-top:1px solid var(--border);
-  display:flex; align-items:center; gap:12px; flex:none}
+  display:flex; align-items:center; gap:12px; flex:none; flex-wrap:wrap}
+/* 按钮守住自己那一行：半屏（约 760px）下抽屉只剩 520px，长提示会把「保存配置」
+   挤成两行（按钮标签换行 = 看着像控件坏了）。不换行 + 不收缩是按钮标签的底线 */
+.dr-foot button{white-space:nowrap; flex:0 0 auto}
+/* Provider 抽屉底栏：**两列网格 + 按钮钉底**，不是"提示独占一行"（那是笨办法：常年多占
+   一行，还每次反馈都把底栏顶高一次）。两条规则各治一头：
+   ①**两列**——按钮列 `auto` + `nowrap`（min-content 就是"保存配置"四个字的整宽，网格压不动
+     它），提示列 `minmax(0,1fr)` 吃剩下的**固定宽度**：提示再长也不抢按钮的位置，只在自己
+     那一列里折行；
+   ②**按钮钉在底沿**（`align-self:end`）——底栏贴着抽屉下沿，高度只会长、且只向上长；把按钮
+     对齐到行的下边缘，它就一直坐在同一条线上，提示折到几行都从它**上方**长出去。
+   （`align-self:end` 才是"零跳变"的来源：参考系是抽屉底边这条不动的线，不是行内居中） */
+#cfgDrawer .dr-foot{display:grid; grid-template-columns:auto minmax(0,1fr)}
+#cfgDrawer .dr-foot #btnCeSave{grid-area:1/1; align-self:end}
+#cfgDrawer .dr-foot .ce-msg{grid-area:1/2; align-self:center; min-width:0}
+/* 窄屏（抽屉 92vw）两列会把提示挤成一条二十几字宽的窄柱，读一行断三次 → 改成提示在上、
+   按钮在下。**按钮仍是最贴底的那一件**：多出来的行长在它上方，所以换布局也不产生位移 */
+@media (max-width:560px){
+  #cfgDrawer .dr-foot{grid-template-columns:minmax(0,1fr)}
+  #cfgDrawer .dr-foot .ce-msg{grid-area:1/1; align-self:auto}
+  #cfgDrawer .dr-foot #btnCeSave{grid-area:2/1; justify-self:start; align-self:auto}
+}
 /* 抽屉内的操作反馈条。**为什么必须有**：主面板状态灯 #statusMsg 在抽屉与遮罩之外
    （实测被 #drawerScrim 盖住），抽屉开着时保存的成功/失败用户一个字都看不见，
-   表现就是"点保存配置没有任何反应"。反馈落在按钮旁边，顺序读作"按钮 → 结果" */
-.ce-msg{font-size:var(--fs-sm); color:var(--ink-3); min-width:0}
+   表现就是"点保存配置没有任何反应"。占位与几何由上面那条网格规则负责——不预留空位、
+   不独占一行；空态只抹文本，元素常驻当 live region。 */
+.ce-msg{font-size:var(--fs-sm); line-height:1.5; color:var(--ink-3); min-width:0}
 .ce-msg.ok{color:var(--green)}
 .ce-msg.warn{color:var(--yellow)}
 .ce-msg.err{color:var(--red)}
@@ -549,8 +578,13 @@ input[type=checkbox]:disabled,input[type=radio]:disabled{opacity:.45; cursor:not
 .dsec{background:var(--card); border:1px solid var(--border); border-radius:12px;
   padding:16px 18px; box-shadow:var(--shadow)}
 .dsec + .dsec{margin-top:16px}
-.dsec > .ds-t{font-size:11.5px; font-weight:600; color:var(--ink-4);
+.dsec .ds-t{font-size:11.5px; font-weight:600; color:var(--ink-4);
   letter-spacing:.8px; margin-bottom:12px}
+/* 段标题行：标题占满剩余宽度，动作按钮（+）贴最右，与「网关地址」的 .lb-row 同构 */
+.dsec .ds-row{display:flex; align-items:center; justify-content:space-between; gap:8px}
+.dsec .ds-row .ds-t{margin-bottom:12px}
+.dsec .ds-row .icon-btn.ds-act{width:26px; min-width:26px; height:24px; border-radius:6px;
+  margin-bottom:10px}
 /* 部署环境编辑条目：头部行（折叠/删除）+ 字段体 */
 .dep-edit{border:1px solid var(--border); border-radius:10px; background:var(--bg); margin-top:10px;
   transition:border-color .15s}
@@ -559,24 +593,96 @@ input[type=checkbox]:disabled,input[type=radio]:disabled{opacity:.45; cursor:not
 .url-row{display:flex; gap:6px; align-items:center}
 .url-row + .url-row{margin-top:6px}
 .url-row input{flex:1; min-width:0}
-/* 测连结果读数：等宽数字，右对齐贴按钮，成功绿 / 失败红（语义色只有
-   --green/--red/--yellow 三档，没有 --ok/--bad，写错会静默失效——见 CSS 令牌门禁） */
+/* 测连结果读数：右对齐贴按钮，成功绿 / 失败红（语义色只有
+   --green/--red/--yellow 三档，没有 --ok/--bad，写错会静默失效——见 CSS 令牌门禁）。
+   **不搭等宽**：读数多数时候是中文（「不可达」「格式不对」「探测失败」），等宽只会
+   把中文拐到 `--mono` 回退的那家 CJK 字体上（同元素内两家字体）；数字靠 tabular-nums */
 .url-row .url-st{flex:none; min-width:0; max-width:88px; overflow:hidden; text-overflow:ellipsis;
-  white-space:nowrap; text-align:right; font-size:var(--fs-micro); font-family:var(--mono);
-  color:var(--ink-4)}
+  white-space:nowrap; text-align:right; font-size:var(--fs-micro);
+  font-variant-numeric:tabular-nums; color:var(--ink-4)}
 /* 没读数时**不占位**（常态预留 56px 会在输入框与按钮之间挖出一条空缝，被判定为丑陋）。
    不用 display:none：`.url-st` 是 `aria-live` 区域，隐藏后读数不播报；改成零宽 + 负 margin
    抹平 `gap:6px` 给零宽子项留的那条缝，元素仍在无障碍树里。长读数截断，全文在 title */
 .url-row .url-st:empty{width:0; margin-right:-6px}
 .url-row .url-st.ok{color:var(--green)}
 .url-row .url-st.bad{color:var(--red)}
-/* 模型级「上限 + 类型」声明（ADR-0117）：一行一个模型，行内三件套（名称 / 类型 /
-   上限）。刻意做扁——它是"补一个事实"的小声明，不是部署卡那种多字段实体，不能长得像
+/* 模型级「类型 + 上下文」声明（ADR-0117）：一行一个模型，行内三件套（名称 / 类型 /
+   上下文）。刻意做扁——它是"补一个事实"的小声明，不是部署卡那种多字段实体，不能长得像
    部署卡（否则用户会以为云端也要填硬件） */
-.mp-row{display:flex; align-items:center; gap:6px; margin-top:6px}
-.mp-row .mp-model{flex:1 1 auto; min-width:0; font-family:var(--mono); font-size:12.5px}
-.mp-row .mp-ctx{flex:none; width:96px; text-align:right; font-family:var(--mono); font-size:12.5px}
-.mp-kinds{display:flex; gap:4px; flex:none; flex-wrap:wrap}
+/* 声明行：**网格而不是 flex**。四条定轨（拖动手柄 / 名称 1fr / 类型 / 上下文）让各行的
+   控件竖着对齐成一张表，名称长短不再把后面的控件挤得各行其位；名称轨道写 minmax(0,1fr)，
+   窄抽屉里先挤名称（省略号 + title），两件控件各自守住 min 轨——旧的 flex 写法（名称
+   flex:0 0 50% + 按钮 flex:1）在 420px 视口下把类型按钮压到只剩一个箭头，标签整个看不见 */
+.mp-row{display:grid; grid-template-columns:18px minmax(0,1fr) minmax(110px,114px) minmax(76px,92px) 30px;
+  gap:8px; align-items:center; margin-top:2px; padding:3px 6px; border-radius:9px;
+  transition:background var(--t-1)}
+/* 整行 hover 底色：名称与两件控件之间必然留着空档，没有这条底色，眼睛得自己在
+   "名字 → 类型 → 上下文"三段之间连线 */
+.mp-row:hover{background:var(--hover)}
+/* 模型名用**正文字体**（不用 --mono）：抽屉与配置区里的模型名——被测模型勾选列表
+   （`.ck`）、部署条目标题（`.dep-head .t`）、地址输入框——全是正文字体，只有这里等宽
+   会显得不属于同一家人。等宽留给**数据表**（`#liveTable` 等）那类逐列对数字的场合 */
+.mp-row .mp-name{min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  font-size:var(--fs-md); color:var(--ink)}
+/* 手柄格：只有一行时没得换序，图标不渲染但**轨道留着**（每行自己算网格，
+   抽掉轨道会让一行与多行的列不对齐） */
+.mp-row .mp-grip{margin:0 -2px 0 -4px}
+/* 上下文列右对齐 + 等宽数字：这一列是量（256K 与 132072 混着写），右对齐才比得出大小；
+   tabular-nums 让位数不同的数竖向也对齐（不等宽时 1M 会比 256K 窄出一截）。
+   padding 不另加宽：带 `list` 的输入框在右端有个原生预设箭头（datalist 指示器），
+   它**占位而非叠加**——实测 padding-right 从 12 提到 26 后数字反而被提前截断，
+   想留呼吸只能加宽轨道 */
+.mp-row .mp-ctx{width:100%; min-width:0; text-align:right; font-variant-numeric:tabular-nums}
+/* 删除按钮与同行控件同高：全局 .icon-btn 是 36px 档，落在 38px 的控件行里就是上下各错
+   1px（同 .hist-row .icon-btn / .icon-btn.prov-act 的坑，必须双类才压得住） */
+.mp-row .mp-del{width:30px; height:38px}
+/* 类型入口＝"看起来就是个下拉框"：与全局 select 同一套（同 --field-fill/--field-line/
+   圆角/38px、同一个 --chevron 底图、同 padding-right:32px）。自己画 SVG 时箭头紧贴文字，
+   跟隔壁真下拉框不成一家人；描边按主线口径——静止轻描边、hover 才提亮（旧写法 hover 直接
+   上主色，比输入框还抢眼），主色只留给展开态 */
+.mp-kbtn{width:100%; min-width:0; display:flex; align-items:center;
+  background:var(--field-fill); border:1px solid var(--field-line); color:var(--ink);
+  border-radius:var(--r-sm); padding:8px 32px 8px 12px; font-size:var(--fs-md); min-height:38px;
+  box-shadow:inset 0 1px 2px rgba(17,24,39,.03); cursor:pointer; text-align:left;
+  background-image:var(--chevron); background-repeat:no-repeat;
+  background-position:right 10px center; background-size:14px;
+  transition:border-color var(--t-1), box-shadow var(--t-1)}
+.mp-kbtn:hover{border-color:var(--field-border)}
+.mp-kbtn[aria-expanded="true"]{border-color:var(--primary); box-shadow:0 0 0 3px var(--primary-ring)}
+.mp-kbtn .kv{min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+/* 抽屉窄到一整行腾不下"名字 + 两件控件"（手机里抽屉就是整屏宽）：改成**名称独占一行、
+   控件第二行**。不这么做的话名称轨会被压到六十几 px，模型名省略成 `Qwen3.8-…`，五行
+   看下来全一样，比多占一行危险得多。**这一段必须写在上面那堆基础规则之后**：选择器
+   权重与基础规则持平，写在前面就被同名的基础规则按源序盖掉（容器查询不抬权重） */
+#ceProfiles{container-name:profiles; container-type:inline-size}
+@container profiles (max-width:360px){
+  /* 窄屏第二行：手柄与名称共占首行（名称在手柄右侧铺满），两件控件在第二行
+     **共享剩余宽度**（不是上下文抢满 92 再让类型按钮吃剩下），并给类型一个能装下
+     最坏文案（`image +2` 加箭头位）的下限。位置全部显式写：`grid-column:1/-1` 的
+     写法会让自动排位把手柄孤零零留在上一行 */
+  /* 首行 = 手柄 + 名称 + 删除，第二行 = 类型 + 上下文（上下文独占剩下两轨）。
+     删除键上移是为了给上下文让出宽度：上限现在写**裸 tokens**（ADR-0123，最长
+     1048576 七位），旧写法「1M」两字符怎么都放得下，换成裸数字后 320 视口就被裁
+     （实测 scrollWidth 68 > clientWidth 62）——数字被切头比文案省略号更难查 */
+  .mp-row{grid-template-columns:18px minmax(104px,1fr) minmax(64px,1fr) 30px}
+  .mp-row .mp-grip{grid-area:1/1}
+  .mp-row .mp-name{grid-area:1/2/2/4}
+  .mp-row .mp-del{grid-area:1/4/2/5}
+  .mp-row .mp-kbtn{grid-area:2/2/3/3}
+  .mp-row .mp-ctx{grid-area:2/3/3/5}
+  /* 轨道再窄一档，内边距也收一档（箭头右边位从 10 收到 8）：否则 320 视口下最坏文案
+     会被省略号吃掉 */
+  .mp-kbtn{padding:8px 28px 8px 10px; background-position:right 8px center}
+  .mp-row .mp-ctx{padding:8px}
+}
+/* 类型浮窗：挂在 #cfgDrawer 内（抽屉的 Tab 焦点圈定要能圈住它），定位用 fixed 避开
+   .dr-body 的 overflow 裁剪；宽度由 JS 跟锚点对齐（见 kindPopOpen） */
+.kpop{position:fixed; z-index:140; padding:6px; background:var(--card);
+  border:1px solid var(--border-2); border-radius:var(--r-md); box-shadow:var(--shadow)}
+.kpop label{display:flex; align-items:center; gap:8px; padding:5px 7px; border-radius:var(--r-xs);
+  cursor:pointer; font-size:var(--fs-md)}
+.kpop label:hover{background:var(--hover)}
+.kpop input{margin:0}
 .mp-kind{display:inline-flex; align-items:center; gap:3px; font-size:var(--fs-micro);
   color:var(--ink-3); border:1px solid var(--border); border-radius:var(--r-pill);
   padding:2px 7px; cursor:pointer; user-select:none; line-height:1.5}
@@ -591,12 +697,12 @@ input[type=checkbox]:disabled,input[type=radio]:disabled{opacity:.45; cursor:not
   border-radius:var(--r-xs); cursor:pointer}
 .mp-item:hover{background:var(--hover)}
 .mp-item input{margin:0; flex:none}
-.mp-item .nm{font-family:var(--mono); min-width:0; overflow:hidden; text-overflow:ellipsis;
-  white-space:nowrap}
-.mp-item small{color:var(--ink-4); font-family:var(--font); flex:none}
+/* 候选模型名同样用正文字体（与被勾选用它的 `.ck` 列表一致） */
+.mp-item .nm{min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.mp-item small{color:var(--ink-4); flex:none}
 .mp-init{display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:8px;
   font-size:var(--fs-micro); color:var(--ink-4)}
-.mp-init .mp-ictx{width:96px; text-align:right; font-family:var(--mono)}
+.mp-init .mp-ictx{width:136px}
 .mp-foot{display:flex; align-items:center; gap:8px; margin-top:8px}
 .mp-foot .hint{margin:0; flex:1; min-width:0}
 .mp-free{display:flex; align-items:center; gap:6px; font-size:12.5px; padding:4px 6px;
@@ -657,8 +763,10 @@ input[type=checkbox]:disabled,input[type=radio]:disabled{opacity:.45; cursor:not
 .dep-edit.dragging, .dep-group.dragging{opacity:.5}
 /* 拖放落点指示：目标元素**上沿**的醒目提醒线（插入到线下方），主色实线 + 轻发光 */
 .url-row.dragging{opacity:.5}
-.dep-edit.drop-marker, .g-head.drop-marker, .url-row.drop-marker{position:relative}
-.dep-edit.drop-marker::before, .g-head.drop-marker::before, .url-row.drop-marker::before{content:""; position:absolute;
+.mp-row.dragging{opacity:.5}
+.dep-edit.drop-marker, .g-head.drop-marker, .url-row.drop-marker, .mp-row.drop-marker{position:relative}
+.dep-edit.drop-marker::before, .g-head.drop-marker::before, .url-row.drop-marker::before,
+.mp-row.drop-marker::before{content:""; position:absolute;
   left:2px; right:2px; top:-2px; height:3px; border-radius:3px; background:var(--primary);
   box-shadow:0 0 8px rgba(79,70,229,.55)}
 /* 组末/空组落区：组条目区末尾同款提醒线（追加在组尾，与 marker 同一视觉语言） */
@@ -669,6 +777,10 @@ input[type=checkbox]:disabled,input[type=radio]:disabled{opacity:.45; cursor:not
 /* 网关地址末尾落点：末行下沿同款提醒线 */
 #ceUrls.drop-target-zone{position:relative}
 #ceUrls.drop-target-zone::after{content:""; position:absolute; left:2px; right:2px; bottom:-3px;
+  height:3px; border-radius:3px; background:var(--primary); box-shadow:0 0 8px rgba(79,70,229,.55)}
+/* 模型声明末尾落点：同款 */
+#ceProfiles.drop-target-zone{position:relative}
+#ceProfiles.drop-target-zone::after{content:""; position:absolute; left:2px; right:2px; bottom:-1px;
   height:3px; border-radius:3px; background:var(--primary); box-shadow:0 0 8px rgba(79,70,229,.55)}
 .url-row .dgrip{margin:0 -3px 0 -5px}
 /* 编辑目标行（下拉 + 新增/删除）：图标按钮与旁边的 select 同高，避免一高一低。
@@ -815,11 +927,13 @@ td{padding:11px 12px; border-bottom:1px solid var(--border-3); white-space:nowra
    以及跨卡片之间数据列错位 */
 .sc-tt-mx{table-layout:fixed}
 .sc-tt-mx th:first-child{width:120px}
-/* 首行/首列标题带：浅灰底 + 行头加粗右框线，与数据区形成视觉分层
-   （行头=系列名、列头=档位，用户反馈标题与数据分不清） */
-.sc-tt-mx thead th{background:var(--bg)}
+/* 首行/首列标题带：比卡面亮一档的底 + 行头加粗右框线，与数据区形成视觉分层
+   （行头=系列名、列头=档位，用户反馈标题与数据分不清）。用 --head-bg 而不是 --bg：
+   浅色下两者只差一档（#F8F9FB / #F7F8FA）看不出区别，深色下 --bg 是页底（比卡面还深），
+   在卡里就看成凹进去的黑洞 */
+.sc-tt-mx thead th{background:var(--head-bg)}
 .sc-tt-mx th:first-child, .sc-tt-mx td:first-child{
-  background:var(--bg); font-weight:600; color:var(--ink)}
+  background:var(--head-bg); font-weight:600; color:var(--ink)}
 .sc-tt-mx td:first-child{border-right:1px solid var(--border)}
 tbody tr{transition:background var(--t-1)}
 tbody tr:hover{background:var(--hover)}
@@ -911,23 +1025,15 @@ tr.fade td{opacity:.45}
   border-radius:var(--r-md); background:var(--card)}
 @media (max-width:720px){ .chartbox{height:300px} }
 
-/* ============ 测速卡片（导出物：永远浅色） ============ */
-/* 卡片是分享用的 PNG（html2canvas 截 DOM），不是界面的一部分：在卡片作用域内
-   把语义令牌钉回浅色值，页面主题怎么切它都维持白底黑字（组件规则仍只写 var(--x)）。
-   图表同理：离屏出图走 chartPal(forExport=true) 取浅色主题色，不读实时令牌 */
+/* ============ 测速卡片（跟随界面主题） ============ */
+/* 卡片既是屏上成果也是分享 PNG（html2canvas 截 DOM）。以前在卡片作用域里把语义
+   令牌钉回浅色值（“导出物恒白底”），代价是切主题时全站都换、只有它不换，看着像
+   漏了一块。现在卡片与页面共用一套令牌（组件规则仍只写 var(--x)），卡内图表的离屏
+   出图也走实时主题（见 chartPal/seriesPal），切主题时整卡重渲——所见即所导 */
 #cardWrap{overflow-x:auto}
-.speed-card{--bg:#F7F8FA; --card:#FFFFFF; --elev:#FFFFFF; --hover:#EEF0F5; --track:#E9EBF0;
-  --border:#E7EAF0; --border-2:#D5DAE3; --border-3:#F1F3F7; --field-border:#7C8797;
-  --head-bg:#F8F9FB;   /* 卡片内矩阵表表头走全局 th{background:var(--head-bg)}：
-                        不在卡片作用域钉回浅色，深色主题下白卡里会嵌一排深灰带（导出图同错） */
-  --ink:#0F172A; --ink-2:#334155; --ink-3:#5F6775; --ink-4:#5F6775;
-  --primary:#4F46E5; --primary-hover:#4338CA; --primary-soft:#EEF2FF;
-  --green:#15803D; --green-soft:#F0FDF4; --green-border:#BBF7D0;
-  --yellow:#92400E; --yellow-soft:#FEFCE8; --yellow-border:#FDE68A;
-  --red:#CE2020; --red-soft:#FEF2F2; --red-border:#FECACA;
-  --blue:#2563EB; --blue-soft:#EFF6FF; --violet:#9333EA; --violet-soft:#F5F3FF;
+.speed-card{
   width:100%; min-width:1120px; border-radius:20px; padding:40px 44px; color:var(--ink);
-  background:#FFFFFF; border:1px solid var(--border); box-shadow:0 8px 30px rgba(0,0,0,.08);
+  background:var(--card); border:1px solid var(--border); box-shadow:var(--sh-3);
   font-family:var(--font)}
 .sc-head{display:flex; justify-content:space-between; align-items:flex-start}
 .sc-brand{display:flex; align-items:center; gap:12px}
@@ -935,7 +1041,10 @@ tr.fade td{opacity:.45}
   color:var(--primary); display:flex; align-items:center; justify-content:center; flex:none}
 .sc-title{font-size:22px; font-weight:700; letter-spacing:.5px}
 .sc-sub{color:var(--ink-4); font-size:12.5px; margin-top:1px}
+/* 日期值留等宽（逐位对日期），**中文标签回到正文字体**：整元素等宽会把「测试时间」
+   拐到 `--mono` 回退的 CJK 字体上，同元素里两家字（ADR-0119 追加轮三） */
 .sc-date{color:var(--ink-4); font-size:12.5px; text-align:right; font-family:var(--mono)}
+.sc-date span{font-family:var(--font)}
 .sc-model{font-size:22px; font-weight:700; margin:22px 0 2px; color:var(--primary); font-family:var(--mono)}
 .sc-prov{color:var(--ink-3); font-size:13px; margin-bottom:16px}
 .sc-meta{display:grid; grid-template-columns:repeat(3,1fr); gap:14px 28px;
@@ -968,7 +1077,9 @@ tr.fade td{opacity:.45}
    被顶下错位），加 .sc-charts 锚点后只剩矩阵卡堆叠的表（矩阵表恒为
    .sc-charts 的兄弟） */
 .sc-charts ~ .sc-tt-wrap + .sc-tt-wrap{margin-top:12px}
-.sc-chart-cell img{width:100%; border-radius:var(--r-md); border:1px solid var(--border); background:#fff; display:block}
+.sc-chart-cell img{width:100%; border-radius:var(--r-md); border:1px solid var(--border);
+  display:block}   /* 离屏图出成透明底（见 captureScenarioCharts）：卡面颜色就是图底，
+                      切主题不会在深色卡里留一块白图 */
 .sc-foot{margin-top:18px; color:var(--ink-4); font-size:11.5px; text-align:center}
 /* 卡片配置工具组（图例/明细胶囊按钮）：挂卡片头右上角、时间上方（PNG 导出经
    ignoreElements 整体隐去，见 downloadCard）；浮层挂 body（不进卡片 DOM，
@@ -995,11 +1106,13 @@ tr.fade td{opacity:.45}
    对比专属标识（标题徽标 + 卡面左侧色条） */
 .sc-run-chips{display:flex; flex-wrap:wrap; gap:10px; margin:0 0 16px}
 .sc-run-chip{display:flex; align-items:flex-start; gap:8px; flex:1; min-width:280px;
-  border:1px solid var(--border); border-radius:var(--r-lg); padding:10px 14px; background:#fff}
+  border:1px solid var(--border); border-radius:var(--r-lg); padding:10px 14px; background:var(--bg)}
 .sc-run-chip .sc-run-dot{margin-top:5px}
 .sc-run-chip-t{font-size:13px; color:var(--ink)}
-.sc-run-chip-t b{font-family:var(--mono)}
-.sc-run-chip-s{font-size:12px; color:var(--ink-4); margin-top:2px; font-family:var(--mono)}
+/* run 标签（`#1`）**不单独换等宽**：它与后面的日期、「基准」、备注坐在同一行里，
+   只给标签换字体就是同行两种字（与抽屉里 `.ck em` 同形）；`.sc-run-chip-s` 同理，
+   它装着模型名 + 「本地网关（LiteLLM）」+「N 点」，掺中文的行不该整行等宽 */
+.sc-run-chip-s{font-size:12px; color:var(--ink-4); margin-top:2px}
 .sc-run-chip-d{font-size:11.5px; color:var(--ink-4); margin-top:3px; word-break:break-all}
 .sc-foot a{color:var(--primary); text-decoration:none}
 .sc-run-dot{display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px}
@@ -1016,7 +1129,8 @@ tr.fade td{opacity:.45}
 .sc-detail > .rt-scen + .rt-scen{margin-top:10px}
 .sc-detail-scen + .sc-detail-scen{margin-top:14px}
 .sc-detail-scen-name{font-size:13px; font-weight:600; color:var(--ink-2); margin-bottom:6px}
-.sc-cmp-run-name{font-size:12px; color:var(--ink-3); margin:10px 0 4px; font-family:var(--mono)}
+/* 同上：这里装的是 run 标签 + 日期 + 中文备注，掺中文的小标题不整行等宽 */
+.sc-cmp-run-name{font-size:12px; color:var(--ink-3); margin:10px 0 4px}
 
 .ic{width:16px; height:16px; flex:none}
 #offChartBox{position:fixed; left:-9999px; top:0}
@@ -1497,8 +1611,6 @@ tr.fade td{opacity:.45}
         <div id="ceUrls" role="group" aria-labelledby="lbCeUrls"></div>
         <div class="hint">把优选地址（如内网）排在前面：可达即绕开隧道等传输中继，不可达自动落到下一个</div>
         <label class="ck" style="margin-top:10px"><input type="checkbox" id="ceLocal"> 本地部署（允许并发测试；云端强制单发）</label>
-        <!-- 说明紧跟在开关下方（而不是跑到卡片底部）：它解释的是这个开关关掉了什么 -->
-        <div class="hint" id="ceDepOff" hidden></div>
       </div>
       <div class="dsec">
         <div class="ds-t">API KEY</div>
@@ -1509,14 +1621,11 @@ tr.fade td{opacity:.45}
         <div class="hint">只写入服务端 .env，页面永不回显；留空保持不变</div>
       </div>
       <div class="dsec" id="ceProfileSec">
-        <div class="ds-t">模型上限与类型</div>
-        <div class="hint" style="margin:0 0 4px">只有你要测的模型需要声明：没声明的按「文本生成
-          + 不设上限」处理，撞到窗口才报错。上限用于超窗档位——超出不多就裁到贴边实测，差太多直接跳过。
-          这里也是上限与类型的唯一生效处，部署环境里同名字段的旧值只当历史留着</div>
-        <div id="ceProfiles"></div>
-        <div class="btnrow ce-actions" style="margin-top:10px">
-          <button class="btn-ghost" onclick="ceProfileAddOpen()">+ 添加模型</button>
+        <div class="ds-row"><div class="ds-t">模型类型及上下文</div>
+          <button type="button" class="icon-btn ds-act" onclick="ceProfileAddOpen()"
+            aria-label="添加模型声明" title="添加模型声明"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
+        <div id="ceProfiles"></div>
         <!-- 内联展开而非再叠一层弹窗：抽屉本身已是浮层（z-index 100），modal 要重做
              焦点圈定与滚动锁，且会把用户从"我在给哪个 provider 配"的上下文里拽走 -->
         <div class="mp-add" id="ceProfileAdd" hidden></div>
@@ -1525,7 +1634,6 @@ tr.fade td{opacity:.45}
            能吃什么类型、上限多大"。与部署环境互斥出现，同一屏只有一套编辑器 -->
       <div class="dsec" id="ceDepSec">
         <div class="ds-t">部署环境</div>
-        <div class="hint" style="margin:0 0 4px">模型 → 量化/硬件/框架/参数：测速表头来源标记（deploy/framework/quant）的出处。上下文上限与模型类型请到「模型上限与类型」里声明。一个模型可映射多套部署，但仅激活的一套生效（重叠部署勾选激活会互斥）</div>
         <div id="ceDeps"></div>
         <div class="btnrow ce-actions" style="margin-top:10px">
           <button class="btn-ghost" onclick="ceDepAdd()">+ 添加部署环境</button>
@@ -1535,7 +1643,7 @@ tr.fade td{opacity:.45}
     </div>
     <footer class="dr-foot">
       <button class="btn-primary" id="btnCeSave" onclick="ceSave()">保存配置</button>
-      <span class="ce-msg" id="ceMsg" role="status" aria-live="polite" hidden></span>
+      <span class="ce-msg" id="ceMsg" role="status" aria-live="polite"></span>
     </footer>
   </aside>
 </div>
@@ -1694,16 +1802,23 @@ const SCEN_LABEL = {creative:"创意写作", code:"代码生成", translate:"翻
    合成；场景 kind 以 /api/config 下发的 scenarios[].kind 为准（旧存档无 kind 字段，
    场景 key 也不在媒体集内时按 llm 处理）。模型侧 kind 是**能力集**（kinds 数组，
    多选——文本模型支持视觉输入时同时挂 ocr），以部署映射为准 */
-const KIND_LABEL = {llm:"文本生成", asr:"语音转写", ocr:"图像识别", tts:"语音合成"};
-/* 组标题短标签：模型选择器的分组栏要一眼扫过，"文本生成＋图像识别"太长。
-   只在组标题用（部署环境卡、抽屉、报错文案仍用 KIND_LABEL 全称，那里是逐条
-   核对的场合）；asr/tts 不能都缩成「语音」——两者会撞名 */
-const KIND_SHORT = {llm:"文本", asr:"语音转写", ocr:"图像", tts:"语音合成"};
-const KIND_ORDER = Object.keys(KIND_LABEL);
+// 展示名统一为 text/image/asr/tts（内部与 config.json 里的取值仍是 llm/asr/ocr/tts，
+   // 改名只发生在这一处：卡片、浮窗、添加器都读这张表，不再各写一份中文全称）
+const KIND_LABEL = {llm:"text", ocr:"image", asr:"asr", tts:"tts"};
+let _kpopRow = null;      // 当前打开类型浮窗锚定的行（声明放最前：调用点比定义早会踩 TDZ）
+const kindText = kinds => {
+  const on = KIND_ORDER.filter(k => kinds.includes(k)).map(k => KIND_LABEL[k]);
+  return on.length > 1 ? `${on[0]} +${on.length - 1}` : (on[0] || KIND_LABEL.llm);
+};
+const kindFull = kinds => KIND_ORDER.filter(k => kinds.includes(k))
+  .map(k => KIND_LABEL[k]).join("＋") || KIND_LABEL.llm;
+const kindSummary = kinds => `<span class="kv">${esc(kindText(kinds))}</span>`;
+const KIND_ORDER = ["llm", "ocr", "asr", "tts"];   // 展示顺序 = text/image/asr/tts（存储归序仍按服务端 _KINDS）
 const scenKind = sc => state?.scenMeta?.[sc]?.kind || "llm";
-/* 部署条目的能力集：kinds 数组优先，兼容旧单值 kind 字段，缺省 [llm]
-   （与服务端 _dep_kinds 同口径） */
-const depKinds = d => (d.kinds && d.kinds.length) ? d.kinds : (d.kind ? [d.kind] : ["llm"]);
+/* 部署行的类型/上限读数（本地部署卡用）：取该部署各模型在「模型类型及上下文」里的
+   声明。deployments 上的 kinds/kind/max_ctx 已废弃（ADR-0122），不再作数据源 */
+const depKinds = (d, profOf) => [...new Set((d.models || [])
+  .map(m => profOf.get(m)).flatMap(f => (f?.kinds && f.kinds.length) ? f.kinds : ["llm"]))];
 const kindsOfModel = m => state.modelKinds?.[m] || ["llm"];
 const fmtK = v => !v ? "0K"
   : v>=1048576 ? (v/1048576).toFixed(v%1048576?1:0)+"M"
@@ -1737,8 +1852,8 @@ let offChart;
    系统偏好把它定下来，避免选深色却先白一下）。本模块只做三件事：
    ① 写 data-theme（组件样式全靠语义令牌，切换时一行组件 CSS 也不动）；
    ② 把令牌同步给图表（canvas 不认 CSS 变量，syncChartTheme 现读）；
-   ③ 重绘受主题影响的区域（仅页内曲线）。测速卡片与导出 PNG 不跟随主题
-   （.speed-card 作用域把令牌钉回浅色 + 导出图走 chartPal(true)），故无需重生卡片。 */
+   ③ 重绘受主题影响的区域：页内曲线与测速卡片（卡内图是离屏烤出的 PNG，
+   不跟着令牌走，必须整卡重渲）。卡片与导出图都跟随主题（不再钉浅色）。 */
 const THEME_KEY = "llmspeed.theme";
 function themePref(){
   try { return localStorage.getItem(THEME_KEY) || "auto"; } catch { return "auto"; }
@@ -1748,11 +1863,18 @@ const resolvedTheme = pref => pref === "auto" ? (systemDark() ? "dark" : "light"
 const isDarkUI = () => document.documentElement.dataset.theme === "dark";
 /* 落地（不写存储）：init 与系统偏好变更走这里；用户点按钮才经 setTheme 写存储 */
 function applyTheme(pref, {rerender = false} = {}){
-  document.documentElement.dataset.theme = resolvedTheme(pref);
+  const root = document.documentElement;
+  /* 换肤原子化：先打上 data-theming 关掉全站过渡，再改 data-theme，强制重排让新
+     令牌在同一帧落地，最末帧尾恢复过渡（两帧 rAF：第一帧保证已按新色绘制过）。
+     不加这段：主背景瞬切、输入框等按各自的 --t-1/--t-2 渐染 → 残留一层旧主题的底色 */
+  root.dataset.theming = "1";
+  root.dataset.theme = resolvedTheme(pref);
   const meta = $("#metaTheme");
   if(meta) meta.setAttribute("content", isDarkUI() ? "#0F1319" : "#F9FAFB");
   for(const b of document.querySelectorAll(".theme-ctl [data-theme-set]"))
     b.setAttribute("aria-pressed", String(b.dataset.themeSet === pref));
+  void root.offsetWidth;   // 强制重排：否则上面的开关与赋值会被合并到同一帧，过渡照旧跑
+  requestAnimationFrame(() => requestAnimationFrame(() => delete root.dataset.theming));
   syncChartTheme();
   if(rerender) rethemeCharts();
 }
@@ -1760,10 +1882,17 @@ function setTheme(pref){
   try { localStorage.setItem(THEME_KEY, pref); } catch { /* 隐私模式：本会话生效即可 */ }
   applyTheme(pref, {rerender: true});
 }
-/* 只有页内交互曲线需跟着重绘（明细表/卡片靠 CSS 令牌自动到位） */
+/* 切主题要重跑的两块：①页内交互曲线（echarts 实例现读令牌）；②测速卡片——卡内
+   图表是离屏烤出的 PNG（颜色烤在像素里），不跟着令牌走，只能整卡重渲；文字/表格
+   靠令牌自动到位。卡片浮层先关掉，否则替掉卡 DOM 后浮层挂在野锤子上 */
 function rethemeCharts(){
   const cc = $("#chartCard");
   if(cc && !cc.hidden && window.echarts) renderCharts();
+  const cardCard = $("#cardCard");
+  if(cardCard && !cardCard.hidden && document.querySelector("#cardWrap .speed-card")){
+    closeCardLegend(); closeCardTable();
+    refreshAllCards();
+  }
 }
 
 /* ---------------- 初始化 ---------------- */
@@ -1996,13 +2125,6 @@ function restoreMatrixCfg(){
       if(Array.isArray(m.mlad[k])) state.mladSel[k] = m.mlad[k].map(Number);
   for(const [id, k] of MATRIX_INPUTS)
     if(m[k] != null && m[k] !== "") $(id).value = m[k];
-}
-/* 自定义上下文档位：部署上限非标准 2 的幂（如 192K）时补末尾档，localStorage 记忆 */
-function parseCtx(s){
-  const m = String(s).trim().match(/^(\d+(?:\.\d+)?)\s*([kKmM]?)$/);
-  if(!m) return 0;
-  const u = m[2].toLowerCase();
-  return Math.round(parseFloat(m[1]) * (u==="k" ? 1024 : u==="m" ? 1048576 : 1));
 }
 /* 自定义档位编辑器工厂：上下文/翻译/媒体（asr/ocr/tts）/Agent 缓存/Agent 指令
    五套阶梯同一机制——默认档 + localStorage 自定义档（按数值升序插入原序列、
@@ -2381,14 +2503,12 @@ function onProviderChange(){
   syncConcurrencyUI();
   refreshModels();
 }
-/* 模型名→能力集 kinds 映射：由当前 provider 的 deployments 推出（deployment.models
-   里的模型取该部署的能力集）；没映射到任何 deployment 的模型按 ["llm"]（与服务端
-   model_kinds 同口径）。provider 切换/配置重载时重建 */
+/* 模型名→能力集 kinds 映射：只由模型级声明 model_profiles 推（与服务端
+   match_deployments 同口径，ADR-0118/0122：`deployments` 的 kinds/kind 已废弃，
+   旧值在服务端读取时已折算进声明，前端不再读一份）。没声明的模型按 ["llm"]，
+   provider 切换/配置重载时重建 */
 function rebuildModelKinds(){
   state.modelKinds = {};
-  for(const d of (currentProvider()?.deployments || []))
-    for(const m of (d.models || [])) state.modelKinds[m] = depKinds(d);
-  // 模型级声明后写覆盖（优先于部署环境，与服务端 match_deployments 同口径，ADR-0117）
   for(const f of (currentProvider()?.model_profiles || []))
     state.modelKinds[f.model] = (f.kinds && f.kinds.length) ? f.kinds : ["llm"];
 }
@@ -2413,13 +2533,13 @@ function syncDeployCard(){
     const byName = new Map(((currentProvider()?.model_profiles) || []).map(f => [f.model, f]));
     const hits = sel.map(m => byName.get(m)).filter(Boolean);
     $("#deployCard").hidden = !hits.length;
-    $("#deployCardTitle").textContent = "模型上限与类型";   // 云端不叫部署环境（ADR-0117）
+    $("#deployCardTitle").textContent = "模型类型及上下文";   // 云端不叫部署环境（ADR-0117）
     $("#deployList").innerHTML = hits.map(f => {
       const kinds = (f.kinds && f.kinds.length) ? f.kinds : ["llm"];
       return `<div class="deploy-item">
         <div class="dn">${esc(f.model)}</div>
         ${f.max_ctx ? `<div class="kv"><span class="k">上下文上限</span>`
-          + `<span class="v">${esc(fmtCtx(f.max_ctx))}</span></div>` : ""}
+          + `<span class="v">${esc(String(f.max_ctx))}</span></div>` : ""}
         ${kinds.some(k => k !== "llm") ? `<div class="kv"><span class="k">模型类型</span>`
           + `<span class="v">${esc(kinds.map(k => KIND_LABEL[k] || k).join("＋"))}</span></div>` : ""}
       </div>`;
@@ -2427,6 +2547,7 @@ function syncDeployCard(){
     return;
   }
   const all = currentProvider()?.deployments || [];
+  const profOf = new Map(((currentProvider()?.model_profiles) || []).map(f => [f.model, f]));
   const seen = new Set();
   const deps = sel.map(m => resolveDeployment(all, m))
     .filter(d => d && !seen.has(d) && seen.add(d));
@@ -2436,15 +2557,20 @@ function syncDeployCard(){
   const unmapped = !deps.length && all.length > 0 && sel.length > 0;
   $("#deployCardTitle").textContent = "部署环境";
   $("#deployCard").hidden = !deps.length && !unmapped;
-  $("#deployList").innerHTML = deps.length ? deps.map(d => `<div class="deploy-item">
+  $("#deployList").innerHTML = deps.length ? deps.map(d => {
+    const kset = depKinds(d, profOf);
+    const ctxs = [...new Set((d.models || []).map(m => profOf.get(m)?.max_ctx)
+                             .filter(v => v).map(v => String(v)))];   // 裸 tokens，与抽屉输入框同写法
+    return `<div class="deploy-item">
     <div class="dn">${esc(d.label || "未命名部署")}${d.active ? `<small>✓ 激活</small>` : ""}<small>适用：${(d.models||[]).map(esc).join("、")}</small></div>
-    ${depKinds(d).some(k => k !== "llm") ? `<div class="kv"><span class="k">模型类型</span><span class="v">${esc(depKinds(d).map(k => KIND_LABEL[k] || k).join("＋"))}</span></div>` : ""}
+    ${kset.some(k => k !== "llm") ? `<div class="kv"><span class="k">模型类型</span><span class="v">${esc(kset.map(k => KIND_LABEL[k] || k).join("＋"))}</span></div>` : ""}
+    ${ctxs.length ? `<div class="kv"><span class="k">上下文上限</span><span class="v">${esc(ctxs.join(" / "))}</span></div>` : ""}
     ${d.hardware ? `<div class="kv"><span class="k">硬件环境</span><span class="v">${esc(d.hardware)}</span></div>` : ""}
     ${d.framework ? `<div class="kv"><span class="k">推理框架</span><span class="v">${esc(d.framework)}</span></div>` : ""}
     ${d.params ? `<div class="kv"><span class="k">核心参数</span><span class="v">${esc(d.params)}</span></div>` : ""}
-  </div>`).join("") : `<div class="deploy-item">
+  </div>`; }).join("") : `<div class="deploy-item">
     <div class="dn">未映射部署环境<small>未生效</small></div>
-    <div class="kv"><span class="k">提示</span><span class="v">当前勾选的模型未映射到任何部署环境：max_ctx 钳制/硬件信息不可用。可在配置编辑器 → 部署环境为该模型建立映射</span></div>
+    <div class="kv"><span class="k">提示</span><span class="v">当前勾选的模型未映射到任何部署环境：硬件信息不可用（上下文上限与类型走「模型类型及上下文」声明，不受此处影响）。可在配置编辑器 → 部署环境为该模型建立映射</span></div>
   </div>`;
 }
 
@@ -2469,6 +2595,7 @@ function initCfgEditor(keepName){
   state.cfgEdit.dirty = false;
   state.cfgEdit.draft = null;   // 草稿只活在这一次抽屉会话里
   state.cfgEdit.draftDirty = false;
+  ceMsg("");   // 反馈也只活在这一次会话里：关闭/重开还挂着上次的红字，读起来像"又错了"
   renderCeProv(keepName);
 }
 function renderCeProv(keepName){
@@ -2517,49 +2644,51 @@ function fillCfgForm(){
   ceDepGate();
 }
 /* 两套编辑器按「本地部署」二选一（ADR-0117）：
-   - 本地 → 「部署环境」（硬件/框架/量化/分组，含 kinds 与 max_ctx），照旧；
-   - 非本地 → 「模型上限与类型」声明列表（云端不必填整张部署卡）。
+   - 本地 → 「部署环境」（硬件/框架/量化/分组）；
+   - 非本地 → 「模型类型及上下文」声明列表（云端不必填整张部署卡）。
+   上限与类型已不属于部署卡（ADR-0122：旧字段废弃，唯一事实源是 model_profiles）。
    部署环境**只收编辑器、不动数据**：`ceStash` 以 `#ceDeps` 的 DOM 为唯一事实源，不渲染
-   就等于"这条 provider 没有部署环境"，保存即静默删数据；云端旧 deployments 也仍在兜底
-   钳制 max_ctx（ADR-0004）。所以 DOM 照常渲染、原地 hidden，看不见但一字不差地回去。 */
+   就等于"这条 provider 没有部署环境"，保存即静默删数据。所以 DOM 照常渲染、
+   原地 hidden，看不见但一字不差地回去。 */
 function ceDepGate(){
   const p = ceCurrent(), local = $("#ceLocal").checked;
-  // 分工（ADR-0118）：「模型上限与类型」是上限/类型的唯一入口，本地与云端同一处；
+  // 分工（ADR-0118）：「模型类型及上下文」是上限/类型的唯一入口，本地与云端同一处；
   // 「部署环境」退成来源信息（硬件/框架/量化），只有本地才有意义，故仅本地显示
   $("#ceDepSec").hidden = !local;
   $("#ceProfileSec").hidden = false;
   renderCeProfiles();
   ceProfileAddClose();                        // 切目标/切形态时收起内联添加面板
-  const legacy = ((p && p.deployments) || [])
-    .filter(d => d && (d.max_ctx || (d.kinds && d.kinds.length) || d.kind)).length;
-  const off = $("#ceDepOff");
-  off.hidden = legacy === 0;
-  if(legacy) off.textContent = `有 ${legacy} 条部署环境还带着上限/类型（旧写法）：这两个字段现在`
-    + `只在「模型上限与类型」里生效，那里已按旧值填好；部署环境里的原值保留但不再参与计算`;
+  kindPopClose();                             // 同理：浮窗锚在旧行上，换目标就成了孤儿
 }
 // 勾/去勾「本地部署」当场切换两套编辑器（数据不受影响；置 dirty 由 #cfgDrawer 的 input 委托负责）
 $("#ceLocal").addEventListener("change", ceDepGate);
 
 function renderCeProfiles(){
+  kindPopClose();                             // 整表重渲染会丢掉浮窗锚点
   const p = ceCurrent(), box = $("#ceProfiles");
   const list = (p && p.model_profiles) || [];
-  const presets = `<datalist id="mpCtxPresets">${MP_PRESETS.map(n =>
-    `<option value="${fmtCtx(n)}">${n} tokens</option>`).join("")}</datalist>`;
   if(!list.length){
-    box.innerHTML = `<div class="g-empty">还没有声明任何模型（点下方「+ 添加模型」）。`
-      + `留空不影响测速：未声明的模型按文本生成处理，不做超窗预判</div>${presets}`;
+    box.innerHTML = `<div class="g-empty">还没有声明。未声明的模型按 text 处理、不限上下文，`
+      + `不影响测速</div>`;
     return;
   }
   box.innerHTML = list.map(f => {
     const kinds = (f.kinds && f.kinds.length) ? f.kinds : ["llm"];
-    return `<div class="mp-row" data-model="${esc(f.model)}">
-      <input class="mp-model" value="${esc(f.model)}" aria-label="模型名" placeholder="模型名">
-      <span class="mp-kinds" role="group" aria-label="模型类型">${KIND_ORDER.map(k =>
-        `<label class="mp-kind${kinds.includes(k) ? " on" : ""}"><input type="checkbox"`
-        + ` class="mp-kind-cb" value="${k}" ${kinds.includes(k) ? "checked" : ""}>`
-        + ` ${KIND_SHORT[k] || k}</label>`).join("")}</span>
-      <input class="mp-ctx" list="mpCtxPresets" value="${esc(fmtCtx(f.max_ctx))}"
-        aria-label="上下文上限（tokens，可写 128K）" placeholder="上限（可空）">
+    // 只有一条时没得换序：不渲染手柄图标（轨道留着，一行与多行的列要对齐）
+    const grip = list.length < 2
+      ? `<span class="dgrip mp-grip" aria-hidden="true"></span>`
+      : `<span class="dgrip mp-grip" draggable="true" tabindex="0" role="button"
+          aria-label="模型 ${esc(f.model)} 的声明：上下键调整顺序"
+          title="拖动排序（只改列表顺序，不影响测速口径）；键盘：↑↓ 移动"><svg class="ic" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5h6M9 12h6M9 19h6"/></svg></span>`;
+    return `<div class="mp-row" data-model="${esc(f.model)}" data-kinds="${esc(kinds.join(","))}">
+      ${grip}
+      <span class="mp-name" title="${esc(f.model)}">${esc(f.model)}</span>
+      <button type="button" class="mp-kbtn" aria-haspopup="dialog" aria-expanded="false"
+        aria-label="配置 ${esc(f.model)} 的模型类型" title="${esc(kindFull(kinds))}">${kindSummary(kinds)}</button>
+      <input type="text" class="mp-ctx" inputmode="numeric" autocomplete="off" spellcheck="false"
+        value="${esc(f.max_ctx ? String(f.max_ctx) : "")}" placeholder="不限"
+        aria-label="${esc(f.model)} 的上下文上限（tokens，留空不限）"
+        title="直接写 tokens 数（如 132072），留空 = 不设上限">
       <button type="button" class="icon-btn danger mp-del" aria-label="删除模型「${esc(f.model)}」的声明"
         title="删除这条声明（不影响模型本身）"><svg class="ic" style="width:14px;height:14px"`
         + ` viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"`
@@ -2568,13 +2697,14 @@ function renderCeProfiles(){
         + `<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`
         + `</button>
     </div>`;
-  }).join("") + presets;
+  }).join("");
 }
 /* 内联添加面板：搜索过滤探测结果 + 复选 + 「本批共用初值」。云端模型几十上百个，靠
    "默认空 + 搜索 + 一次加多条 + 共用初值"收口，绝不平铺全部让用户逐个配（ADR-0117） */
 function ceProfileAddOpen(){
   const p = ceCurrent();
   if(!p) return;
+  kindPopClose();                          // 类型浮窗与添加面板不同时开（两个浮层会打架）
   state.cfgEdit.mpPick = new Set();
   $("#ceProfileAdd").hidden = false;
   ceProfileAddRender();
@@ -2630,14 +2760,16 @@ function ceProfileAddRender(){
     <div class="mp-list" id="mpList">${rows}</div>
     <div class="mp-init"><span>本批共用</span>
       ${KIND_ORDER.map(k => `<label class="mp-kind${k === "llm" ? " on" : ""}"><input type="checkbox"`
-        + ` class="mp-ik" value="${k}" ${k === "llm" ? "checked" : ""}> ${KIND_SHORT[k] || k}</label>`).join("")}
-      <input class="mp-ictx" id="mpIctx" list="mpCtxPresets" placeholder="上限（可空）"
-        aria-label="本批共用的上下文上限">
+        + ` class="mp-ik" value="${k}" ${k === "llm" ? "checked" : ""}> ${KIND_LABEL[k]}</label>`).join("")}
+      <input type="text" class="mp-ictx" id="mpIctx" inputmode="numeric" autocomplete="off"
+        spellcheck="false" placeholder="上下文 tokens"
+        aria-label="本批共用的上下文上限（tokens，留空不限）"
+        title="直接写 tokens 数（如 132072），留空 = 不设上限">
     </div>
     <div class="mp-foot">
       <button type="button" class="btn-primary btn-xs" id="mpApply">添加 0 个</button>
       <button type="button" class="btn-ghost btn-xs" id="mpCancel">取消</button>
-      <span class="hint">上限可留空（不预判超窗），添加后也能逐条改</span>
+      <span class="hint">上下文写裸 tokens（如 132072），可留空（不预判超窗），添加后逐条可改</span>
     </div>`;
   $("#mpSearch").focus();
   ceProfileAddCount();
@@ -2652,9 +2784,9 @@ function ceProfileAddApply(names){
   p.model_profiles = p.model_profiles || [];
   const checked = [...document.querySelectorAll("#ceProfileAdd .mp-ik:checked")].map(x => x.value);
   const kinds = KIND_ORDER.filter(k => checked.includes(k));
-  const mc = parseCtx($("#mpIctx") ? $("#mpIctx").value : "");
+  const mc = parseTok($("#mpIctx") ? $("#mpIctx").value : "");
   if(Number.isNaN(mc)){
-    ceTell("上限写法不认识（可用 8K / 128K / 1M 或纯数字），本批未添加", "err");
+    ceTell("上下文要写正整数 tokens（如 132072），本批未添加", "err");
     return;
   }
   let added = 0, skipped = 0, capped = false;
@@ -2711,15 +2843,66 @@ $("#ceProfiles").addEventListener("click", e => {
   renderCeProfiles();
   ceTell("已移除该声明，点「保存配置」生效", "warn");
 });
-$("#ceProfiles").addEventListener("change", e => {
-  if(!e.target.classList.contains("mp-kind-cb")) return;
-  const chip = e.target.closest(".mp-kind");
-  if(chip) chip.classList.toggle("on", e.target.checked);
-  ceMarkDirty();
+$("#ceProfiles").addEventListener("click", e => {
+  const kb = e.target.closest(".mp-kbtn");
+  if(kb) kindPopOpen(kb);
 });
 $("#ceProfiles").addEventListener("input", e => {
-  if(e.target.classList.contains("mp-model") || e.target.classList.contains("mp-ctx")) ceMarkDirty();
+  if(e.target.classList.contains("mp-ctx")) ceMarkDirty();
 });
+/* 类型浮窗：一行一个勾选（text/image/asr/tts）。挂在 #cfgDrawer 内——抽屉的 Tab 焦点
+   圈定按容器收集可聚焦元素，挂到 body 上会被圈定逻辑拽回去；定位用 fixed 是为了不被
+   .dr-body 的 overflow:auto 裁掉。勾选结果写回行上的 data-kinds：DOM 仍是唯一事实源，
+   ceStash 从那里读，浮窗本身不持有数据 */
+function kindPopClose(){
+  const pop = $("#kindPop");
+  if(pop) pop.remove();
+  document.querySelectorAll('.mp-kbtn[aria-expanded="true"]')
+    .forEach(b => b.setAttribute("aria-expanded", "false"));
+  _kpopRow = null;
+}
+function kindPopOpen(btn){
+  const row = btn.closest(".mp-row");
+  if(!row) return;
+  const again = _kpopRow === row;
+  kindPopClose();
+  if(again) return;                      // 再点同一个入口 = 收起
+  const picked = (row.dataset.kinds || "llm").split(",").filter(Boolean);
+  const pop = document.createElement("div");
+  pop.id = "kindPop"; pop.className = "kpop";
+  pop.setAttribute("role", "dialog");
+  pop.setAttribute("aria-label", `${row.dataset.model || ""} 的模型类型`);
+  pop.innerHTML = KIND_ORDER.map(k => `<label><input type="checkbox" class="kpop-cb" value="${k}"`
+    + ` ${picked.includes(k) ? "checked" : ""}> ${KIND_LABEL[k]}</label>`).join("");
+  $("#cfgDrawer").appendChild(pop);
+  const r = btn.getBoundingClientRect();
+  // 宽度跟锚点按钮对齐：浮窗比入口窄就成了一条飘在旁边的小纸条，看不出属于哪一格
+  pop.style.minWidth = `${Math.max(112, Math.round(r.width))}px`;
+  // 下方放不下就翻到上方；横向夹在视口内（浮窗窄，不做跟随重算）
+  const below = r.bottom + 4 + pop.offsetHeight < innerHeight;
+  pop.style.top = `${below ? r.bottom + 4
+    : Math.max(8, r.top - 4 - pop.offsetHeight)}px`;
+  pop.style.left = `${Math.max(8, Math.min(r.left, innerWidth - pop.offsetWidth - 8))}px`;
+  btn.setAttribute("aria-expanded", "true");
+  _kpopRow = row;
+  pop.addEventListener("change", e => {
+    if(!e.target.classList.contains("kpop-cb")) return;
+    const on = [...pop.querySelectorAll(".kpop-cb")].filter(x => x.checked).map(x => x.value);
+    if(!on.length) pop.querySelector('.kpop-cb[value="llm"]').checked = true;   // 至少留一项
+    const kinds = on.length ? on : ["llm"];
+    row.dataset.kinds = kinds.join(",");
+    const kv = btn.querySelector(".kv");
+    if(kv){ kv.textContent = kindText(kinds); btn.title = kindFull(kinds); }
+    ceMarkDirty();
+  });
+  pop.querySelector(".kpop-cb").focus();
+}
+document.addEventListener("mousedown", e => {
+  if(_kpopRow && !e.target.closest("#kindPop") && !e.target.closest(".mp-kbtn")) kindPopClose();
+});
+// 滚动/缩放会让 fixed 定位与锚点错位：直接收起，不做跟随（错位比"跟着乱跑"好修）
+document.querySelector("#cfgDrawer .dr-body").addEventListener("scroll", kindPopClose);
+addEventListener("resize", kindPopClose);
 /* 网关地址行：gateway_urls 数组渲染；删除按钮仅在多行时可用（至少保留一条）。
    gateway_urls 存在（含 ceStash 暂存的空数组）即以它为准——空数组渲染单行空输入，
    不回退旧 gateway_url；回退仅服务从未有 gateway_urls 字段的遗留数据 */
@@ -2792,78 +2975,84 @@ async function ceUrlProbe(btn){
   }catch(e){ st.className = "url-st bad"; st.textContent = "探测失败"; st.title = String(e); }
   finally{ btn.disabled = false; }
 }
-/* 网关地址顺序即优先级（服务端按序取第一个可达），所以顺序必须可改。
-   与部署环境条目共用一套手法：`_beforeEls` 算插入点、`.drop-marker` 提醒线、
-   drop 先移 DOM 再以 DOM 为唯一事实源落数据（`ceStash` 按 DOM 顺序重建
-   gateway_urls）、延迟一拍重渲让 dragend 先清理；键盘 ↑↓ 走同一条落盘路径
-   （`_ceUrlsApplyReorder`），否则鼠标与键盘会排出两种结果。
-   注意：`ceStash` 会滤掉空行（空串不是地址），所以拖动一个空行落定后它会消失 */
-let _urlDrag = null;   // 被拖的 .url-row
-let _urlSlot = null;   // 最后一次落点指示器的位置：插到该元素之前；null = 追加末尾
-function _ceUrlsApplyReorder(){ ceStash(); state.cfgEdit.dirty = true; renderCeUrls(); }
-function _urlInsertPoint(clientY){
-  let b = _beforeEls($("#ceUrls"), ".url-row", clientY);
-  if(b === _urlDrag) b = b.nextElementSibling;   // 插回自己原位 = 落到它后面
-  return b;   // 指针在组件外也照样夹紧：高于全部行 → 首行之前，低于全部行 → 末尾
-}
-/* 落盘只认「最后一次指示器位置」。dragover / drop 挂在 **document** 上：指针滑出列表
-   甚至滑出抽屉时这两个事件仍在冒泡，落点线照常跟着走。关键是 **dragend 也走同一条
-   落盘路径**——HTML5 拖拽里"在本组件之外的元素上松手"根本不会触发我们的 drop，旧写法
-   在 dragend 里只清了个拖动态，于是鼠标一出组件区域换序就悄悄失效（用户判为偷懒做法，
-   正确语义是"按当前指示器所在位置执行换序"）。drop 与 dragend 都调 _urlApplySlot()，
-   句柄先置空保证只落一次。
+/* 手柄拖拽换序（网关地址行与模型声明行共用一套手法；旧写法只服务地址行，第二处
+   只能整段抄一遍，抄一次就多一处会漏改的地方）。手法：`_beforeEls` 算插入点、
+   `.drop-marker` 提醒线、drop 先移 DOM 再以 DOM 为唯一事实源落数据（`ceStash` 按 DOM
+   顺序重建数组）、延迟一拍重渲让 dragend 先清理；键盘 ↑↓ 走同一条落盘路径，否则
+   鼠标与键盘会排出两种结果。
+   `dragover`/`drop` 挂在 **document** 上：指针滑出列表甚至滑出抽屉时这两个事件仍在冒泡，
+   落点线照常跟着走。关键是 **dragend 也走同一条落盘路径**——HTML5 拖拽里"在本组件之外
+   的元素上松手"根本不会触发我们的 drop，旧写法在 dragend 里只清了个拖动态，于是鼠标一出
+   组件区域换序就悄悄失效（用户判为偷懒做法，正确语义是"按当前指示器所在位置执行换序"）。
+   drop 与 dragend 都调 applySlot()，句柄先置空保证只落一次。
    代价：按 Esc 取消拖拽也会按当前落点生效——浏览器不给"取消"标志，而指示器本来就画在
    那里，用户看到的和得到的一致。 */
-function _urlApplySlot(){
-  if(!_urlDrag) return;      // drop 已经落过 → dragend 到这里直接返回
-  const el = _urlDrag;
-  _urlDrag = null;
-  el.classList.remove("dragging");
-  clearMarkers();
-  const box = $("#ceUrls");
-  if(_urlSlot && _urlSlot !== el) box.insertBefore(el, _urlSlot);
-  else if(!_urlSlot) box.appendChild(el);
-  _urlSlot = null;
-  setTimeout(_ceUrlsApplyReorder, 0);
+function bindGripDrag(boxSel, rowSel, gripSel, commit){
+  const box = () => $(boxSel);
+  let drag = null;   // 被拖的行
+  let slot = null;   // 最后一次落点：插到该元素之前；null = 追加末尾
+  function applySlot(){
+    if(!drag) return;      // drop 已经落过 → dragend 到这里直接返回
+    const el = drag, host = box();
+    drag = null;
+    el.classList.remove("dragging");
+    clearMarkers();
+    // 指针在组件外也照样夹紧：高于全部行 → 首行之前，低于全部行 → 末尾
+    if(slot && slot !== el) host.insertBefore(el, slot);
+    else if(!slot) host.appendChild(el);
+    slot = null;
+    setTimeout(commit, 0);          // 延迟一拍：让 dragend 的清理先跑完
+  }
+  box().addEventListener("dragstart", e => {
+    const grip = e.target.closest(gripSel);
+    if(!grip || !grip.draggable) return;    // 只有一条时的空手柄不参与
+    drag = grip.closest(rowSel);
+    slot = null;
+    drag.classList.add("dragging");
+    e.dataTransfer.setData("text/plain", "row");
+    e.dataTransfer.effectAllowed = "move";
+  });
+  document.addEventListener("dragover", e => {
+    if(!drag) return;      // 与本组件无关的拖拽（含文件拖入页面）一律不接管
+    e.preventDefault();    // 不 preventDefault 就不算允许 drop
+    e.dataTransfer.dropEffect = "move";
+    clearMarkers();
+    slot = _beforeEls(box(), rowSel, e.clientY);
+    if(slot === drag) slot = slot.nextElementSibling;   // 插回自己原位 = 落到它后面
+    if(slot) slot.classList.add("drop-marker");
+    else box().classList.add("drop-target-zone");
+  });
+  document.addEventListener("drop", e => {
+    if(!drag) return;
+    e.preventDefault();    // 组件外松手也要吃掉默认行为（否则浏览器可能去导航）
+    applySlot();
+  });
+  document.addEventListener("dragend", () => { applySlot(); });
+  box().addEventListener("keydown", e => {
+    const grip = e.target.closest(gripSel);
+    if(!grip || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+    e.preventDefault();   // 不吃掉方向键就会翻页滚动
+    const host = box(), row = grip.closest(rowSel);
+    /* 用 querySelectorAll 而不是 children：#ceProfiles 里除了行还挂着一个 <datalist>，
+       按 children 数会把它的位子也算进去 → 键盘换序会跳格 */
+    const rows = [...host.querySelectorAll(rowSel)], i = rows.indexOf(row);
+    const j = e.key === "ArrowUp" ? i - 1 : i + 1;
+    if(j < 0 || j >= rows.length) return;   // 到头：不标未保存
+    const b = e.key === "ArrowUp" ? rows[j] : rows[j + 1] || null;
+    if(b) host.insertBefore(row, b); else host.appendChild(row);
+    commit();
+    // 重渲全是新节点，焦点必须按**新行序**找回同一行的手柄，否则每按一次就被踢回文档开头
+    document.querySelectorAll(`${boxSel} ${gripSel}`)[j]?.focus();
+  });
 }
-$("#ceUrls").addEventListener("dragstart", e => {
-  const grip = e.target.closest(".url-grip");
-  if(!grip) return;
-  _urlDrag = grip.closest(".url-row");
-  _urlSlot = null;
-  _urlDrag.classList.add("dragging");
-  e.dataTransfer.setData("text/plain", "url");
-  e.dataTransfer.effectAllowed = "move";
-});
-document.addEventListener("dragover", e => {
-  if(!_urlDrag) return;      // 与本组件无关的拖拽（含文件拖入页面）一律不接管
-  e.preventDefault();        // 不 preventDefault 就不算允许 drop
-  e.dataTransfer.dropEffect = "move";
-  clearMarkers();
-  _urlSlot = _urlInsertPoint(e.clientY);
-  if(_urlSlot) _urlSlot.classList.add("drop-marker");
-  else $("#ceUrls").classList.add("drop-target-zone");
-});
-document.addEventListener("drop", e => {
-  if(!_urlDrag) return;
-  e.preventDefault();        // 组件外松手也要吃掉默认行为（否则浏览器可能去导航）
-  _urlApplySlot();
-});
-document.addEventListener("dragend", () => { _urlApplySlot(); });
-$("#ceUrls").addEventListener("keydown", e => {
-  const grip = e.target.closest(".url-grip");
-  if(!grip || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
-  e.preventDefault();   // 不吃掉方向键就会翻页滚动
-  const row = grip.closest(".url-row"), box = $("#ceUrls");
-  const rows = [...box.children], i = rows.indexOf(row);
-  const j = e.key === "ArrowUp" ? i - 1 : i + 1;
-  if(j < 0 || j >= rows.length) return;   // 到头：不标未保存
-  const b = e.key === "ArrowUp" ? rows[j] : rows[j + 1] || null;
-  if(b) box.insertBefore(row, b); else box.appendChild(row);
-  _ceUrlsApplyReorder();
-  // 重渲全是新节点，焦点必须按**新行序**找回同一行的手柄，否则每按一次就被踢回文档开头
-  document.querySelectorAll("#ceUrls .url-grip")[j]?.focus();
-});
+/* 地址行：顺序即优先级（服务端按序取第一个可达），所以顺序必须可改。落盘走 ceStash，
+   它会滤掉空行（空串不是地址），所以拖动一个空行落定后它会消失 */
+bindGripDrag("#ceUrls", ".url-row", ".url-grip",
+  () => { ceStash(); state.cfgEdit.dirty = true; renderCeUrls(); });
+/* 声明行：顺序本身无语义（每条靠模型名认身份），给重排是为了把同类模型摆一起核对；
+   同样以 DOM 为事实源——ceStash 按 DOM 顺序重建 model_profiles */
+bindGripDrag("#ceProfiles", ".mp-row", ".mp-grip",
+  () => { ceStash(); state.cfgEdit.dirty = true; renderCeProfiles(); });
 function ceUrlAdd(){
   const p = ceCurrent();
   if(!p) return;   // provider 删光后点「+ 添加地址」：无编辑目标，直接忽略
@@ -3050,6 +3239,7 @@ async function closeCfgDrawer(){
 }
 function onDrawerKey(e){
   if(e.key === "Escape"){
+    if($("#kindPop")){ kindPopClose(); return; }   // 浮窗开着先收浮窗
     // 内联添加面板开着时 Esc 先收面板：一路把抽屉关掉会把用户刚勾的模型全选丢掉
     if(!$("#ceProfileAdd").hidden){ ceProfileAddClose(); return; }
     closeCfgDrawer(); return;
@@ -3112,14 +3302,10 @@ function ceClearKey(){
 $("#ceKey").addEventListener("input", () => { state.cfgEdit.keyClear = false; });   // 重新输入即取消清除
 /* 部署条目：头部行（组内拖动手柄 + 折叠/复制/删除）+ 字段体；标签输入实时同步到头部 */
 function depHTML(d, i){
-  // 上限/类型已移交「模型上限与类型」（ADR-0118）：表单不再画这两个控件，但旧值必须随行
-  // 走一遍——ceStash 按 data-* 原样带回，绝不能在这里写 undefined 抹掉配置文件里的残留
-  const legacy = [];
-  if(d.max_ctx) legacy.push(`max_ctx=${d.max_ctx}`);
-  if(d.kinds || d.kind) legacy.push(`kinds=${depKinds(d).join("/")}`);
-  return `<div class="dep-edit${d._collapsed ? " collapsed" : ""}"`
-    + ` data-lmc="${esc(d.max_ctx || "")}" data-lkinds="${esc((d.kinds || []).join(","))}"`
-    + ` data-lkind="${esc(d.kind || "")}">
+  // 上限/类型已移交「模型类型及上下文」且旧字段已废弃（ADR-0118/0122）：本表单既不画
+  // 这两个控件，也不再经 data-* 把旧值带回 PUT 载荷（带回也没人读：服务端保存时会
+  // 折算进声明并丢弃它们，旧值在 GET 视图里已经以声明形式回到前端）
+  return `<div class="dep-edit${d._collapsed ? " collapsed" : ""}">
     <div class="dep-head">
       <span class="dgrip" draggable="true" tabindex="0" role="button"
         aria-label="部署「${esc(d.label || `部署环境 ${i+1}`)}」：上下键组内移动，左右键换组"
@@ -3147,11 +3333,6 @@ function depHTML(d, i){
         <div><label class="f" for="dep-${i}-quants">模型量化（可多选，逗号分隔，首个生效）</label><input type="text" id="dep-${i}-quants" class="d-quants" value="${esc((d.quants||[]).length ? d.quants.join(", ") : (d.quant||""))}"></div>
         <div><label class="f" for="dep-${i}-kvq">KV 量化（可多选，逗号分隔，首个生效）</label><input type="text" id="dep-${i}-kvq" class="d-kv-quants" value="${esc((d.kv_quants||[]).join(", "))}"></div>
       </div>
-      ${legacy.length ? `<div class="hint">这里只填来源信息（会进测速表头的 deploy/framework/quant）。`
-        + `上限与类型改到「模型上限与类型」维护；本条的历史值（${esc(legacy.join("、"))}）`
-        + `原样留在配置里，但不再参与计算</div>`
-        : `<div class="hint">这里只填来源信息（会进测速表头的 deploy/framework/quant）；`
-        + `上限与类型请到「模型上限与类型」里声明</div>`}
       <label class="f" for="dep-${i}-hw">硬件环境</label><input type="text" id="dep-${i}-hw" class="d-hardware" value="${esc(d.hardware||"")}">
       <label class="f" for="dep-${i}-fw">推理框架</label><input type="text" id="dep-${i}-fw" class="d-framework" value="${esc(d.framework||"")}">
       <label class="f" for="dep-${i}-params">核心参数</label><input type="text" id="dep-${i}-params" class="d-params" value="${esc(d.params||"")}">
@@ -3497,13 +3678,14 @@ function ceStash(){
   // 报错——静默合并会让用户以为两条都生效；上限写法不认识也不得写盘（会改掉钳制口径）
   const prof = []; const dupNames = []; const profErr = [];
   for(const el of document.querySelectorAll("#ceProfiles .mp-row")){
-    const model = el.querySelector(".mp-model").value.trim();
+    const model = (el.dataset.model || "").trim();
     if(!model) continue;
     if(prof.some(f => f.model === model)){ dupNames.push(model); continue; }
-    const checked = [...el.querySelectorAll(".mp-kind-cb")].filter(x => x.checked).map(x => x.value);
-    const kinds = KIND_ORDER.filter(k => checked.includes(k));
-    const mc = parseCtx(el.querySelector(".mp-ctx").value);
-    if(Number.isNaN(mc)) profErr.push(`模型 ${model} 的上限写法不认识（可用 8K / 128K / 1M 或纯数字）`);
+    const picked = (el.dataset.kinds || "").split(",").filter(Boolean);
+    const kinds = KIND_ORDER.filter(k => picked.includes(k));
+    const mc = parseTok(el.querySelector(".mp-ctx").value);
+    if(Number.isNaN(mc)) profErr.push(
+      `模型 ${model} 的上下文要写正整数 tokens（如 132072），留空 = 不设上限`);
     prof.push({model, kinds: kinds.length ? kinds : ["llm"], max_ctx: mc || undefined});
   }
   if(dupNames.length) profErr.push(`模型重复声明：${[...new Set(dupNames)].join("、")}（同一模型只留一条）`);
@@ -3513,10 +3695,8 @@ function ceStash(){
     const gName = g.querySelector(".g-name").disabled ? ""
       : (g.querySelector(".g-name").value || "").trim();
     return [...g.querySelectorAll(".dep-edit")].map(el => {
-      // 能力集多选（kinds 数组）与量化多选（quants / kv_quants 数组，按 /[,，]/
-      // 拆分去空白）：kinds 按 KIND_ORDER 归序、[llm] 缺省与空数组落 undefined，
-      // 旧单值 kind/quant 字段不再写出（与服务端校验同口径，服务端读取时归一旧配置）
-      const legacyKinds = (el.dataset.lkinds || "").split(",").filter(Boolean);
+      // 量化多选（quants / kv_quants 数组，按 /[,，]/ 拆分去空白）：空数组落 undefined。
+      // 上限与类型不在本段产出（ADR-0122）：它们只在 model_profiles 里，旧字段已废弃
       const splitArr = sel => sel.value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
       const quants = splitArr(el.querySelector(".d-quants"));
       const kvQuants = splitArr(el.querySelector(".d-kv-quants"));
@@ -3525,12 +3705,6 @@ function ceStash(){
         models: el.querySelector(".d-models").value.split(/[,，]/).map(s => s.trim()).filter(Boolean),
         quants: quants.length ? quants : undefined,
         kv_quants: kvQuants.length ? kvQuants : undefined,
-        // 上限/类型不再由本表单产出（ADR-0118）：旧值从 data-* 原样带回，落盘当历史。
-        // 空值必须回 undefined 而不是 []——服务端把 `kinds: []` 判成"须为非空数组"会拒 400；
-        // 旧单值 kind 也一并带回（服务端读到时归一成 kinds，值不丢）
-        max_ctx: +el.dataset.lmc || undefined,
-        kinds: legacyKinds.length ? legacyKinds : undefined,
-        kind: !legacyKinds.length && el.dataset.lkind ? el.dataset.lkind : undefined,
         hardware: el.querySelector(".d-hardware").value.trim(),
         framework: el.querySelector(".d-framework").value.trim(),
         params: el.querySelector(".d-params").value.trim(),
@@ -3776,19 +3950,19 @@ async function refreshModels(){
       groups.get(sig).undeclared ||= undeclared;
     }
     const ord = k => KIND_ORDER.includes(k) ? KIND_ORDER.indexOf(k) : KIND_ORDER.length;
-    // 组序：主类型 KIND_ORDER → 同主类型时纯能力在前、多能力在后（「文本」排在
-    // 「文本+图像」前面）
+    // 组序：主类型 KIND_ORDER → 同主类型时纯能力在前、多能力在后（`text` 排在
+    // `text+image` 前面）
     const sorted = [...groups.values()].sort((a, b) =>
       ord(a.kinds[0]) - ord(b.kinds[0]) || (a.kinds.length - b.kinds.length));
     const ckOf = m => ckHtml("model", m, m, mem ? mem.includes(m) : true);
     const isPlainLlm = g => g.kinds.length === 1 && g.kinds[0] === "llm";
-    const titleOf = g => isPlainLlm(g) ? "文本（默认）"
-      : g.kinds.map(k => KIND_SHORT[k] || KIND_LABEL[k] || esc(k)).join("+");
+    const titleOf = g => isPlainLlm(g) ? `${KIND_LABEL.llm}（默认）`
+      : g.kinds.map(k => KIND_LABEL[k] || esc(k)).join("+");
     box.innerHTML = d.models.length
       ? sorted.map(g => {
           const n = g.models.filter(m => !(m in (state.modelKinds || {}))).length;
           const tip = (g.undeclared && isPlainLlm(g))
-            ? `其中 ${n} 个模型未在部署环境里声明类型，按「文本生成」处理` : "";
+            ? `其中 ${n} 个模型未声明类型，按「${KIND_LABEL.llm}」处理` : "";
           return `<div class="ckgroup"${tip ? ` title="${esc(tip)}"` : ""}>${titleOf(g)}</div>`
             + g.models.map(ckOf).join("");
         }).join("")
@@ -4034,12 +4208,24 @@ function ceMsg(msg, kind, hold){
   clearTimeout(ceMsgTimer);
   el.textContent = msg || "";
   el.className = "ce-msg" + (kind && kind !== "info" ? " " + kind : "");
-  el.hidden = !msg;
-  if(msg && !hold) ceMsgTimer = setTimeout(() => { el.hidden = true; el.textContent = ""; }, 4000);
+  // 清空只抹文本，不碰 display：槽位本身定高（见 .ce-msg 的 min-height），
+  // 一收一放都不推动按钮——用 hidden 收起就等于每次反馈都让底栏抖一下
+  if(msg && !hold) ceMsgTimer = setTimeout(() => { el.textContent = ""; }, 4000);
 }
+/* 配置类提示**只落抽屉底栏**（ADR-0115 追加决策四）：以前这里还双写一份主面板
+   （顶部状态灯 + 测速控制台下的 `#statusMsg`），有三个害处——①状态灯的 `#statusText`
+   被"配置已保存并即时生效"顶掉，而且一直挂到下一次运行事件才恢复，那是运行状态位，
+   不该被一次性提示占用；②`setPill(msg, "")` 会顺手把 error 配色清掉，运行报错的状态
+   被一句配置提示擦干净；③三个 `aria-live` 区域（pill / `#statusMsg` / `#ceMsg`）同时
+   播报同一句话，读屏里是三重影。抽屉开着时主面板在遮罩后（追加决策三），那份副本
+   本来就看不见；抽屉关着时它倒是可见——所以留一条兜底：**容器不在眼前就把提示改投
+   主状态行**，否则提示会落进一个没人看着的地方 */
 function ceTell(msg, kind){
-  setPill(msg, kind === "err" ? "err" : "");
-  ceMsg(msg, kind, kind === "err" || kind === "warn");
+  if($("#drawerRoot").classList.contains("open")){
+    ceMsg(msg, kind, kind === "err" || kind === "warn");
+  } else {
+    setPill(msg, kind === "err" ? "err" : "");
+  }
 }
 function setPill(msg, cls){
   $("#statusText").textContent = msg;
@@ -4579,15 +4765,10 @@ function timeoutClampNote(raw){
   return { clamped: false, effective: v };
 }
 
-/* 上下文上限的可读单位（ADR-0117）：展示与输入都用 128K / 1M 形态，内部一律 tokens
-   （config.json 存裸 tokens）。parseCtx 用 NaN 表示"非法"——null 是"留空"，0 也可能
-   是手滑，两者都不能当错误信号；往返必须幂等（fmtCtx 的产物 parseCtx 要能读回原值） */
-function fmtCtx(n){
-  if(!n || !(n > 0)) return "";
-  if(n >= 1048576 && n % 1048576 === 0) return `${n / 1048576}M`;
-  if(n >= 1024 && n % 1024 === 0) return `${n / 1024}K`;
-  return String(n);
-}
+/* 阶梯档位输入（ADR-0117 时代留下的可读单位）：档位本来就按 2 的幂设档，所以这里
+   仍收 128K / 1M 写法。**模型声明的上下文上限不走它**（ADR-0123 改用 parseTok，只认裸
+   tokens）。parseCtx 用 NaN 表示"非法"——null 是"留空"，0 也可能是手滑，两者都不能当
+   错误信号 */
 function parseCtx(v){
   const t = String(v == null ? "" : v).trim();
   if(!t) return null;
@@ -4597,7 +4778,17 @@ function parseCtx(v){
   const n = Math.round(parseFloat(m[1]) * mult);
   return n > 0 ? n : NaN;
 }
-const MP_PRESETS = [8192, 32768, 65536, 131072, 196608, 262144];
+/* 「模型类型及上下文」的上下文输入（ADR-0123）：**只认裸 tokens 正整数**——不做 K/M 换算、
+   不给预设档位下拉（预设档位全是 1024 的整倍数，而真实服务窗常常不是，如 132072；
+   换算与候选都在制造"界面上的数与 config.json 里的数对不上"）。
+   null = 留空（不设上限），NaN = 非法（不得当 0 或留空悄悄写盘） */
+function parseTok(v){
+  const t = String(v == null ? "" : v).trim().replace(/[\s,_]/g, "");
+  if(!t) return null;
+  if(!/^\d+$/.test(t)) return NaN;
+  const n = parseInt(t, 10);
+  return n > 0 ? n : NaN;
+}
 
 /* ===== §pure:end ===== */
 /* 会展示「均 x/批」的点（>=SPEC_MIN_TPC，<门槛本就不显示）；裁定判定用 */
@@ -5260,23 +5451,26 @@ const AUX_SHADES_DARK = {
   green:  ["#4ADE80", "#22C55E", "#86EFAC", "#BBF7D0", "#22C55E", "#4ADE80"],
   orange: ["#FB923C", "#F97316", "#FDBA74", "#FED7AA", "#F97316", "#FB923C"],
 };
-/* 系列调色板解析：导出（白底 PNG）与非深色界面走浅色，页内深色图走亮阶 */
+/* 系列调色板解析：跟实时主题（卡片与导出图同源同色，不再分两套）。
+   forExport 只管图例排版（静态图里 scroll 图例翻页点不动），不再管颜色 */
 function seriesPal(forExport){
-  if(!forExport && isDarkUI())
+  if(isDarkUI())
     return {conc:CONC_COLORS_DARK, mx:MX_COLORS_DARK, aux:AUX_SHADES_DARK};
   return {conc:CONC_COLORS, mx:MX_COLORS, aux:AUX_SHADES};
 }
 /* 图表主题色：canvas 不认 CSS 变量，此处集中定义且与 :root 令牌同源——
-   CHART_LIGHT 是**浅色字面值**（导出图专用：卡片是分享物，页面切深色不得把
-   PNG 一起改黑），CHART 是**实时主题下的图色**，由 syncChartTheme() 从
+   CHART_LIGHT 是**浅字面值**（只当 syncChartTheme 读不到真 DOM 时的回退，例如
+   node 测试桩），CHART 是**实时主题下的图色**，由 syncChartTheme() 从
   getComputedStyle 现读令牌覆盖（界面灰与图表灰自此同源，主题切换只需重跑）。
    系列调色板同理分两套：浅色沿用原色（单并发矩阵观感不变），深色换成同色相的
    亮阶变体（深色底上 #4F46E5 接近不可见，indigo-400 以上才够 3:1 非文本对比） */
 const CHART_LIGHT = {ink:"#111827", gray:"#5F6775", border:"#D1D5DB", soft:"#E5E7EB",
   grid:"#F3F4F6", amber:"#D97706", tip:"#FFFFFF"};
 const CHART = {...CHART_LIGHT};
-/* 导出路径（forExport=true）与离屏卡片出图恒取浅色；页内交互图取实时主题 */
-const chartPal = forExport => forExport ? CHART_LIGHT : CHART;
+/* 图表取色**只有一个入口、只跟实时主题**：页内曲线、卡内离屏图、导出 PNG 同源。
+   （曾有 forExport 分支恒取浅色，目的是“卡片是分享物不得改黑”，代价是切主题时
+   全站换完只它白着，且卡内 PNG 颜色与卡面分叉） */
+const chartPal = () => CHART;
 function syncChartTheme(){
   try{
     const cs = getComputedStyle(document.documentElement);
@@ -5295,8 +5489,8 @@ const chartAnim = () => !window.matchMedia || !matchMedia("(prefers-reduced-moti
 /* forExport=true 用于卡片离屏出图：静态 PNG 里 scroll 图例的翻页器点不动，
    第二页系列会永久丢失，故图例改回自动换行的普通型并按行数抬高 grid */
 function buildChartOpt(pts, metric, title, forExport){
-  /* 主题解析：在本函数内**遮蔽**全局 CHART/调色板——导出（白底 PNG）恒取浅色常量，
-   页内交互图取实时主题色。函数体里的 CHART.gray / CONC_COLORS 等引用因此无需逐处改 */
+  /* 主题解析：在本函数内**遮蔽**全局 CHART/调色板（chartPal 只跟实时主题），
+   函数体里的 CHART.gray / CONC_COLORS 等引用因此无需逐处改 */
   const CHART = chartPal(forExport);
   const {conc:CONC_COLORS, mx:MX_COLORS, aux:AUX_SHADES} = seriesPal(forExport);
   const C = CHART;   // 短别名：tooltip 底色等只在本函数内用到的主题字段
@@ -5456,7 +5650,7 @@ function buildChartOpt(pts, metric, title, forExport){
    倍速跨度大时用对数轴），"decode" 槽位画并发吞吐（audio_min_per_min / img_per_s）。
    多线叠加与空值跳过沿用 llm 图的既有逻辑 */
 function buildMediaChartOpt(pts, metric, title, forExport, kind){
-  /* 主题解析同 buildChartOpt：导出恒浅色，页内随主题 */
+  /* 主题解析同 buildChartOpt：都跟实时主题 */
   const CHART = chartPal(forExport);
   const {conc:CONC_COLORS} = seriesPal(forExport);
   const C = CHART;
@@ -6063,7 +6257,7 @@ function cardHTML(model){
       </div>
       <div class="sc-head-r">
         ${tools}
-        <div class="sc-date">测试时间<br>${esc(state.cfg?.started_at || new Date().toLocaleString("zh-CN"))}</div>
+        <div class="sc-date"><span>测试时间</span><br>${esc(state.cfg?.started_at || new Date().toLocaleString("zh-CN"))}</div>
       </div>
     </div>
     <div class="sc-model">${esc(model)}</div>
@@ -6114,7 +6308,7 @@ function captureScenarioCharts(model, scens){
       const sel = state.cardLegend[cardLegendKey(model, sc, metric)];
       if(sel && Object.keys(sel).length) opt.legend = {...opt.legend, selected:{...sel}};
       offChart.setOption(opt, true);
-      out[sc][metric] = offChart.getDataURL({pixelRatio:2, backgroundColor:"#FFFFFF"});
+      out[sc][metric] = offChart.getDataURL({pixelRatio:2, backgroundColor:"transparent"});
     }
   }
   return out;
@@ -6271,7 +6465,9 @@ async function downloadCard(){
     const parts = [];
     for(const card of cards){
       // 卡片配置工具组（图例/明细按钮）是编辑控件，不入导出图（图例选择本身已渲染在图表里）
-      parts.push(await html2canvas(card, {scale:2, backgroundColor:"#FFFFFF", useCORS:true,
+      parts.push(await html2canvas(card, {scale:2,
+        backgroundColor: getComputedStyle(card).backgroundColor,   // 卡面实时色：导出不抢色
+        useCORS:true,
         ignoreElements: el => el.classList && el.classList.contains("sc-tools")}));
     }
     const gap = 48;   // canvas 已按 scale=2 放大，48px 视觉上 ≈ 24px 间隔
@@ -6286,6 +6482,10 @@ async function downloadCard(){
     const canvas = document.createElement("canvas");
     canvas.width = w; canvas.height = h;
     const ctx = canvas.getContext("2d");
+    /* 拼接前先把画布铺成卡面实时色：卡片之间的 48px 缝与不等宽卡两侧的余量不能留
+       透明像素——浅色下看图器给白底看不出来，深色卡里就是一圈发亮的透缝 */
+    ctx.fillStyle = getComputedStyle(cards[0]).backgroundColor || "#FFFFFF";
+    ctx.fillRect(0, 0, w, h);
     let y = 0;
     for(const c of parts){
       ctx.drawImage(c, (w - c.width) / 2, y);
@@ -6859,8 +7059,7 @@ function cmpScenSummaryHTML(sc, entries){
    三系列）；单并发档保持经典（Prefill/TTFT、净速/净耗时）。图已按并发档
    拆分，系列名不再缀 ·并发N */
 function buildCmpChartOpt(entries, metric, title, conc){
-  /* 对比图只服务卡片/PNG（captureCmpCharts 与图例槽位枚举）：恒取浅色主题 */
-  const CHART = CHART_LIGHT;
+  /* 对比图也跟实时主题（卡片跟随换肤）：直接取全局实时 CHART，不再遮蔽成浅色 */
   const ents = entries.map(e => ({...e, pts: e.pts.filter(p => p.concurrency === conc)}))
     .filter(e => e.pts.length);
   if(!ents.length) return null;
@@ -6931,8 +7130,7 @@ function buildCmpChartOpt(entries, metric, title, conc){
    口径）。指标集与单次卡片一致：TTFT/总时长（s）取小为优、Prefill/Decode
    净口径速度。该并发档无矩阵点返回 null（调用方不出图） */
 function buildCmpAgentMxChartOpt(entries, metric, title, conc){
-  /* 同上：agent 矩阵对比图也只出到卡片，恒浅色 */
-  const CHART = CHART_LIGHT;
+  /* 同上：agent 矩阵对比图跟实时主题 */
   const ents = entries.map(e => ({...e,
       pts: e.pts.filter(p => p.concurrency === conc && p.inst_tokens != null)}))
     .filter(e => e.pts.length);
@@ -7088,7 +7286,7 @@ function cmpCardHTML(){
       </div>
       <div class="sc-head-r">
         ${cardToolsHTML(offChart && Object.keys(imgs).length > 0)}
-        <div class="sc-date">最新一次<br>${esc(runs[runs.length - 1].started_at || "-")}</div>
+        <div class="sc-date"><span>最新一次</span><br>${esc(runs[runs.length - 1].started_at || "-")}</div>
       </div>
     </div>
     <div class="sc-model">${esc(models.join("  vs  "))}</div>
