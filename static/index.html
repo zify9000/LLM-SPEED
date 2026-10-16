@@ -341,13 +341,19 @@ select{appearance:none; -webkit-appearance:none; padding-right:32px;
 #deployList{display:grid; grid-template-columns:repeat(auto-fit, minmax(340px, 1fr)); gap:10px}
 .deploy-item + .deploy-item{margin-top:0}
 /* 单条（含"未映射"提示条）时**内部改成横向字段带**：条目名/状态/适用打头占一行，
-   四个字段并排铺满，每个字段是「小标签在上、值在下」的格子——短键值直接横着排会各
+   其余字段并排铺满，每个字段是「小标签在上、值在下」的格子——短键值直接横着排会各
    自长短不一，标签上墙才对齐；窄屏（竖屏）格子自然换行，一样不缩角。纯 CSS 用
-   :only-child 判定，不动渲染逻辑 */
-#deployList > .deploy-item:only-child{display:grid; gap:10px 26px; align-content:start;
-  grid-template-columns:repeat(auto-fit, minmax(210px, 1fr))}
-#deployList > .deploy-item:only-child .dn{grid-column:1/-1; margin-bottom:-2px}
-#deployList > .deploy-item:only-child .kv{display:block; margin-top:0; min-width:0}
+   :only-child 判定，不动渲染逻辑。
+   这里必须是 **flex 而不是再来一层 auto-fit 网格**（同一条用户反馈的第二次踩坑）：
+   auto-fit 的轨道数按**宽度**算而不按**字段数**算——1320px 内容宽下 minmax(210px,1fr)
+   铺出 5 条轨道，而 `.dn` 跨 1/-1 又让 Chromium 判定这些轨道都不算空、拒绝折叠，于是
+   只有 1 个字段（「未映射」提示条）时它落在第 1 轨、宽 243px，剩下 4 轨空着——整段提示
+   挤在左侧一列里换二十行。flex 的 `flex:1 1 210px` 按**实际字段数**均分：1 个字段独占
+   整行、5 个字段五等分，换行的那一行同样铺满 */
+#deployList > .deploy-item:only-child{display:flex; flex-wrap:wrap; gap:10px 26px;
+  align-content:start}
+#deployList > .deploy-item:only-child .dn{flex:0 0 100%; margin-bottom:-2px}
+#deployList > .deploy-item:only-child .kv{display:block; flex:1 1 210px; margin-top:0; min-width:0}
 #deployList > .deploy-item:only-child .kv .k{display:block; min-width:0; margin-bottom:2px;
   font-size:var(--fs-micro); letter-spacing:.02em}
 #deployList > .deploy-item:only-child .kv .v{display:block}
