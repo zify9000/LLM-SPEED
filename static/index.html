@@ -82,6 +82,7 @@
   --t-1:120ms; --t-2:180ms; --t-3:280ms;   /* 微交互 / 状态切换 / 入场 */
   --ease-std:cubic-bezier(.32,.72,.05,1);  /* 抽屉、位移 */
   --ease-out:cubic-bezier(.16,1,.3,1);     /* 入场（快进慢出） */
+  --ease-spring:cubic-bezier(.34,1.45,.48,1); /* 弹动：小幅过冲再回稳（赛道 actor/填充的追赶感） */
   /* 阴影阶梯（浅色）：双层 = 贴地线影 + 环境光晕，单层 1px 影线显「纸片」 */
   --shadow:0 1px 2px rgba(16,24,40,.04), 0 4px 10px -4px rgba(16,24,40,.06);
   --sh-1:0 1px 2px rgba(16,24,40,.04), 0 4px 10px -4px rgba(16,24,40,.06);
@@ -247,7 +248,7 @@ nav h1{font-size:15px; font-weight:600}
 #statusMsg.err{color:var(--red)}
 /* 运行事件常驻留痕（跳档/重试/失败）：status 行是瞬态的、toast 会自动消失，
    须留痕的事件追加到这里（point_skipped.msg、toast 状态事件）。
-   **不放在 KPI 卡里**：日志条目会把「已完成测试点」卡顶到三倍高，整行 KPI 跟着走形 */
+   **不放在 KPI 卡里**：日志条目会把 KPI 带顶到三倍高、整带走形 */
 .runlog{background:var(--card); border:1px solid var(--border); border-left:2px solid var(--yellow-border);
   border-radius:var(--r-md); padding:10px 14px; margin:-6px 0 20px; box-shadow:var(--card-hi), var(--sh-1)}
 .runlog .rl-head{font-size:var(--fs-micro); font-weight:600; color:var(--ink-3);
@@ -260,42 +261,153 @@ nav h1{font-size:15px; font-weight:600}
 /* 主数值 = 本视图最大的字（字号阶梯顶格），口径说明退到脚注档；
    指标区分靠数值本身的颜色（prefill 靛/decode 绿/完成点数 紫），卡面不再加
    左侧色条——整排白卡上的色竖条显硬，像被选中（颜色不单独承载信息：
-   标题文字已写明 Prefill/Decode/进行中/已完成） */
+   标题文字已写明各格是什么） */
 /* 四张浮卡 → 一条通栏指标带：格子间的分隔用发丝线不用空隙（Stripe/Linear 式
-   指标条）。容器承担边框/圆角/阴影，格子本身扁平——四个散卡是「模板感」，
-   一条带才是「仪表」 */
-.kpis{display:grid; grid-template-columns:repeat(4,1fr); margin-bottom:24px;
+   指标条）。容器承担边框/圆角/阴影，格子本身扁平——散卡是「模板感」，
+   一条带才是「仪表」。
+   只剩两格（Prefill / Decode）——「进行中请求」与「已完成测试点」两格已删（用户
+   拍板 2026-10-16：这两项本来不重要，实时表逐行已在说同样的事） */
+.kpis{display:grid; grid-template-columns:1fr 1fr; margin-bottom:24px;
   background:var(--card); border:1px solid var(--border); border-radius:var(--r-lg);
   box-shadow:var(--card-hi), var(--sh-1); overflow:hidden}
-.kpi{padding:16px 20px 14px}
+/* KPI 格 = 上头部（左：标题+口径 / 右：大数字+档名）+ 下赛道（横贯整格）。
+   2026-10-16 ADR-0131：半圆时速表退役改赛道——圆表塞进扁条的一切别扭（弧内
+   碎字被针穿、表盘下半虚空、两翼空白）病根都是容器与图形不匹配；赛道天生撑满
+   格宽，「内容撑满容器」从对齐技巧升级为图形自带（pitfalls/crosscut/03）。 */
+.kpi{padding:12px 22px 8px; display:flex; flex-direction:column; gap:8px}
 .kpi + .kpi{border-left:1px solid var(--border-3)}
-.kpi .k{font-size:var(--fs-sm); font-weight:500; color:var(--ink-3); margin-bottom:2px}
+/* 头部 = 2×2 基线网格：标题 ∥ 大数字同一基线、口径 ∥ 档名同一基线——左右两列
+   各自堆叠时行高不同（28px 数字 vs 小字），顶部对齐必然错行；按行基线对齐才齐。
+   标题提档 600/--ink-2：要撑住左列对抗 28px 大数字（旧 500/ink-3 被压没 =「左侧虚」）；
+   口径保持 ink-4 小字，与 accent 档名一静一动 */
+.kpi .ktop{display:grid; grid-template-columns:1fr auto; column-gap:16px; row-gap:4px;
+  align-items:baseline}
+.kpi .k{font-size:var(--fs-md); font-weight:600; color:var(--ink-2)}
 .kpi .v{font-size:var(--fs-num); font-weight:700; color:var(--ink); font-variant-numeric:tabular-nums;
-  line-height:1.15; letter-spacing:-.02em; display:flex; align-items:baseline; gap:6px}
+  line-height:1.15; letter-spacing:-.02em; display:flex; align-items:baseline;
+  justify-self:end; gap:6px}
 .kpi .v small{font-size:var(--fs-md); font-weight:500; color:var(--ink-3); letter-spacing:0}
 .kpi .v .est{font-size:.62em; font-weight:600; color:var(--ink-4); align-self:center;
   letter-spacing:0; cursor:help}
-.kpi .d{font-size:var(--fs-sm); margin-top:6px; line-height:1.5; color:var(--ink-4)}
-.kpi.prefill .v{color:var(--primary)}
-.kpi.decode .v{color:var(--green)}
-.kpi.prog .v{color:var(--violet)}
-.progbar{height:8px; background:var(--track); border-radius:var(--r-pill); overflow:hidden; margin-top:10px}
-.progbar > div{height:100%; border-radius:var(--r-pill); width:0%;
-  background:var(--bar,linear-gradient(90deg,var(--primary),var(--primary-hover)));
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.30);   /* 填充条顶部一道光泽：实心色块显呆板 */
-  transition:width var(--t-3) var(--ease-std)}
-/* 进度条走同色相的渐增（从轨道色淡入到语义色）：硬撞的双色渐变在浅色卡上偏艳，
-   且旧写法的固定十六进位在浅色主题下比 --green/--primary 本身亮得多（跨主题串色） */
-#decodeBarWrap > div{--bar:linear-gradient(90deg, color-mix(in srgb, var(--green) 45%, var(--track)), var(--green))}
-#prefillBarWrap > div{--bar:linear-gradient(90deg, color-mix(in srgb, var(--primary) 45%, var(--track)), var(--primary))}
-#progWrap > div{--bar:linear-gradient(90deg, color-mix(in srgb, var(--violet) 45%, var(--track)), var(--violet))}
-/* 运行中的进度条走一层流动光泽：静态宽度看不出「还在跑」，但数值本身不得被动画抢戏
-   （只在 body[data-phase=run] 时出现；prefers-reduced-motion 由全局规则归零） */
-body[data-phase="run"] .progbar > div{position:relative}
-body[data-phase="run"] .progbar > div::after{content:""; position:absolute; inset:0;
-  background:linear-gradient(90deg,transparent,rgba(255,255,255,.32),transparent);
-  transform:translateX(-100%); animation:sheen 2.6s var(--ease-std) infinite}
-@keyframes sheen{to{transform:translateX(100%)}}
+.kpi .d{font-size:var(--fs-micro); line-height:1.5; color:var(--ink-4)}
+.kpi .tname{font-size:var(--fs-micro); font-weight:600; line-height:1.6; justify-self:end;
+  transition:opacity var(--t-1)}
+.kpi .tname.est{opacity:.55}       /* 估值帧：档名同步降透明，不冒充实测 */
+.kpi.prefill .v,.kpi.prefill .tname{color:var(--primary)}
+.kpi.decode .v,.kpi.decode .tname{color:var(--green)}
+
+/* 赛道（ADR-0131）：轨 = --track 细条；fill = 已跑过的路（accent 渐变 + 辉光，
+   宽度过渡走弹簧，小幅冲过头再收——像真加速）；检查站刻线双色——已过站 = 卡色缝、
+   未到站 = 灰（前方的站看得见，赛道才是关卡序列）；里程碑数字在轨下水平排开（旧表盘「弧内碎字
+   被针穿」的死结，这里有一整行宽度可摆）。actor 骑在轨上：位置 = 读数、
+   种类 = 档位（🚶🏃🚴🚗🚄）——诙谐落在数据本体上，不再是旁边的贴纸。
+   光粒子拖尾随档加密加速（走路无、高铁五颗最快），升档瞬间爆一小把（「扫针的
+   爽感」挪到冲线瞬间）。位移动画幅度 ±2px 内；reduced-motion 由全局规则压平
+   （burst 的 animationend 照样触发，一次性粒子自动自删）。颜色全走令牌 → 换肤
+   零 JS；几何见 trkSet */
+.trk{position:relative; height:40px; transition:opacity var(--t-2) var(--ease-std)}
+.trk.idle{opacity:.4}              /* 空读数：😴 站起点 + 整轨压暗，不画假读数 */
+.trk-rail{position:absolute; left:0; right:0; top:14px; height:5px;
+  border-radius:var(--r-pill); background:var(--track)}
+.trk-fill{position:absolute; left:0; top:14px; height:5px; width:0;
+  border-radius:var(--r-pill); transition:width 320ms var(--ease-spring)}
+.kpi.prefill .trk-fill{background:linear-gradient(90deg,
+    color-mix(in srgb, var(--primary) 42%, var(--track)), var(--primary));
+  box-shadow:0 0 6px color-mix(in srgb, var(--primary) 55%, transparent)}
+.kpi.decode .trk-fill{background:linear-gradient(90deg,
+    color-mix(in srgb, var(--green) 42%, var(--track)), var(--green));
+  box-shadow:0 0 6px color-mix(in srgb, var(--green) 55%, transparent)}
+.trk-tick{position:absolute; top:13px; width:2px; height:7px; margin-left:-1px;
+  background:color-mix(in srgb, var(--ink-4) 40%, var(--track))}
+.trk-tick.past{background:var(--card)}   /* 已过站 = 卡色缝（fill 覆盖处打通）；未到站 = 灰，前方可见 */
+.trk-num{position:absolute; top:26px; font-size:10px; font-weight:500; color:var(--ink-4);
+  font-variant-numeric:tabular-nums; transform:translateX(-50%)}
+.trk-num.l0{transform:none}
+.trk-num.l1{transform:translateX(-100%)}
+.trk-actor{position:absolute; top:1px; left:0; transform:translateX(-50%); z-index:2;
+  transition:left 320ms var(--ease-spring)}    /* 引擎 0.4s 一帧，弹簧追得上 */
+.trk-actor .aveh{position:relative; display:inline-flex; font-size:16px; line-height:1}
+.trk-actor .actor{display:inline-block}
+.trk-actor .aveh::before{content:""; position:absolute; inset:-7px; border-radius:50%;
+  opacity:0; transition:opacity var(--t-2)}    /* actor 脚下辉光碟：发车后才点亮 */
+.trk:is(.t0,.t1,.t2,.t3,.t4) .aveh::before{opacity:1}
+.kpi.prefill .aveh::before{background:radial-gradient(circle,
+  color-mix(in srgb, var(--primary) 32%, transparent), transparent 68%)}
+.kpi.decode .aveh::before{background:radial-gradient(circle,
+  color-mix(in srgb, var(--green) 32%, transparent), transparent 68%)}
+.trk.t0 .actor{animation:gBob .80s ease-in-out infinite}  /* 走路：慢颠 */
+.trk.t1 .actor{animation:gBob .42s ease-in-out infinite}  /* 跑步：快颠 */
+.trk.t2 .actor{animation:gBob .30s ease-in-out infinite}  /* 自行车：更快 */
+.trk.t3 .actor{animation:gShiver .18s linear infinite}    /* 小汽车：引擎抖 */
+.trk.t4 .actor{animation:gShiver .11s linear infinite}    /* 高铁：高频抖 */
+.trk.idle .actor{animation:gSleep 2.6s ease-in-out infinite}  /* 待发车：打盹 */
+.trk.est .trk-actor,.trk.est .trk-fill{opacity:.55}   /* 估值帧降透明，实测来了才实色 */
+.trk-actor.pop .aveh{animation:gPop .38s var(--ease-std)} /* 升档弹一下（降档不弹） */
+/* 光粒子拖尾：从 actor 身上向后飘散；档位越高颗数越多、飞得越快
+   （t1=2 颗 / t2=4 颗 / t3=5 颗 / t4=6 颗全放） */
+.spark{position:absolute; display:none; left:1px; top:50%; width:4px; height:4px;
+  margin-top:-2px; border-radius:50%; pointer-events:none;
+  animation:gSpark 1s linear infinite}
+.kpi.prefill .spark{background:var(--primary);
+  box-shadow:0 0 6px 1px color-mix(in srgb, var(--primary) 75%, transparent)}
+.kpi.decode .spark{background:var(--green);
+  box-shadow:0 0 6px 1px color-mix(in srgb, var(--green) 75%, transparent)}
+.trk:is(.t1,.t2,.t3,.t4) .spark.s1,.trk:is(.t1,.t2,.t3,.t4) .spark.s2,
+.trk:is(.t2,.t3,.t4) .spark.s3,.trk:is(.t2,.t3,.t4) .spark.s4,
+.trk:is(.t3,.t4) .spark.s5,.trk.t4 .spark.s6{display:block}
+.trk.t1 .spark{animation-duration:1.3s}
+.trk.t2 .spark{animation-duration:1s}
+.trk.t3 .spark{animation-duration:.75s}
+.trk.t4 .spark{animation-duration:.55s}
+.spark.s2{animation-delay:-.45s; --sy:4px}
+.spark.s3{animation-delay:-.7s; --sy:-5px}
+.spark.s4{animation-delay:-.28s; --sy:5.5px}
+.spark.s5{animation-delay:-.58s; --sy:-2px}
+.spark.s6{animation-delay:-.85s; --sy:3px}
+@keyframes gSpark{0%{transform:translate(2px,0) scale(1); opacity:.95}
+  55%{opacity:.55}
+  100%{transform:translate(-26px,var(--sy,-3px)) scale(.2); opacity:0}}
+/* 常亮彗尾：actor 身后一小段柔光带——粒子负责「飘散」，它负责「一直在」 */
+.trk-actor .aveh::after{content:""; position:absolute; right:55%; top:50%;
+  width:20px; height:6px; margin-top:-3px; border-radius:var(--r-pill);
+  filter:blur(1.5px); opacity:0; transition:opacity var(--t-2)}
+.trk:is(.t1,.t2,.t3) .aveh::after{opacity:.75}
+.trk.t4 .aveh::after{opacity:.9; width:28px}
+.kpi.prefill .aveh::after{background:linear-gradient(270deg,
+  color-mix(in srgb, var(--primary) 60%, transparent), transparent)}
+.kpi.decode .aveh::after{background:linear-gradient(270deg,
+  color-mix(in srgb, var(--green) 60%, transparent), transparent)}
+/* 车级加两条速度线（向后掠） */
+.streak{position:absolute; right:calc(100% + 2px); width:7px; height:2px;
+  border-radius:2px; background:var(--ink-4); opacity:0; display:none}
+.streak.s1{top:22%}
+.streak.s2{top:64%}
+.trk.t3 .streak,.trk.t4 .streak{display:block; animation:gStreakL .5s linear infinite}
+.trk.t4 .streak{animation-duration:.3s}
+.trk.t3 .streak.s2,.trk.t4 .streak.s2{animation-delay:.16s}
+@keyframes gStreakL{0%{transform:translateX(0);opacity:0}25%{opacity:.75}
+  100%{transform:translateX(-9px);opacity:0}}
+/* 升档冲线爆：一小把光粒子从 actor 身上炸开（JS 一次性挂 .burst，播完即删） */
+.burst{position:absolute; left:50%; top:50%; pointer-events:none}
+.burst i{position:absolute; width:4px; height:4px; margin:-2px; border-radius:50%;
+  animation:gBurstP .55s var(--ease-std) forwards}
+.kpi.prefill .burst i{background:var(--primary);
+  box-shadow:0 0 6px 1px color-mix(in srgb, var(--primary) 75%, transparent)}
+.kpi.decode .burst i{background:var(--green);
+  box-shadow:0 0 6px 1px color-mix(in srgb, var(--green) 75%, transparent)}
+.burst i:nth-child(1){--bx:-22px; --by:-10px}
+.burst i:nth-child(2){--bx:-26px; --by:3px}
+.burst i:nth-child(3){--bx:-15px; --by:11px}
+.burst i:nth-child(4){--bx:9px; --by:-12px}
+.burst i:nth-child(5){--bx:12px; --by:8px}
+.burst i:nth-child(6){--bx:-8px; --by:-15px}
+@keyframes gBurstP{0%{transform:translate(0,0) scale(1.1); opacity:1}
+  60%{opacity:.7}
+  100%{transform:translate(var(--bx),var(--by)) scale(.15); opacity:0}}
+@keyframes gBob{0%,100%{transform:translateY(0)}50%{transform:translateY(-1.8px)}}
+@keyframes gShiver{0%,100%{transform:translateY(0)}50%{transform:translateY(-.7px)}}
+@keyframes gSleep{0%,100%{transform:scale(1)}50%{transform:scale(1.08) translateY(-.5px)}}
+@keyframes gPop{0%{transform:scale(.65)}55%{transform:scale(1.16)}100%{transform:scale(1)}}
 
 /* ============ 布局（配置平铺 + 主区，随阶段聚焦） ============ */
 /* 配置区左右两块（ADR-0109，原三等等分）：左 = 基础设置（「Provider 与模型」
@@ -307,10 +419,10 @@ body[data-phase="run"] .progbar > div::after{content:""; position:absolute; inse
   align-items:start; margin-bottom:20px}
 .cfg-grid .card{margin-bottom:0}
 #deployCard{grid-column:1/-1}
-@media (max-width:1100px){ .kpis{grid-template-columns:repeat(2,1fr)}
-  /* 两列排布时第三格回到行首：格线从「竖缝」换成「横缝」 */
-  .kpis .kpi:nth-child(3){border-left:none}
-  .kpis .kpi:nth-child(n+3){border-top:1px solid var(--border-3)} }
+/* 窄到 640 以下两格单列堆叠（格线从竖缝换横缝）；赛道横贯自适应，无需额外收小 */
+@media (max-width:640px){ .kpis{grid-template-columns:1fr}
+  .kpis .kpi + .kpi{border-left:none; border-top:1px solid var(--border-3)}
+  .kpi{gap:6px; padding:12px 16px 8px} }
 @media (max-width:720px){ .cfg-grid{grid-template-columns:1fr} }
 .card{background:var(--card); border:1px solid var(--border); border-radius:var(--r-lg);
   box-shadow:var(--card-hi), var(--sh-1); margin-bottom:20px}
@@ -338,6 +450,9 @@ select{appearance:none; -webkit-appearance:none; padding-right:32px;
   background-image:var(--chevron); background-repeat:no-repeat;
   background-position:right 10px center; background-size:14px}
 .hint{color:var(--ink-4); font-size:var(--fs-micro); margin-top:5px; line-height:1.55}
+/* 运行时长 / 粗估 ETA 从 KPI 第三栏搬进「实时测速」卡头右侧（那块仅 run 阶段
+   可见，与 ETA 同命）；KPI 带里不再摆第三行小字 */
+#liveCard .card-head #runElapsed{margin-left:auto; margin-top:0}
 /* 部署环境（跟随选中模型自动展示，只读） */
 .deploy-item{border:1px solid var(--border); border-radius:10px; padding:12px 14px; background:var(--bg)}
 /* 部署环境条目分列。这里必须是 **auto-fit 而不是 auto-fill**：auto-fill 会把放不下的
@@ -507,134 +622,231 @@ input[type=checkbox]:disabled,input[type=radio]:disabled{opacity:.45; cursor:not
   transition:transform var(--t-3) var(--ease-std), visibility 0s .28s}
 #drawerRoot.open #drawerScrim{opacity:1}
 #drawerRoot.open #cfgDrawer{transform:none; visibility:visible; transition-delay:0s, 0s}
-/* 历史删除/对比/改名/拼接/通用确认弹窗：居中对话框，复用抽屉的遮罩/头/底样式 */
-#delModalRoot, #cmpModalRoot, #renModalRoot, #spliceModalRoot, #uiDialogRoot{position:fixed; inset:0; z-index:110}
-#delModalScrim, #cmpModalScrim, #renModalScrim, #spliceModalScrim, #uiDialogScrim{position:absolute; inset:0; background:var(--scrim)}
+/* 存档改名/通用确认弹窗：居中对话框，复用抽屉的遮罩/头/底样式 */
+#renModalRoot, #gmModalRoot, #uiDialogRoot{position:fixed; inset:0; z-index:110}
+#renModalScrim, #gmModalScrim, #uiDialogScrim{position:absolute; inset:0; background:var(--scrim)}
 /* 先写 vh 再写 dvh：不认 dvh 的浏览器落回 vh（至少不塌成 0 高），
    认的浏览器用后一条覆盖（移动端地址栏伸缩时不会被裁掉半截） */
-#delModal, #cmpModal, #renModal, #spliceModal, #uiDialog{position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+#renModal, #gmModal, #uiDialog{position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
   width:min(640px, calc(100vw - 32px)); max-height:80vh; max-height:80dvh; display:flex; flex-direction:column;
   background:var(--bg); border:1px solid var(--border-2); border-radius:var(--r-xl);
   box-shadow:var(--sh-pop)}
 /* 弹窗入场：从遮罩里微微浮起（缩放+淡入，150ms 内完成，不得拖慢响应感）；
    纯 CSS 挂在 :not([hidden]) 上，JS 只管开关 hidden，不需配合动画 */
-#delModalRoot:not([hidden]) #delModal, #cmpModalRoot:not([hidden]) #cmpModal,
-#renModalRoot:not([hidden]) #renModal, #spliceModalRoot:not([hidden]) #spliceModal,
+#renModalRoot:not([hidden]) #renModal,
+#gmModalRoot:not([hidden]) #gmModal,
 #uiDialogRoot:not([hidden]) #uiDialog{animation:pop var(--t-2) var(--ease-out)}
 @keyframes pop{from{opacity:0; transform:translate(-50%,-48%) scale(.97)}
   to{opacity:1; transform:translate(-50%,-50%) scale(1)}}
-#delModalRoot:not([hidden]) #delModalScrim, #cmpModalRoot:not([hidden]) #cmpModalScrim,
-#renModalRoot:not([hidden]) #renModalScrim, #spliceModalRoot:not([hidden]) #spliceModalScrim,
+#renModalRoot:not([hidden]) #renModalScrim,
+#gmModalRoot:not([hidden]) #gmModalScrim,
 #uiDialogRoot:not([hidden]) #uiDialogScrim{animation:fade var(--t-2) ease}
 @keyframes fade{from{opacity:0} to{opacity:1}}
 /* 通用确认弹窗体量小一档 */
 #uiDialog{width:min(460px, calc(100vw - 32px))}
 #uiDialogInput{width:100%}
-/* ---------- 历史记录浮层与分组列表（ADR-0125）----------
-   下拉框换浮层的硬理由：原生 <optgroup> **不能折叠、不能带条数、不能带复选**，
-   要的东西一件也做不到。四处消费方（载入浮层 / 对比 / 删除 / 拼接）共用这一套
-   组件（旧版四处各自渲染，且候选行是一整条长串，几十行没有视觉锚点）。
-   浮层三件套与「…」菜单同规：--card 底 + --border-2 描边 + --sh-pop 影，
-   默认向上开、上方放不下才 .down 翻转（令牌名写错不报错、只静默失效，
-   已由 check_frontend_js.sh 的「CSS 令牌存在性」门禁兑住） */
-.hist-pickwrap{position:relative; flex:1; min-width:240px; display:flex}
-.hist-pick{display:flex; align-items:center; gap:8px; width:100%; height:38px; padding:0 10px;
-  background:var(--field-fill); border:1px solid var(--field-line); border-radius:var(--r-sm);
-  color:var(--ink); font:inherit; font-size:var(--fs-md); text-align:left; cursor:pointer}
-.hist-pick:hover{border-color:var(--field-border)}
-.hist-pick[aria-expanded="true"]{border-color:var(--primary); box-shadow:0 0 0 3px var(--primary-ring)}
-.hist-pick .pp-t{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
-.hist-pick .pp-t.empty{color:var(--ink-3)}
-.hist-pick .chev{flex:none; color:var(--ink-3)}
-/* 浮层比触发按钮宽得多（一行位置装不下搜索框 + 维度 + 列表），但仍以触发按钮左沿
-   为锚；窄屏靠 max-width 卡住，不致溢出视口 */
-.hist-pop{position:absolute; left:0; right:auto; bottom:calc(100% + 6px); z-index:60;
-  width:min(680px, calc(100vw - 48px));
-  background:var(--card); border:1px solid var(--border-2); border-radius:var(--r-md);
-  box-shadow:var(--sh-pop); display:flex; flex-direction:column; overflow:hidden}
-.hist-pop.down{bottom:auto; top:calc(100% + 6px)}
-.hist-pop[hidden]{display:none}
-/* 工具条：搜索 + 归组入口（只在载入浮层）+ 全选/清空（弹窗里的旧 .del-toolbar 已被它取代） */
-.hp-bar{display:flex; align-items:center; gap:8px; padding:9px 12px; flex-wrap:wrap;
-  background:var(--card); border-bottom:1px solid var(--border)}
-.hp-search{flex:1 1 200px; min-width:0; height:32px}
-/* 披露行：共多少条、只显示最近 N 条、搜索走的是全集——静默截断不允许复活 */
-.hp-disc{padding:6px 12px; color:var(--ink-3); font-size:var(--fs-micro);
-  border-bottom:1px solid var(--border-3)}
-.hp-disc[hidden]{display:none}
-/* 提示行：默认灰字（只是把状态说出来），`.soft` 拿掉时才是黄底——只有“超出曲线色数”
-   那种真墙才配拉警报（口径混排这类“你自己判断”的信息染黄 = 天天喊狼来了，ADR-0115） */
-.hp-warn{padding:7px 12px; background:var(--yellow-soft); color:var(--yellow); font-size:var(--fs-sm);
-  border-bottom:1px solid var(--border-3)}
-.hp-warn.soft{background:none; color:var(--ink-3)}
-.hp-warn[hidden]{display:none}
-/* 已选条：选择集**独立于视图**——折叠/搜索都不清选，但必须看得见选了谁
-   （包括藏在收起组里的那些），“已选 5 条”不能是个黑箱 */
-.hp-chips{display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding:8px 12px;
-  background:var(--primary-soft); border-bottom:1px solid var(--border)}
-.hp-chips[hidden]{display:none}
-.hp-chips .hp-n{font-size:var(--fs-sm); color:var(--ink-2); flex:none}
-.hp-chip{display:inline-flex; align-items:center; gap:4px; padding:3px 4px 3px 9px; max-width:100%;
+/* 分组合并弹窗：组选项行（勾选框 + 组名 + 条数）竖排；目标组名输入与提示 */
+#gmModal{width:min(520px, calc(100vw - 32px))}
+.gm-list{display:flex; flex-direction:column; gap:2px; margin:2px 0 14px;
+  max-height:min(320px, 44vh); overflow-y:auto; overscroll-behavior:contain;
+  border:1px solid var(--border); border-radius:var(--r-md); padding:4px}
+.gm-opt{display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:var(--r-sm);
+  cursor:pointer; min-width:0}
+.gm-opt:hover{background:var(--hover)}
+.gm-opt input{margin:0; flex:none}
+.gm-opt .gm-n{flex:1; min-width:0; font-size:var(--fs-md); overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap}
+.gm-opt .gm-c{flex:none; color:var(--ink-4); font-size:var(--fs-micro);
+  font-variant-numeric:tabular-nums}
+.gm-msg{min-height:1.2em; margin:8px 0 0; font-size:var(--fs-sm); color:var(--red)}
+.gm-msg:empty{margin:0}
+/* ---------- 历史浏览器抽屉（ADR-0132：五面归一）----------
+   骨架与 Provider 抽屉同族（右贴边滑出 + 遮罩），但宽一档：左栏组导航 + 右栏记录列表。
+   一个抽屉承担 查看 / 对比 / 归组 / 删除 / 拼接选源——旧五面（浮层+三弹窗+台账）退役 */
+#histDrawerRoot{position:fixed; inset:0; z-index:100}
+#histDrawerScrim{position:absolute; inset:0; background:var(--scrim);
+  opacity:0; transition:opacity var(--t-2) ease; cursor:default}
+#histDrawer{position:absolute; top:0; right:0; height:100vh; height:100dvh;
+  width:min(940px, 100vw); background:var(--bg); border-left:1px solid var(--border-2);
+  box-shadow:var(--sh-pop); transform:translateX(102%);
+  display:flex; flex-direction:column; visibility:hidden;
+  /* 与 #cfgDrawer 同手法：关闭态 visibility 延迟 .28s，滑出动画不被立即隐藏吞掉 */
+  transition:transform var(--t-3) var(--ease-std), visibility 0s .28s}
+#histDrawerRoot.open #histDrawerScrim{opacity:1}
+#histDrawerRoot.open #histDrawer{transform:none; visibility:visible; transition-delay:0s, 0s}
+/* 拼接选源模式条：抽屉就地换模式（旧版要单开一个弹窗）。黄底=真墙语义不适用，
+   这只是模式提示，用常态信息色 */
+.hd-modebar{display:flex; align-items:center; gap:10px; padding:9px 16px; flex:none;
+  background:var(--primary-soft); border-bottom:1px solid var(--border);
+  color:var(--ink-2); font-size:var(--fs-sm)}
+.hd-modebar b{color:var(--ink); font-weight:600}
+.hd-modebar[hidden]{display:none}
+.hd-modebar .btn-ghost{margin-left:auto; flex:none}
+/* 两栏主体：左组导航，右记录列表 */
+.hd-body{flex:1; min-height:0; display:grid; grid-template-columns:272px minmax(0,1fr);
+  position:relative; overflow:hidden}
+.hd-side{display:flex; flex-direction:column; min-height:0; border-right:1px solid var(--border);
+  background:var(--card)}
+.hd-groups{flex:1; overflow-y:auto; padding:8px; overscroll-behavior:contain;
+  display:flex; flex-direction:column; gap:1px}
+.hd-side-foot{display:flex; flex-direction:column; gap:6px; padding:10px; flex:none;
+  border-top:1px solid var(--border)}
+.hd-side-foot .nav-btn{text-align:left}
+/* 组导航行：点名 = 过滤到该组；hover 出 ⋯（改名/备注/并入/解散）；拖拽的投放目标 */
+.hd-gitem{display:flex; align-items:center; gap:6px; padding:7px 9px;
+  border-radius:var(--r-sm); cursor:pointer; border:1px dashed transparent; color:var(--ink-2)}
+.hd-gitem:hover{background:var(--hover)}
+.hd-gitem.on{background:var(--primary-soft); color:var(--primary)}
+.hd-gitem .hg-ic{flex:none; color:var(--ink-4)}
+.hd-gitem.on .hg-ic{color:var(--primary)}
+.hd-gitem .hg-n{flex:1; min-width:0; font-size:var(--fs-md); font-weight:500;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.hd-gitem .hg-c{flex:none; color:var(--ink-4); font-size:var(--fs-micro);
+  font-variant-numeric:tabular-nums}
+.hd-gitem .hg-note{flex:1 1 100%; padding-left:26px; color:var(--ink-4); font-size:var(--fs-micro);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.hd-gitem.dropok{border-color:var(--primary); background:var(--primary-soft)}
+.hd-gitem .hg-op{flex:none; width:24px; height:24px; padding:0; border:0; border-radius:var(--r-xs);
+  background:none; color:var(--ink-4); cursor:pointer; display:none;
+  align-items:center; justify-content:center}
+.hd-gitem:hover .hg-op, .hd-gitem:focus-within .hg-op{display:inline-flex}
+.hd-gitem .hg-op:hover{background:var(--card); color:var(--ink-2)}
+.hd-gsep{height:1px; background:var(--border); margin:6px 4px; flex:none}
+/* 主栏：搜索条 + 披露行 + 提示行 + 记录列表 */
+.hd-main{display:flex; flex-direction:column; min-height:0; min-width:0}
+.hd-bar{display:flex; align-items:center; gap:8px; padding:10px 14px; flex:none;
+  border-bottom:1px solid var(--border); background:var(--card)}
+.hd-search{flex:1 1 180px; min-width:0; height:32px}
+.hd-sidetab{display:none}   /* 窄屏才出现：点开左栏组导航的覆盖层 */
+.hd-disc{padding:6px 14px; color:var(--ink-3); font-size:var(--fs-micro);
+  border-bottom:1px solid var(--border-3); flex:none}
+.hd-disc:empty{display:none}
+/* 提示行纪律照旧：默认灰字说状态，只有"超出曲线配色数"这种真墙才黄底 */
+.hd-warn{padding:7px 14px; background:var(--yellow-soft); color:var(--yellow);
+  font-size:var(--fs-sm); border-bottom:1px solid var(--border-3); flex:none}
+.hd-warn.soft{background:none; color:var(--ink-3)}
+.hd-warn[hidden]{display:none}
+.hd-list{flex:1; overflow-y:auto; padding:10px 14px; overscroll-behavior:contain;
+  display:flex; flex-direction:column; gap:6px; align-content:flex-start}
+/* 「全部」视图里的组节头：组名是折叠开关（点 = 收/展本组记录，纯展示态不切过滤），左侧整组勾选照旧 */
+.hd-sec-t{display:flex; align-items:center; gap:8px; padding:8px 4px 2px; color:var(--ink-3);
+  font-size:var(--fs-micro); font-weight:600; letter-spacing:.02em}
+.hd-sec-t .hd-sec-n{cursor:pointer; color:var(--ink-2); display:inline-flex; align-items:center; gap:5px}
+.hd-sec-t .hd-sec-n:hover{color:var(--primary)}
+.hd-sec-t .hd-sec-n .ic{width:13px; height:13px; color:var(--ink-4);
+  transition:transform var(--t-2) var(--ease-std)}
+.hd-sec-t .hd-sec-n[aria-expanded="false"] .ic{transform:rotate(-90deg)}
+.hd-sec-t input{margin:0}
+/* 记录行：两行式——主行 时间(等宽) + 模型名 + 备注【尾串】；次行 备注/场景/上下文/并发/口径。
+   单击行 = 选中/取消（未选中行立即加选；已选中行等双击窗口过后取消）；双击行 = 载入（浏览态）；
+   勾选框与单击选中同源（hdSel），旧浮层"勾选即为了载入又为了归组"的混乱就此拆开 */
+.hd-row{display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center;
+  gap:10px; padding:8px 10px; background:var(--card); border:1px solid var(--border);
+  border-radius:var(--r-md); cursor:pointer; position:relative;
+  transition:border-color var(--t-1) var(--ease-out), background var(--t-1) var(--ease-out)}
+.hd-row:hover{border-color:var(--border-2)}
+.hd-row:focus-visible{outline:2px solid var(--primary); outline-offset:1px}
+.hd-row.on{border-color:var(--primary); background:var(--primary-soft)}
+/* 当前载入的那条：左沿 accent 竖条（比徽标安静，扫一眼就知道自己在哪儿） */
+.hd-row.cur{box-shadow:inset 3px 0 0 var(--primary)}
+.hd-row input.hd-ck{margin:0}
+.hd-rowtxt{min-width:0}
+/* 行名：时间 + 模型名 + 备注尾串（备注不再顶替模型名）。无备注时行为与旧版一致
+   （单行截断）；备注用灰字降权，总长超宽时靠父级 .hd-name 的 ellipsis 截断，
+   悬浮看全文 historyLabel */
+.hd-name{min-width:0; font-size:var(--fs-md); font-weight:500; color:var(--ink);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.hd-name-note{color:var(--ink-3)}
+.hd-r1{display:flex; align-items:baseline; gap:8px; min-width:0}
+.hd-time{flex:none; color:var(--ink-3); font-size:var(--fs-sm); font-family:var(--mono);
+  font-variant-numeric:tabular-nums}
+.hd-r2{margin-top:2px; color:var(--ink-4); font-size:var(--fs-micro);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+/* 行右：徽标（只有会改变结论的：失败点数；口径版本只在混排时才值得说，行内不贴）
+   + hover 才显形的动作（⋯）——默认干净，动作不抢读数 */
+.hd-side-r{display:flex; align-items:center; gap:6px; flex:none}
+.hd-badge{padding:1px 6px; border:1px solid var(--red-border); border-radius:var(--r-pill);
+  background:var(--red-soft); color:var(--red); font-size:var(--fs-micro);
+  font-variant-numeric:tabular-nums; white-space:nowrap}
+.hd-acts{display:flex; gap:2px; opacity:0; transition:opacity var(--t-1) var(--ease-out)}
+.hd-row:hover .hd-acts, .hd-row:focus-within .hd-acts, .hd-row.menu-open .hd-acts{opacity:1}
+.hd-acts .icon-btn{width:26px; height:26px}
+/* 拖拽手感：被抓起的行半透明，投放目标组行虚线高亮（.dropok 见上） */
+.hd-row.dragging{opacity:.45}
+/* 拼接选源模式：行 hover 变成"选它"的强调，点行 = 选为来源（单击，不等双击） */
+.hd-list.pick .hd-row:hover{border-color:var(--primary)}
+.hd-list.pick .hd-row{box-shadow:none}
+.hd-list.pick .hd-sec-t input{display:none}
+/* 按钮标签永不折行：窄屏下「全选当前」被拦腰折成两行看着像控件坏了（ADR-0123 同族） */
+.hd-bar .btn-ghost{white-space:nowrap; flex:0 0 auto}
+.hd-row.src{border-color:var(--primary); background:var(--primary-soft)}
+.hd-empty{padding:34px 12px; color:var(--ink-3); text-align:center; font-size:var(--fs-sm)}
+/* 底栏：无选集时一句引导；有选集时变动作条（对比/移动分组下拉/移出/删除/清空） */
+.hd-foot{display:flex; align-items:center; gap:8px; flex-wrap:wrap; min-height:54px}
+.hd-foot .hd-hint{margin:0; color:var(--ink-3); font-size:var(--fs-sm); flex:1; min-width:0}
+.hd-seln{font-size:var(--fs-sm); color:var(--ink-2); flex:none; font-variant-numeric:tabular-nums}
+.hd-chips{display:flex; align-items:center; gap:6px; flex-wrap:wrap; min-width:0; flex:1}
+.hd-chip{display:inline-flex; align-items:center; gap:4px; padding:3px 4px 3px 9px; max-width:220px;
   background:var(--card); border:1px solid var(--border-2); border-radius:var(--r-pill);
   font-size:var(--fs-micro); color:var(--ink-2)}
-.hp-chip b{font-weight:500; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
-.hp-chip button{flex:none; width:18px; height:18px; padding:0; border:0; border-radius:50%;
+.hd-chip b{font-weight:500; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.hd-chip button{flex:none; width:18px; height:18px; padding:0; border:0; border-radius:50%;
   background:none; color:var(--ink-3); cursor:pointer; display:inline-flex;
   align-items:center; justify-content:center}
-.hp-chip button:hover{background:var(--hover); color:var(--ink)}
-.hp-list{max-height:min(46vh, 460px); overflow-y:auto; padding:6px; overscroll-behavior:contain}
-.hp-sec{margin:0 0 4px}
-/* 组头：div 包住【整组勾选】+【折叠按钮（组名 · 条数 · 最近一次 · 场景）】+【组操作】。
-   不用 <button> 套 <input>（嵌套交互元素不合法），折叠自己是一个按钮 */
-.hp-head{display:flex; align-items:center; gap:7px; padding:5px 6px 5px 8px;
-  background:var(--head-bg); border-radius:var(--r-xs)}
-.hp-head:hover{background:var(--hover)}
-.hp-gck{margin:0; flex:none}
-.hp-foldb{display:flex; align-items:center; gap:7px; flex:1; min-width:0; padding:2px 0;
-  border:0; background:none; color:var(--ink-2); font:inherit; font-size:var(--fs-sm);
-  text-align:left; cursor:pointer}
-.hp-foldb .chev{flex:none; color:var(--ink-3); transition:transform var(--t-1) var(--ease-out)}
-.hp-foldb.closed .chev{transform:rotate(-90deg)}
-.hp-foldb .hg-k{flex:none; max-width:44%; font-weight:600; color:var(--ink); overflow:hidden;
-  text-overflow:ellipsis; white-space:nowrap}
-.hp-foldb .hg-m{flex:1; min-width:0; color:var(--ink-3); font-size:var(--fs-micro);
-  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
-.hp-gops{display:flex; gap:2px; flex:none}
-.hp-gop{padding:3px 7px; border:0; border-radius:var(--r-xs); background:none; color:var(--ink-3);
-  font:inherit; font-size:var(--fs-micro); cursor:pointer; white-space:nowrap}
-.hp-gop:hover{background:var(--card); color:var(--primary)}
-/* 记录行拆列：[控件] 时间 | 备注或模型（+灰色元信息）| 徽标。
-   等宽只给时间与数值列（ADR-0120 判据：字体按场合分，不按“它是标识符”分） */
-.hp-row{display:grid; grid-template-columns:auto auto minmax(0,1fr) auto; align-items:center;
-  gap:8px; padding:6px 8px; border-radius:var(--r-sm); cursor:pointer}
-.hp-row:hover{background:var(--hover)}
-.hp-row.on{background:var(--primary-soft)}
-.hp-row input{margin:0}
-.hp-t{color:var(--ink-2); font-size:var(--fs-sm); font-family:var(--mono);
-  font-variant-numeric:tabular-nums; white-space:nowrap}
-.hp-nm{min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:var(--fs-md)}
-.hp-nm i{font-style:normal; color:var(--ink-3); font-size:var(--fs-micro); margin-left:6px}
-.hp-bd{display:flex; gap:4px; align-items:center; flex:none}
-.hp-badge{padding:1px 5px; border:1px solid var(--border-2); border-radius:var(--r-pill);
-  color:var(--ink-3); font-size:var(--fs-micro); font-variant-numeric:tabular-nums; white-space:nowrap}
-.hp-badge.bad{border-color:var(--red-border); background:var(--red-soft); color:var(--red)}
-/* 当前控制台里开着的那条：浮层改成复选框后没有“选中即当前”这层含义了，得单独标出来
-   （不然打开浮层看不出自已在哪儿） */
-.hp-badge.cur{border-color:var(--primary); color:var(--primary)}
-.hp-empty{padding:18px 10px; color:var(--ink-3); text-align:center; font-size:var(--fs-sm)}
-.hp-foot{display:flex; align-items:center; gap:10px; padding:10px 12px; flex-wrap:wrap;
-  background:var(--card); border-top:1px solid var(--border)}
-.hp-foot .hint{margin:0; flex:1 1 100%}
-.hp-foot .hp-fbtns{display:flex; gap:8px; margin-left:auto}
+.hd-chip button:hover{background:var(--hover); color:var(--ink)}
+.hd-foot .hd-actsbar{display:flex; gap:8px; margin-left:auto; flex:none}
+/* 动作条里的「移动分组」下拉：与按钮同高同字号；宽度随组名（定宽会截断组名，
+   而看错目的地比多占几像素贵得多），超长由 max-width 收着出省略号 */
+.hd-foot select.hd-sel{min-height:31px; padding:5px 28px 5px 10px; font-size:var(--fs-sm);
+  max-width:240px; background-position:right 8px center; background-size:12px}
+/* 行/组共享的「⋯」上下文菜单：绝对定位于抽屉内，JS 按触发者落位 */
+.hd-menu{position:absolute; z-index:70; min-width:190px; padding:4px;
+  background:var(--card); border:1px solid var(--border-2); border-radius:var(--r-md);
+  box-shadow:var(--sh-pop); display:flex; flex-direction:column; gap:1px}
+.hd-menu[hidden]{display:none}
+.hd-mitem{display:flex; align-items:center; gap:9px; width:100%; padding:7px 9px; border:0;
+  border-radius:var(--r-xs); background:none; color:var(--ink); font:inherit;
+  font-size:var(--fs-md); text-align:left; cursor:pointer}
+.hd-mitem:hover{background:var(--hover)}
+.hd-mitem.danger{color:var(--red)}
+.hd-mitem.danger:hover{background:var(--red-soft)}
+.hd-mitem .ic{color:var(--ink-3); flex:none}
+.hd-mitem.danger .ic{color:var(--red)}
+/* 历史面板网格：左 = 快捷气泡（最新/常看两行），右 = 抽屉入口 */
+.hist-panel-grid{display:grid; grid-template-columns:minmax(0,1fr) auto; gap:6px 14px;
+  align-items:center}
+.hist-panel-grid.no-quick{grid-template-columns:auto}   /* 无气泡时按钮回左，不留空轨道 */
+.hist-panel-grid .hist-pick{width:auto; max-width:320px}  /* 右侧动作位，不再吃整行 */
+@media (max-width:560px){
+  .hist-panel-grid{grid-template-columns:1fr}
+  .hist-panel-grid .hist-pick{width:100%; max-width:none}
+}
+/* 快捷载入气泡：一行「最新」一行「常看」，各行至多 3 颗，pill 形态、点击直接载入 */
+.hd-quick{display:flex; flex-direction:column; gap:6px; min-width:0}
+.hd-quick[hidden]{display:none}
+.hd-qrow{display:flex; align-items:center; gap:6px; flex-wrap:wrap; min-width:0}
+.hd-qhint{color:var(--ink-4); font-size:var(--fs-micro); flex:none; width:26px}
+.hd-qchip{display:inline-flex; align-items:center; max-width:290px; height:28px;
+  padding:0 12px; background:var(--card); border:1px solid var(--border-2); border-radius:var(--r-pill);
+  color:var(--ink-2); font:inherit; font-size:var(--fs-sm); cursor:pointer;
+  transition:border-color var(--t-1) var(--ease-out), color var(--t-1) var(--ease-out)}
+.hd-qchip:hover{border-color:var(--primary); color:var(--primary); background:var(--primary-soft)}
+.hd-qchip .ic{flex:none; color:var(--ink-4)}
+.hd-qchip:hover .ic{color:var(--primary)}
+.hd-qchip b{font-weight:500; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+/* 窄屏：左栏收进覆盖层（顶栏文件夹钮开合），记录列表独占 */
+@media (max-width:720px){
+  .hd-body{grid-template-columns:1fr}
+  .hd-side{position:absolute; left:0; top:0; bottom:0; width:min(280px, 86%); z-index:20;
+    border-right:1px solid var(--border-2); box-shadow:var(--sh-pop);
+    transform:translateX(-103%); transition:transform var(--t-2) var(--ease-std);
+    visibility:hidden}
+  .hd-side.open{transform:none; visibility:visible}
+  .hd-sidetab{display:inline-flex}
+}
 /* 启动表单的「备注 / 分组」同行两格（窄屏自然回落单列） */
 .hp-two{display:grid; grid-template-columns:repeat(auto-fit, minmax(230px, 1fr));
   gap:4px 14px; align-items:end}
-.dr-body.flush{padding:0}
-@media (max-width:560px){
-  .hp-foldb .hg-k{max-width:60%}
-  .hp-row{grid-template-columns:auto auto minmax(0,1fr)}
-  .hp-row .hp-bd{grid-column:1/-1}
-}
 .dr-head{display:flex; align-items:flex-start; gap:12px; padding:16px 20px;
   background:var(--card); border-bottom:1px solid var(--border); flex:none}
 .dr-head h3{font-size:15px; font-weight:600}
@@ -731,7 +943,7 @@ input[type=checkbox]:disabled,input[type=radio]:disabled{opacity:.45; cursor:not
    想留呼吸只能加宽轨道 */
 .mp-row .mp-ctx{width:100%; min-width:0; text-align:right; font-variant-numeric:tabular-nums}
 /* 删除按钮与同行控件同高：全局 .icon-btn 是 36px 档，落在 38px 的控件行里就是上下各错
-   1px（同 .hist-row .icon-btn / .icon-btn.prov-act 的坑，必须双类才压得住） */
+   1px（同类名叠加才压得住全局 .btn-ghost 的坑） */
 .mp-row .mp-del{width:30px; height:38px}
 /* 类型入口＝"看起来就是个下拉框"：与全局 select 同一套（同 --field-fill/--field-line/
    圆角/38px、同一个 --chevron 底图、同 padding-right:32px）。自己画 SVG 时箭头紧贴文字，
@@ -928,30 +1140,6 @@ button:disabled{opacity:.45; cursor:not-allowed}
   background:transparent; border-radius:var(--r-sm); color:var(--ink-3)}
 .icon-btn:hover:not(:disabled){background:var(--hover); color:var(--ink-2)}
 .icon-btn.danger:hover:not(:disabled){background:var(--red-soft); color:var(--red)}
-/* 历史记录操作行：图标按钮与同行 38px 的下拉框同高（全局 .icon-btn 是 36px 档） */
-.hist-row{display:flex; align-items:center; gap:6px; flex-wrap:wrap}
-.hist-row .icon-btn{width:38px; height:38px}
-.hist-row .btn-ghost{height:38px; padding:0 13px}   /* 与同行 38px 的图标/下拉框同高（全局 .btn-ghost 靠 padding 撑高，会多出 1px） */
-/* 「…」菜单（ADR-0112）：备注/改名/拼接 三个低频记录级操作。默认**向上开**——历史卡
-   贴在配置区底部，向下开会被视口切掉；上方实在放不下才加 .down 翻到下方（先显形再量高，
-   hidden 时 offsetHeight 为 0，与阶梯浮层同一手法）。危险动作不进菜单。
-   **浮层必须自带卡面**：底 --card + 描边 --border-2 + 投影 --sh-pop，缺一样浮层就"溶"进
-   页面（用户截图：三项直接压在阶梯上，看不出是个浮层）。
-   坑：本项目令牌名是 --card / --border-2 / --hover / --ink-3，**没有** --surface、--line、
-   --surface2、--ink-soft、--ink-faint——写错不报错，只静默失效（底变透明），已由
-   tests/check_frontend_js.sh 的「CSS 令牌存在性」门禁兜住 */
-.hist-more{position:relative; flex:none}
-.hist-menu{position:absolute; right:0; bottom:calc(100% + 6px); z-index:60; min-width:230px;
-  background:var(--card); border:1px solid var(--border-2); border-radius:var(--r-md);
-  box-shadow:var(--sh-pop); padding:4px; display:flex; flex-direction:column; gap:2px}
-.hist-menu.down{bottom:auto; top:calc(100% + 6px)}
-.hist-menu[hidden]{display:none}
-.hm-item{display:flex; align-items:center; gap:9px; width:100%; padding:7px 8px; border:0;
-  border-radius:var(--r-xs); background:none; color:var(--ink); font:inherit; text-align:left; cursor:pointer}
-.hm-item:hover{background:var(--hover)}
-.hm-item .ic{color:var(--ink-3)}
-.hm-t{font-size:var(--fs-md); line-height:1.3}
-.hm-t i{display:block; font-style:normal; color:var(--ink-3); font-size:var(--fs-micro)}
 .btnrow{display:flex; gap:8px; margin-top:16px; flex-wrap:wrap}
 /* 按钮内加载态：启动/保存等异步动作期间给可见反馈（不得只靠 disabled 默默变灰） */
 .spin{width:14px; height:14px; border-radius:50%; flex:none;
@@ -1567,28 +1755,22 @@ tr.fade td{opacity:.45}
   <!-- KPI 行 -->
   <div class="kpis">
     <div class="kpi prefill">
-      <p class="k">实时 Prefill 速度</p>
-      <p class="v" id="kpiPrefill">– <small>tok/s</small></p>
-      <p class="d">全量：prompt tokens ÷（TTFT − RTT）；Agent 缓存档为增量口径：（prompt − 前缀命中）÷ TTFT</p>
-      <div class="progbar" id="prefillBarWrap" hidden><div id="prefillBarFill"></div></div>
+      <div class="ktop">
+        <p class="k">Prefill 速度</p>
+        <p class="v" id="kpiPrefill">– <small>tok/s</small></p>
+        <p class="d">prompt tokens ÷ <span style="white-space:nowrap">（TTFT − RTT）</span></p>
+        <p class="tname">待发车</p>
+      </div>
+      <div class="trk idle" id="trkPrefill" data-tiers="500,1000,2000,5000,10000" aria-hidden="true"></div>
     </div>
     <div class="kpi decode">
-      <p class="k">实时 Decode 速度</p>
-      <p class="v" id="kpiDecode">– <small>tok/s</small></p>
-      <p class="d">随 token 流持续刷新</p>
-      <div class="progbar" id="decodeBarWrap" hidden><div id="decodeBarFill"></div></div>
-    </div>
-    <div class="kpi reqs">
-      <p class="k">进行中请求</p>
-      <p class="v" id="kpiReqs">0 <small>个</small></p>
-      <p class="d">当前并发的流式请求数</p>
-    </div>
-    <div class="kpi prog">
-      <p class="k">已完成测试点</p>
-      <p class="v" id="kpiPoints">0 <small>/ 0</small></p>
-      <p class="d">模型 × 场景 × 上下文/轮次 × 并发</p>
-      <div class="progbar" id="progWrap" role="progressbar" aria-label="测速进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><div id="progFill"></div></div>
-      <div class="hint" id="runElapsed" hidden></div>
+      <div class="ktop">
+        <p class="k">Decode 速度</p>
+        <p class="v" id="kpiDecode">– <small>tok/s</small></p>
+        <p class="d">随 token 流持续刷新</p>
+        <p class="tname">待发车</p>
+      </div>
+      <div class="trk idle" id="trkDecode" data-tiers="10,30,50,100,300" aria-hidden="true"></div>
     </div>
   </div>
   <!-- 运行留痕（跳档/弃测重试/失败）：KPI 行只放读数，需回溯的事件单独一条 -->
@@ -1600,7 +1782,7 @@ tr.fade td{opacity:.45}
   <!-- ================= 主区 ================= -->
   <section id="mainCol">
       <div class="card" id="liveCard" hidden>
-        <div class="card-head"><h3>实时测速</h3><small>Prefill 等待期 1s、Decode 期 0.4s 刷新</small></div>
+        <div class="card-head"><h3>实时测速</h3><small>Prefill 等待期 1s、Decode 期 0.4s 刷新</small><div class="hint" id="runElapsed" hidden></div></div>
         <div class="tablewrap">
         <table id="liveTable">
           <thead><tr><th scope="col">模型</th><th scope="col">场景</th><th scope="col">上下文</th><th scope="col">并发</th><th scope="col" title="r = 请求序号；每点重复次数 >1 时带 ·repN 轮次后缀">请求</th><th scope="col">阶段</th><th scope="col">TTFT</th><th scope="col">输出 tokens</th><th scope="col">实时速度</th><th scope="col">耗时</th></tr></thead>
@@ -1643,51 +1825,23 @@ tr.fade td{opacity:.45}
   <!-- ================= 历史记录（与参数配置同级，可载入/对比/备注/改名/拼接/删除） ================= -->
   <section id="historyPanel">
     <div class="card">
-      <div class="card-head"><h3>历史记录</h3><small>自动保存于 results/ · 模拟运行不入库</small></div>
+      <div class="card-head"><h3>历史记录</h3><small>自动保存于 results/</small></div>
       <div class="card-body">
         <div id="activeRuns"></div>
-        <!-- 记录级操作（都作用于下拉里选中的那一条，ADR-0112）：
-             **主操作「载入」留文字**（图标版用户反馈不够直观，且它是这组唯一的主动作，
-             该有最高识别度）；「对比」用分栏框（=并排看两条记录），不用柱状图——柱状图
-             在这里会被读成"图表"；备注/改名/拼接 三个低频操作收进「…」菜单，横向再让一点
-             给下拉框；删除保持独立可见（危险动作不藏进菜单，藏了就变成误触的意外），且排在
-             「…」之前——删除是点错代价最高的动作，不该坐在行尾最顺手的位置。
-             图标按钮一律 aria-label + title，原长说明不删，只降为悬停可见 -->
-        <div class="hist-row">
-          <!-- **当前选中记录的唯一事实源仍是这个隐藏下拉框**：载入/备注/改名/拼接/复测/
-               删点等十余处都按 `#historySel.value` 取值与刷新后还原选中，浮层只负责
-               「写值 + 刷新显示」，不动它们的契约（换入口不换行为） -->
-          <select id="historySel" hidden aria-label="历史测速记录"></select>
-          <div class="hist-pickwrap" id="histPickWrap">
-            <button type="button" class="hist-pick" id="histPick" onclick="toggleHistPop()"
-                    aria-haspopup="dialog" aria-expanded="false"
-                    title="点开选择历史记录（可搜索、可按模型/天/分组折叠）">
-              <span class="pp-t empty" id="histPickT">选择历史记录…</span>
-              <svg class="ic chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
-            </button>
-            <!-- 浮层内部（搜索条 / 维度切换 / 披露行 / 分组列表 / 底栏）由 histViewMount 填充 -->
-            <div class="hist-pop" id="histPop" role="dialog" aria-label="选择历史记录" hidden></div>
-          </div>
-          <button class="btn-ghost" onclick="loadHistory()" title="载入：把选中记录读进控制台">
-            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v11"/><polyline points="7 10 12 15 17 10"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>载入
+        <!-- 历史面板 = 一张网格：左边「最新 / 常看」两行快捷气泡（最常用的动作 =
+             再看一眼刚跑过的，点一下直接载入，不该被迫开抽屉），右边抽屉入口按钮。
+             **当前载入记录的唯一事实源是 `state.histId`**（ADR-0130）：读写只走
+             `histCurrent()` / `histSetCurrent(id)` 两个口子，这颗按钮是它的显示面 -->
+        <div class="hist-panel-grid no-quick" id="histPanelGrid">
+          <div class="hd-quick" id="hdQuick" hidden></div>
+          <button type="button" class="hist-pick" id="histPick" onclick="toggleHistDrawer()"
+                  aria-haspopup="dialog" aria-expanded="false"
+                  title="打开历史浏览器：单击选中一条，双击载入控制台；勾多条可对比 / 归组 / 删除">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+            <span class="pp-t is-empty" id="histPickT">浏览历史记录…</span>
+            <svg class="ic chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
-          <button class="icon-btn" onclick="openCmpModal()" aria-label="对比多条记录"
-                  title="对比：勾选 ≥2 条记录，按模型合并生成对比卡片"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><line x1="12" y1="5" x2="12" y2="19"/></svg></button>
-          <button class="icon-btn danger" onclick="openDelModal()" aria-label="删除历史记录"
-                  title="删除：可勾选多条一起删（模拟运行不在列表内）"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
-          <div class="hist-more" id="histMoreWrap">
-            <button class="icon-btn" id="histMoreBtn" onclick="toggleHistMenu()" aria-label="更多操作"
-                    aria-haspopup="menu" aria-expanded="false" title="更多：备注 / 改名 / 拼接"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg></button>
-            <div class="hist-menu" id="histMenu" role="menu" aria-label="记录级更多操作" hidden>
-              <button class="hm-item" role="menuitem" onclick="histAct('note')"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.6 13.4 12 22l-9-9V4a1 1 0 0 1 1-1h9l7.6 7.6a2 2 0 0 1 0 2.8Z"/><circle cx="7.5" cy="7.5" r="1.4"/></svg>
-                <span class="hm-t">备注<i>给选中记录写/改备注</i></span></button>
-              <button class="hm-item" role="menuitem" onclick="histAct('rename')"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.4 3.6a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
-                <span class="hm-t">改名<i>把存档里的旧模型名改写为新名</i></span></button>
-              <button class="hm-item" role="menuitem" onclick="histAct('splice')"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.6 14.4 14.4 9.6"/><path d="M11 6.6l1.8-1.8a4 4 0 0 1 5.7 5.7L16.7 12.3"/><path d="M13 17.4l-1.8 1.8a4 4 0 0 1-5.7-5.7L7.3 11.7"/></svg>
-                <span class="hm-t">拼接<i>把另一条存档的测点并进来</i></span></button>
-            </div>
         </div>
-      </div>
     </div>
   </section>
 
@@ -1770,69 +1924,57 @@ tr.fade td{opacity:.45}
   </aside>
 </div>
 
-<!-- ========== 历史记录删除弹窗：勾选要删的记录，全选/全不选快捷 ========== -->
-<div id="delModalRoot" hidden tabindex="-1">
-  <div id="delModalScrim" onclick="closeDelModal()"></div>
-  <div id="delModal" role="dialog" aria-modal="true" aria-labelledby="delModalTitle">
+<!-- ========== 历史浏览器抽屉（ADR-0132：五面归一）==========
+     旧形状的五个面（载入浮层 / 对比 / 删除 / 拼接 / 分组台账）各自渲染同一份列表，
+     用户要在五个地方学五套规矩；现在只剩这一个抽屉：
+     双击行 = 载入（查看是成本最低的默认动作）；勾选 = 选集（对比/归组/删除都作用于它）；
+     左栏点组 = 过滤，拖到组名上 = 归组。改名弹窗（renModal）与 uiDialog 照旧复用 -->
+<div id="histDrawerRoot" hidden tabindex="-1">
+  <div id="histDrawerScrim" onclick="closeHistDrawer()"></div>
+  <aside id="histDrawer" role="dialog" aria-modal="true" aria-labelledby="histDrawerTitle">
     <header class="dr-head">
       <div style="flex:1; min-width:0">
-        <h3 id="delModalTitle">删除历史记录</h3>
-        <p class="dr-sub">勾选要删除的记录，删除后不可恢复</p>
+        <h3 id="histDrawerTitle">历史记录</h3>
+        <p class="dr-sub">单击选中一条 · 双击载入控制台 · 勾选多条可对比 / 归组 / 删除 · 拖到左侧组名上即归组</p>
       </div>
-      <button class="icon-btn" onclick="closeDelModal()" aria-label="关闭删除弹窗">
+      <button class="icon-btn" onclick="closeHistDrawer()" aria-label="关闭历史记录">
         <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </header>
-    <div class="dr-body flush"><div id="delView"></div></div>
-    <footer class="dr-foot">
-      <button class="btn-ghost" onclick="closeDelModal()">取消</button>
-      <button class="btn-ghost danger" id="btnDelConfirm" onclick="delConfirm()">删除所选</button>
-    </footer>
-  </div>
-</div>
-
-<!-- ========== 历史存档拼接弹窗：单选来源存档，合并进当前选中存档 ========== -->
-<div id="spliceModalRoot" hidden tabindex="-1">
-  <div id="spliceModalScrim" onclick="closeSpliceModal()"></div>
-  <div id="spliceModal" role="dialog" aria-modal="true" aria-labelledby="spliceModalTitle">
-    <header class="dr-head">
-      <div style="flex:1; min-width:0">
-        <h3 id="spliceModalTitle">拼接历史存档</h3>
-        <p class="dr-sub" id="spliceSub">选择来源存档，其全部测速点合并进当前选中存档：同身份点以来源覆盖、新点追加；拼接点带「⇢拼接」溯源徽标，操作留痕于目标存档</p>
+    <!-- 拼接选源模式条：抽屉就地换模式，不再单开弹窗 -->
+    <div class="hd-modebar" id="hdModeBar" hidden></div>
+    <div class="hd-body">
+      <nav class="hd-side" id="hdSide" aria-label="分组导航">
+        <div class="hd-groups" id="hdGroups"></div>
+        <div class="hd-side-foot">
+          <button type="button" class="btn-ghost nav-btn" onclick="hdNewGroup()">+ 新建组</button>
+          <button type="button" class="btn-ghost nav-btn" onclick="hdMergeGroups()"
+                  title="勾选 ≥2 个组并成一个（可自定义目标组名）">合并组</button>
+          <button type="button" class="btn-ghost nav-btn" onclick="hdAutoGroup()"
+                  title="把未归组的记录按各自的模型集合一次落组">自动建组（模型名）</button>
+        </div>
+      </nav>
+      <div class="hd-main">
+        <div class="hd-bar">
+          <button type="button" class="icon-btn hd-sidetab" id="hdSideTab" onclick="hdToggleSide()"
+                  aria-label="分组导航" aria-expanded="false"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>
+          <input class="hd-search" id="hdSearch" type="search" aria-label="搜索历史记录"
+                 placeholder="搜备注 / 模型 / 组名 / 日期 / 记录编号（走全部记录）">
+          <button type="button" class="btn-ghost nav-btn" id="hdSelVis"
+                  title="勾选当前视图里看得见的全部记录">全选当前</button>
+          <button type="button" class="btn-ghost nav-btn" id="hdSelNone"
+                  title="清空全部勾选（含其他组里的）">清空</button>
+        </div>
+        <div class="hd-disc" id="hdDisc"></div>
+        <div class="hd-warn" id="hdWarn" hidden></div>
+        <div class="hd-list" id="hdList"></div>
       </div>
-      <button class="icon-btn" onclick="closeSpliceModal()" aria-label="关闭拼接弹窗">
-        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-      </button>
-    </header>
-    <div class="dr-body flush"><div id="spliceView"></div></div>
-    <footer class="dr-foot">
-      <button class="btn-ghost" onclick="closeSpliceModal()">取消</button>
-      <button class="btn-ghost" id="btnSpliceConfirm" onclick="spliceConfirm()">拼接进当前存档</button>
-    </footer>
-  </div>
+    </div>
+    <footer class="dr-foot hd-foot" id="hdFoot"></footer>
+    <!-- 行/组的「⋯」上下文菜单：一个共享元素，按触发者换内容与落位 -->
+    <div class="hd-menu" id="hdMenu" role="menu" hidden></div>
+  </aside>
 </div>
-
-<!-- ========== 历史记录对比弹窗：勾选 ≥2 条记录合并生成对比卡片 ========== -->
-<div id="cmpModalRoot" hidden tabindex="-1">
-  <div id="cmpModalScrim" onclick="closeCmpModal()"></div>
-  <div id="cmpModal" role="dialog" aria-modal="true" aria-labelledby="cmpModalTitle">
-    <header class="dr-head">
-      <div style="flex:1; min-width:0">
-        <h3 id="cmpModalTitle">对比多次测速</h3>
-        <p class="dr-sub">勾选 ≥2 条记录，按模型合并生成对比卡片（曲线按运行分色叠加，可导出 PNG）</p>
-      </div>
-      <button class="icon-btn" onclick="closeCmpModal()" aria-label="关闭对比弹窗">
-        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-      </button>
-    </header>
-    <div class="dr-body flush"><div id="cmpView"></div></div>
-    <footer class="dr-foot">
-      <button class="btn-ghost" onclick="closeCmpModal()">取消</button>
-      <button class="btn-primary" id="btnCmpConfirm" onclick="cmpConfirm()">生成对比卡片</button>
-    </footer>
-  </div>
-</div>
-
 <!-- ========== 存档模型改名弹窗：本地部署改名后，把存档中的旧模型名改写为新名 ========== -->
 <div id="renModalRoot" hidden tabindex="-1">
   <div id="renModalScrim" onclick="closeRenameModal()"></div>
@@ -1857,6 +1999,35 @@ tr.fade td{opacity:.45}
     <footer class="dr-foot">
       <button class="btn-ghost" onclick="closeRenameModal()">取消</button>
       <button class="btn-primary" id="btnRenConfirm" onclick="renameConfirm()">改写存档</button>
+    </footer>
+  </div>
+</div>
+<!-- ========== 分组合并弹窗：勾选 ≥2 个组并成一个；目标组名默认取首个勾选组，
+     可自定义（已有同名组则并入那个，否则新建） ========== -->
+<div id="gmModalRoot" hidden tabindex="-1">
+  <div id="gmModalScrim" onclick="closeMergeModal()"></div>
+  <div id="gmModal" role="dialog" aria-modal="true" aria-labelledby="gmModalTitle">
+    <header class="dr-head">
+      <div style="flex:1; min-width:0">
+        <h3 id="gmModalTitle">合并分组</h3>
+        <p class="dr-sub">勾选要并掉的组（≥2 个）。记录整体移进目标组，源组消失；测速数据不动。不可撤销</p>
+      </div>
+      <button class="icon-btn" onclick="closeMergeModal()" aria-label="关闭合并弹窗">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </header>
+    <div class="dr-body">
+      <div id="gmList" role="group" aria-label="要合并的组"></div>
+      <label class="f" for="gmTarget">目标组名</label>
+      <input type="text" id="gmTarget" placeholder="留空 = 并入第一个勾选的组" maxlength="40"
+             onkeydown="if(event.key==='Enter')mergeConfirm()">
+      <div class="gm-msg" id="gmMsg" role="status" aria-live="polite"></div>
+      <div class="hint">留空目标名 = 并入第一个勾选的组；填了名字且已有同名组 = 并入那个已有组，
+        否则按该名字新建目标组。源组全部解散消失，记录整体移进目标组</div>
+    </div>
+    <footer class="dr-foot">
+      <button class="btn-ghost" onclick="closeMergeModal()">取消</button>
+      <button class="btn-primary" id="btnGmConfirm" onclick="mergeConfirm()">合并</button>
     </footer>
   </div>
 </div>
@@ -1941,7 +2112,8 @@ const esc = s => String(s).replace(/[&<>"']/g, c =>
    等已移入，可被 tests/run_frontend_pure.sh 原样提取做 DOM-free 单测） */
 
 const state = {points:new Map(), es:null, runId:null, running:false, cfg:null, maxSeq:-1,
-  activeReqs:new Set(), donePoints:0, totalPoints:0, providers:[], phase:"idle",
+  histId:"",              // 历史记录那一行的"当前选中存档"唯一事实源（ADR-0130，替掉隐藏 <select>）
+  donePoints:0, totalPoints:0, providers:[], phase:"idle",
   preMeasured:new Set(),   // 已出 prefill 实测帧的点（livePointKey）——估值帧不再回退其 KPI
   scenMeta:{},             // 场景元数据（/api/config 下发：label/kind/ladder/unit）
   defMediaLadder:{},       // 媒体场景（asr/ocr/tts）默认档位（场景 ladder，服务端下发）
@@ -2009,6 +2181,8 @@ function rethemeCharts(){
 
 /* ---------------- 初始化 ---------------- */
 async function init(){
+  resetKpis();   // 赛道几何是懒建的：首屏先建出压暗空轨（待发车态），否则标题行下
+                 // 一方空白等着第一个读数。须在 fetch 之前——离线/file:// 下 fetch 会败
   let cfg;
   try{ cfg = await (await fetch("/api/config")).json(); }
   catch(e){ setPill("配置加载失败：" + e.message, "err"); return; }
@@ -3103,20 +3277,24 @@ function bindGripDrag(boxSel, rowSel, gripSel, commit){
   let slot = null;   // 最后一次落点：插到该元素之前；null = 追加末尾
   function applySlot(){
     if(!drag) return;      // drop 已经落过 → dragend 到这里直接返回
-    const el = drag, host = box();
-    drag = null;
+    const el = drag, host = box(), at = slot;
+    drag = null; slot = null;
     el.classList.remove("dragging");
     clearMarkers();
+    // 句柄过期就不动 DOM：源节点已被中途重渲甩出 DOM 时，把它塞回列表等于凭空多一行
+    // （部署区踩过同款，见下面那段拖拽的注释）
+    if(!el.isConnected) return;
     // 指针在组件外也照样夹紧：高于全部行 → 首行之前，低于全部行 → 末尾
-    if(slot && slot !== el) host.insertBefore(el, slot);
-    else if(!slot) host.appendChild(el);
-    slot = null;
+    if(at && at !== el) host.insertBefore(el, at);
+    else if(!at) host.appendChild(el);
     setTimeout(commit, 0);          // 延迟一拍：让 dragend 的清理先跑完
   }
   box().addEventListener("dragstart", e => {
     const grip = e.target.closest(gripSel);
     if(!grip || !grip.draggable) return;    // 只有一条时的空手柄不参与
-    drag = grip.closest(rowSel);
+    const row = grip.closest(rowSel);
+    if(!row) return;                        // 不是本列表的行（选区/文件）不接管
+    drag = row;
     slot = null;
     drag.classList.add("dragging");
     e.dataTransfer.setData("text/plain", "row");
@@ -3628,10 +3806,19 @@ async function ceDelGroup(grpEl){
   renderCeDeps();
 }
 /* ---------------- 部署环境拖拽排序（组内条目 + 分组两级） ----------------
-   拖动手柄：条目 = .dgrip，分组 = .g-grip。drop 先做 DOM 重排（#ceDeps 内
-   移动节点），再以 DOM 为唯一事实源重建数据（顺序 + group 归属），标记
-   dirty 并在下一拍重渲——让 dragend 在重渲染前先清理句柄/拖动态 */
-let _dnd = null;   // {kind:'dep'|'group', el:<被拖节点>}
+   拖动手柄：条目 = .dgrip，分组 = .g-grip。手法与 bindGripDrag 同一口径（道理写在
+   那一段的注释里）：dragover/drop/dragend 挂 **document**，指针滑出 #ceDeps（上面的
+   声明区、下面的按钮行、乃至抽屉外）也照样按 clientY 夹紧算落点、线跟着走；drop 与
+   dragend 走同一条提交路径，句柄先置空保证只落一次。挂在容器上时出界收不到 dragover，
+   浏览器判定"此处不接受投放"就不发 drop，行悄悄弹回原位，而落点线还冻在原地骗人。
+   句柄只经 _dndLive() 取用：投放到部署区的事件也会冒泡过 #ceDeps，旧写法只判
+   `if(!_dnd)`，而清理押在"#ceDeps 的委托 dragend 一定跑在重渲之前"——源节点一旦被中途
+   重渲甩出 DOM，dragend 就落在游离节点上、冒泡不到 #ceDeps，句柄便长期攥着一个不在
+   DOM 里的旧条目；此后任何跨组件投放都会把它塞回组里，而 ceStash 以 DOM 为唯一事实源，
+   于是凭空多出一条同名同参的部署（症状：拖声明行进部署区＝复制部署环境）。
+   判活 + 清理移到 document 的 dragend + 提交改同步，三处一起堵死。 */
+let _dnd = null;        // {kind:'dep'|'group', el:<被拖节点>}
+let _dndSlot = null;    // 最后一次指示的落点 {host:<容器>, before:<节点|null>, zone:<分组>}
 function _beforeEls(container, selector, clientY){
   if(!container) return null;
   for(const el of container.querySelectorAll(selector)){
@@ -3644,73 +3831,91 @@ function clearMarkers(){
   document.querySelectorAll(".drop-marker").forEach(el => el.classList.remove("drop-marker"));
   document.querySelectorAll(".drop-target-zone").forEach(el => el.classList.remove("drop-target-zone"));
 }
-/* drop 与键盘重排共用的落盘路径：DOM 是唯一事实源，ceStash 依 DOM 顺序重建
-   数据后重渲。两处必须走同一条路，否则键盘与鼠标排出两种结果。 */
+/* drop、dragend 与键盘重排共用的落盘路径：DOM 是唯一事实源，ceStash 依 DOM 顺序
+   重建数据后重渲。三处必须走同一条路，否则键盘与鼠标排出两种结果。 */
 function _ceApplyReorder(){
   ceStash();
   state.cfgEdit.dirty = true;
   renderCeDeps();
 }
-$("#ceDeps").addEventListener("dragstart", e => {
-  const grip = e.target.closest(".g-grip");
-  const dgrip = e.target.closest(".dgrip");
-  if(grip){
-    _dnd = {kind:"group", el: grip.closest(".dep-group")};
-    _dnd.el.classList.add("dragging");
-    e.dataTransfer.setData("text/plain", "group");
-    e.dataTransfer.effectAllowed = "move";
-  } else if(dgrip){
-    _dnd = {kind:"dep", el: dgrip.closest(".dep-edit")};
-    _dnd.el.classList.add("dragging");
-    e.dataTransfer.setData("text/plain", "dep");
-    e.dataTransfer.effectAllowed = "move";
-  }
-});
-$("#ceDeps").addEventListener("dragover", e => {
-  if(!_dnd) return;
-  e.preventDefault();   // 允许 drop
-  e.dataTransfer.dropEffect = "move";
-  clearMarkers();
-  if(_dnd.kind === "group"){
-    const b = _beforeEls($("#ceDeps"), ".dep-group", e.clientY);
-    if(b) b.querySelector(".g-head").classList.add("drop-marker");
-    else{   // 指针低于全部分组 → 追加末尾：末组条目区末尾给同款落点线
-      const last = document.querySelector("#ceDeps .dep-group:last-child");
-      if(last) last.classList.add("drop-target-zone");
+/* 句柄是否还攥着一个在 DOM 里的节点：不是就当场作废。为什么就地清：源节点被中途
+   重渲甩出 DOM 后，dragend 落在游离节点上、连 document 都到不了（事件不往上冒），
+   靠 dragend 收不掉——只能在下一次碰到它时识别并丢掉 */
+function _dndLive(){
+  if(_dnd && !(_dnd.el && _dnd.el.isConnected)){ _dnd = null; _dndSlot = null; }
+  return _dnd;
+}
+function _depGroups(){ return [...document.querySelectorAll("#ceDeps .dep-group")]; }
+/* 按 clientY 算落点：指针在组件外也夹紧（高于全部分组→首组之前，低于全部→末尾），
+   与 _beforeEls 同判据——看到的线与拿到的结果必须是一套算法算出来的 */
+function _dndSlotAt(clientY){
+  const d = _dndLive();
+  if(!d) return null;
+  const gs = _depGroups();
+  if(!gs.length) return null;
+  if(d.kind === "group"){
+    let before = null;
+    for(const g of gs){
+      const r = g.getBoundingClientRect();
+      if(clientY < r.top + r.height/2){ before = g; break; }
     }
-    return;
+    if(before === d.el) before = before.nextElementSibling;   // 落回原位＝插到它后面
+    return {host: gs[0].parentElement, before, zone: gs[gs.length - 1]};
   }
-  const grp = e.target.closest(".dep-group") || _dnd.el.closest(".dep-group");
-  if(!grp) return;
-  const b = _beforeEls(grp.querySelector(".dep-items"), ".dep-edit", e.clientY);
-  if(b) b.classList.add("drop-marker");
-  else grp.classList.add("drop-target-zone");
-});
-$("#ceDeps").addEventListener("drop", e => {
-  if(!_dnd) return;
-  e.preventDefault();
-  const src = _dnd.el;
+  // 条目：先按 clientY 选定目标分组（出界夹紧到首/末组），再在该组条目区里算插入点
+  const grp = gs.find(g => { const r = g.getBoundingClientRect();
+                              return clientY >= r.top && clientY <= r.bottom; })
+    || (clientY < gs[0].getBoundingClientRect().top ? gs[0] : gs[gs.length - 1]);
+  const items = grp.querySelector(".dep-items");
+  if(!items) return null;
+  let before = _beforeEls(items, ".dep-edit", clientY);
+  if(before === d.el) before = before.nextElementSibling;
+  return {host: items, before, zone: grp};
+}
+/* drop 与 dragend 共用的提交路径：先置空句柄（保证只落一次），再把节点放到最后指示
+   的位置，然后同步落盘——不再靠 setTimeout 与 dragend 抢顺序，也就不会在重渲把源节点
+   甩出 DOM 之后还剩个死句柄 */
+function _dndCommit(){
+  const d = _dndLive(), slot = _dndSlot;
+  _dnd = null; _dndSlot = null;
+  if(d) d.el.classList.remove("dragging");
   clearMarkers();
-  if(_dnd.kind === "group"){
-    const srcGroup = src.closest(".dep-group");
-    const groupsBox = $("#ceDeps .dep-groups");
-    const b = _beforeEls(groupsBox, ".dep-group", e.clientY);
-    if(b && b !== srcGroup) groupsBox.insertBefore(srcGroup, b);
-    else if(!b) groupsBox.appendChild(srcGroup);
-  } else {
-    const tgrp = e.target.closest(".dep-group") || src.closest(".dep-group");
-    const items = tgrp.querySelector(".dep-items");
-    const b = _beforeEls(items, ".dep-edit", e.clientY);
-    if(b && b !== src) items.insertBefore(src, b);
-    else items.appendChild(src);   // 同组末尾 / 移入新组末尾
-  }
-  // 以 DOM 布局重建数据并重渲（延迟一拍，让 dragend 先清理拖动态）
-  setTimeout(_ceApplyReorder, 0);
+  if(!d || !slot) return;
+  if(slot.before && slot.before !== d.el) slot.host.insertBefore(d.el, slot.before);
+  else slot.host.appendChild(d.el);      // 同组末尾 / 移入新组末尾
+  _ceApplyReorder();
+}
+$("#ceDeps").addEventListener("dragstart", e => {
+  const grip = e.target.closest(".g-grip"), dgrip = e.target.closest(".dgrip");
+  const el = grip ? grip.closest(".dep-group") : dgrip ? dgrip.closest(".dep-edit") : null;
+  if(!el) return;    // 不是本组件的行（输入框里的选区、拖入页面的文件）不接管
+  _dnd = {kind: grip ? "group" : "dep", el};
+  _dndSlot = null;
+  el.classList.add("dragging");
+  e.dataTransfer.setData("text/plain", _dnd.kind);
+  e.dataTransfer.effectAllowed = "move";
 });
-$("#ceDeps").addEventListener("dragend", () => {
-  if(_dnd){ _dnd.el.classList.remove("dragging"); _dnd = null; }
+document.addEventListener("dragover", e => {
+  const d = _dndLive();
+  if(!d) return;     // 与本组件无关的拖拽（含另两套手柄的行）一律不接管
+  const slot = _dndSlotAt(e.clientY);
+  if(!slot) return;
+  e.preventDefault();                  // 不 preventDefault 就不算允许 drop
+  e.dataTransfer.dropEffect = "move";
+  _dndSlot = slot;
   clearMarkers();
+  const mark = slot.before ? (d.kind === "group" ? slot.before.querySelector(".g-head")
+                                                : slot.before)
+                           : slot.zone;
+  if(!mark) return;
+  mark.classList.add(slot.before ? "drop-marker" : "drop-target-zone");
 });
+document.addEventListener("drop", e => {
+  if(!_dndLive()) return;
+  e.preventDefault();   // 组件外松手也要吃掉默认行为（否则浏览器可能去导航）
+  _dndCommit();
+});
+document.addEventListener("dragend", _dndCommit);   // 出界松手按当前指示器位置落定（与另两套同语义）
 /* 拖拽排序的键盘等价物（拖动对纯键盘用户完全不可达）：手柄已加 tabindex="0"
    + role="button"，↑↓ 组内/分组间移动一位，←→ 把部署搬到相邻分组的条目区。
    两件拖拽不需要、键盘必须做的事：① preventDefault 吃掉方向键的翻页滚动；
@@ -3983,10 +4188,8 @@ function setPhase(phase){
   unhide($("#configPanel"), idle || document.body.classList.contains("config-force"));
   unhide($(".kpis"), !idle);
   unhide($("#liveCard"), phase === "run");
-  // KPI 标签随阶段收敛：进行中标「实时」，完成/载入历史后为终态权威值改标「最终」
-  const final_ = phase === "done";
-  document.querySelector(".kpi.prefill .k").textContent = final_ ? "最终 Prefill 速度" : "实时 Prefill 速度";
-  document.querySelector(".kpi.decode .k").textContent = final_ ? "最终 Decode 速度" : "实时 Decode 速度";
+  // KPI 主数值标签不随阶段改名（运行中也叫「Prefill 速度 / Decode 速度」，
+  //「实时」二字由用户去掉 2026-10-16：同一个标签在跳数时不会反复换字）
   updateToggleText();
   showDataSections();
   // 阶段切换是权威视图切换：若 addPoint 的合帧重绘仍在排队，此刻立即落地
@@ -4174,7 +4377,7 @@ async function startRun(){
     $("#configPanel").scrollIntoView({behavior:"smooth", block:"start"});
     return;
   }
-  state.points.clear(); state.maxSeq = -1; state.activeReqs.clear();
+  state.points.clear(); state.maxSeq = -1;
   state.cmp = null;   // 启动新测速 = 退出多次对比态
   state.preMeasured.clear();
   state.donePoints = 0;
@@ -4194,8 +4397,6 @@ async function startRun(){
     }, 0);
   $("#liveTable tbody").innerHTML = "";
   renderAll(); resetKpis();
-  $("#progWrap").hidden = false;
-  $("#progFill").style.width = "0%";
   // 发请求前先禁用：fetch 飞行期间按钮不可再点（防孤儿并发任务）；
   // 失败路径必须恢复可用。按钮同时换文案 + 转圈：只默默变灰看不出「在等谁」
   setStartBusy(true);
@@ -4265,9 +4466,8 @@ async function recoverClosedStream(){
     if(h.ok){
       const d = await h.json();
       if(!hydrateArchive(d)) return;   // 坏存档：hydrateArchive 内已报错，中止兜底
-      // 明细表残留断流前的旧行：清实时表与进行中请求集合后全量重绘
+      // 明细表残留断流前的旧行：清实时表后全量重绘
       // （hydrateArchive 被 loadHistory 复用，重绘留在调用侧）
-      state.activeReqs.clear();
       $("#liveTable tbody").innerHTML = "";
       finishRun("已从存档恢复");
       renderAll();
@@ -4434,7 +4634,7 @@ function onEvent(ev){
         }
       }
       break;
-    case "point_skipped": state.donePoints += ev.count || 1; bumpProgress();
+    case "point_skipped": state.donePoints += ev.count || 1;   // 仅供 ETA 外推计数
       if(ev.msg) addRunNote(ev.msg, "skip");   // 超窗跳过原因常驻展示，不再被瞬态状态行吞没
       break;
     case "tick": updateLive(ev); break;
@@ -4458,7 +4658,6 @@ function finishRun(msg, cls){
   setPhase("done");        // 完成后：聚焦表格/图表/卡片等统计信息
   setPill(msg, cls || "");
   loadHistoryList();
-  $("#kpiReqs").innerHTML = '0 <small>个</small>';
   // 完成态整页重渲一次：明细表最后一次渲染仍在 run 阶段（复测按钮的
   // retest 闸 = done 且不 running，见 renderResultTable），不重渲则复测
   // 入口要刷新/载入历史才出现；曲线/明细同步收敛到最终数据
@@ -4471,16 +4670,11 @@ function finishRun(msg, cls){
 function resetKpis(){
   $("#kpiPrefill").innerHTML = '– <small>tok/s</small>';
   $("#kpiPrefill").dataset.peak = "";
-  $("#prefillBarWrap").hidden = true;
-  $("#prefillBarFill").style.width = "0%";
+  trkSet(trkOf("#kpiPrefill"), null);
   $("#kpiDecode").innerHTML = '– <small>tok/s</small>';
   $("#kpiDecode").dataset.peak = "";
-  $("#decodeBarWrap").hidden = true;
-  $("#decodeBarFill").style.width = "0%";
-  $("#kpiReqs").innerHTML = '0 <small>个</small>';
-  $("#kpiPoints").innerHTML = `0 <small>/ ${state.totalPoints}</small>`;
+  trkSet(trkOf("#kpiDecode"), null);
 }
-function updateKpis(){ $("#kpiReqs").innerHTML = `${state.activeReqs.size} <small>个</small>`; }
 /* 运行时长 / 粗估 ETA：N 点数无法换算「还要等多久」——用已完成点的平均耗时
    外推（档位间耗时差异巨大，标「约」；接管他人任务时起点为本页接管时刻） */
 const fmtDur = s => { s = Math.round(s); return s < 60 ? s+"s" : `${Math.floor(s/60)}m${String(s%60).padStart(2,"0")}s`; };
@@ -4495,35 +4689,142 @@ function tickElapsed(){
   el.textContent = `已运行 ${fmtDur(run)}${eta}`;
   el.hidden = false;
 }
-function bumpProgress(){
-  // point_skipped 可让 donePoints 超过 totalPoints：宽度与数字同步封顶，不出「5 / 3」
-  const shown = Math.min(state.donePoints, state.totalPoints);
-  $("#kpiPoints").innerHTML = `${shown} <small>/ ${state.totalPoints}</small>`;
-  if(state.totalPoints){
-    const pct = Math.min(100, state.donePoints/state.totalPoints*100);
-    $("#progFill").style.width = pct + "%";
-    $("#progWrap").setAttribute("aria-valuenow", Math.round(pct));
-  }
-}
 
-/* KPI 主数值=最新读数，峰值隐示于进度条（宽=最新/峰值，title 悬浮展示） */
-function kpiPush(vSel, wrapSel, fillSel, val, label){
+/* ---- KPI 赛道（ADR-0131：半圆时速表退役，改横贯赛道）----
+   位置 = 读数（**分段线性**，刻度逻辑与旧表盘相同）：真实读数大多落在前两段
+   （decode 常见 10~50），线性刻度会把 actor 常年压在左半边，过站看不见。段名
+   （走路/跑步/自行车/小汽车/高铁）上界面（用户点名要诙谐）：actor 就是活指示器
+   ——位置 = 数值、种类 = 档位，光粒子拖尾随档加密加速。`data-tiers` 是各段**上界**
+   （decode 10/30/50/100/300、prefill 500/1000/2000/5000/10000，均用户拍板），
+   超过最后一个则满程钉右端。阈值是前端展示常量，不进 config.json（又多一份配置面不值得） */
+const TRK_NAMES = ["走路", "跑步", "自行车", "小汽车", "高铁"];
+const TRK_ACTORS = ["🚶", "🏃", "🚴", "🚗", "🚄"];   // 与 TRK_NAMES 同序；空读数 = 😴
+const TRK_IDLE = {actor: "😴", name: "待发车"};
+/* 里程碑数字的紧凑写法：1000→1K（prefill 标 0/500/1K/2K/5K/10K） */
+const trkFmt = v => v >= 1000 ? `${v / 1000}K` : String(v);
+/* 值 → 0~1 轨长（段内线性、段长相等——检查站等距，精确数值感交给大数字与 title） */
+function trkFrac(v, tiers){
+  const n = tiers.length; let lo = 0;
+  for(let i = 0; i < n; i++){
+    const hi = tiers[i];
+    if(v <= hi || i === n - 1)
+      return Math.min(1, (i + (hi > lo ? Math.max(0, Math.min(1, (v - lo) / (hi - lo))) : 1)) / n);
+    lo = hi;
+  }
+  return 1;
+}
+const trkTier = (v, tiers) => {
+  const i = tiers.findIndex(t => v <= t);
+  return TRK_NAMES[i < 0 ? tiers.length - 1 : i];
+};
+/* 懒建（首次写值时建轨道；几何只建一次，之后每帧只改 width/left/类名）。
+   Node 桩下 querySelector 返回 null → 后续写入自然无操作，渲染门禁不炸。
+   如实退化三态（赛道只是同一个数的第二次表达，不得比数字更像实测）：
+   空读数 = 😴 站起点 + fill 清零 + 整轨 .idle 压暗；估值帧 = fill/actor .est
+   降透明且不推峰值；实测帧才实色 */
+function trkSet(el, v, opt = {}){
+  if(!el || !el.dataset) return;
+  const tiers = String(el.dataset.tiers || "").split(",").filter(x => x).map(Number);
+  if(!tiers.length) return;
+  const n = tiers.length;
+  if(!el.firstChild){
+    let inner = `<span class="trk-rail"></span><span class="trk-fill"></span>`;
+    for(let i = 1; i < n; i++)                 // 检查站刻线：双色（past=卡色缝/未到=灰），状态见下方每帧切换
+      inner += `<span class="trk-tick" style="left:${(100 * i / n).toFixed(2)}%"></span>`;
+    for(let i = 0; i <= n; i++){               // 里程碑数字：0 与满程钉两端，其余居中
+      const cls = i === 0 ? " l0" : i === n ? " l1" : "";
+      inner += `<span class="trk-num${cls}" style="left:${(100 * i / n).toFixed(2)}%">`
+        + `${trkFmt(i ? tiers[i - 1] : 0)}</span>`;
+    }
+    inner += `<span class="trk-actor"><span class="aveh">`
+      + `<span class="spark s1"></span><span class="spark s2"></span><span class="spark s3"></span>`
+      + `<span class="spark s4"></span><span class="spark s5"></span><span class="spark s6"></span>`
+      + `<span class="streak s1"></span><span class="streak s2"></span>`
+      + `<span class="actor">${TRK_IDLE.actor}</span></span></span>`;
+    el.innerHTML = inner;
+  }
+  const fill = el.querySelector(".trk-fill"), veh = el.querySelector(".trk-actor");
+  if(!fill || !veh) return;
+  const live = v != null && isFinite(v);
+  const f = live ? trkFrac(Math.max(0, v), tiers) : 0;
+  const pct = (100 * f).toFixed(2) + "%";
+  fill.style.width = pct;
+  veh.style.left = pct;
+  const idx = live ? tiers.findIndex(t => v <= t) : 0;   // 超量程 findIndex 给 -1，得手动拥到最后一段
+  const now = live ? (idx < 0 ? n - 1 : idx) : -1;
+  el.className = "trk" + (live ? " t" + now : " idle") + (opt.est && live ? " est" : "");
+  /* 检查站双色：已过站 = 卡色缝（fill 覆盖处打通），未到站 = 灰——赛道是关卡序列，
+     前方的站也得看得见。now=-1（空读数）时全灰 */
+  el.querySelectorAll(".trk-tick").forEach((tk, i) => tk.classList.toggle("past", i < now));
+  /* 档名与 actor 只在换档时重写（dataset.cls 缓存），每帧只合类名，不反复碰文本 DOM */
+  const gbox = el.closest && el.closest(".kpi");
+  const tn = gbox && gbox.querySelector ? gbox.querySelector(".tname") : null;
+  const cls = live ? "t" + now : "idle";
+  if(el.dataset.cls !== cls){
+    el.dataset.cls = cls;
+    const actor = el.querySelector(".actor");
+    if(actor) actor.textContent = live ? TRK_ACTORS[now] : TRK_IDLE.actor;
+    if(tn) tn.textContent = live ? TRK_NAMES[now] : TRK_IDLE.name;
+  }
+  if(tn) tn.classList.toggle("est", !!opt.est && live);
+  /* 升档（含睡醒首发车）：actor 弹一下 + 爆一小把光粒子（冲线）；降档悄悄降——
+     车减速不庆祝。pop 只活一帧：引擎 0.4s 一帧 > 动画 380ms，下帧摘掉恰好播完 */
+  const prevTier = el.dataset.tier == null ? -1 : +el.dataset.tier;
+  if(live){
+    if(now > prevTier){
+      veh.classList.remove("pop");
+      void veh.offsetWidth;                 // 撤类→强制重排→再加类 = 重触发动画
+      veh.classList.add("pop");
+      trkBurst(el);
+    }else{
+      veh.classList.remove("pop");
+    }
+    el.dataset.tier = now;
+  }else{
+    veh.classList.remove("pop");
+    delete el.dataset.tier;                 // 回空读数：下次来值算「睡醒首发车」
+  }
+  const bands = tiers.map((t, i) => `${TRK_NAMES[i]} ${i ? tiers[i-1] : 0}-${t}`).join(" · ");
+  el.setAttribute("title", live
+    ? `${opt.label || ""} ${v} tok/s · ${trkTier(v, tiers)} · ${bands}`
+      + (opt.peak && !opt.est ? ` · 本轮最快 ${opt.peak}` : "")
+    : `等待首个实测读数 · ${bands}`);
+}
+/* 升档冲线爆：一次性粒子束，动画结束即自删（reduced-motion 下全局规则把动画压成
+   0.01ms，animationend 照样触发 → 自动降级，不留残元素） */
+function trkBurst(el){
+  const aveh = el.querySelector && el.querySelector(".aveh");
+  if(!aveh || !document.createElement || !aveh.appendChild) return;
+  const b = document.createElement("span");
+  b.className = "burst";
+  b.innerHTML = "<i></i><i></i><i></i><i></i><i></i><i></i>";
+  if(b.addEventListener)
+    b.addEventListener("animationend", () => b.remove(), {once: true});
+  aveh.appendChild(b);
+}
+const trkOf = vSel => {
+  const el = $(vSel), box = el && el.closest ? el.closest(".kpi") : null;
+  return box && box.querySelector ? box.querySelector(".trk") : null;
+};
+/* 同帧写两处：数字（主值）+ 赛道（位置/档位感）。峰值只进 title，不再单独画细条 */
+function kpiPush(vSel, val, label){
   const el = $(vSel);
   const peak = Math.max(+(el.dataset.peak || 0), val);
   el.dataset.peak = peak;
   el.innerHTML = `${val} <small>tok/s</small>`;
-  const wrap = $(wrapSel);
-  wrap.hidden = false;
-  wrap.title = `${label}：${peak} tok/s`;
-  $(fillSel).style.width = (peak ? Math.min(100, val/peak*100) : 0) + "%";
+  trkSet(trkOf(vSel), val, {label, peak});
 }
-/* prefill 等待期估值同步 KPI 主数值（ADR-0007）：与实时表同值、以「≈」明示
-   未实测；估值从高往低收敛，**不参与峰值**（峰值条/悬浮峰值只由首 token
-   实测帧与点级权威值推进），既动态又不污染峰值 */
-function kpiPushEst(vSel, val){
+/* prefill 等待期/首 token 估值同步 KPI 主数值（ADR-0007）：与实时表同值、以「≈」
+   明示未实测；估值从高往低收敛，**不参与峰值**（峰值只由带 usage 真值的实测帧
+   与点级回写推进），既动态又不污染峰值 */
+function kpiPushEst(vSel, val, hint){
   const el = $(vSel);
   // 「≈」单独包一档：主数值保持最大字号，估值标记退到辅助档并带口径悬浮
-  el.innerHTML = `<span class="est" title="估值：按速率曲线先验推算，首 token 到达后将被实测覆盖">≈</span>${val} <small>tok/s</small>`;
+  // （两路估值共用：等待期帧 = 按速率曲线先验推算；首 token 帧 = TTFT 已实测
+  // 但 prompt tokens 仍是字符÷系数估算——流末 usage 真值帧到达后会被覆盖）
+  el.innerHTML = `<span class="est" title="估值：等待期按速率曲线先验推算；首 token 帧的 TTFT 已实测，但 prompt tokens 仍是估算（服务端 usage 未回）——流末真值帧到达后将被实测覆盖${hint || ""}">≈</span>${val} <small>tok/s</small>`;
+  // 赛道跟着动，但 fill/actor 降透明：不得比数字更像实测（估值从高往低收敛）
+  trkSet(trkOf(vSel), val, {est: true, label: "估值"});
 }
 
 /* ---------------- 实时表格 ---------------- */
@@ -4540,14 +4841,12 @@ function updateLive(t){
   let tr = tb.querySelector(`tr[data-tag="${CSS.escape(rowKey)}"]`);
   if(t.phase === "done"){   // 预热批终帧（bench.py _prime_done）：整行撤掉，不入测点
     if(tr) tr.remove();
-    state.activeReqs.delete(rowKey); updateKpis();
     return;
   }
   // 媒体请求（asr/tts）tick 无 TTFT/prefill/decode 读数：不进 KPI（保持「–」），
   // 实时表按媒体口径展示；ocr 走 VLM 流式路径，列语义与 llm 一致
   const k = scenKind(t.scenario);
   const isMedia = k === "asr" || k === "tts";
-  if(t.phase === "prefill"){ state.activeReqs.add(rowKey); updateKpis(); }
   if(!tr){
     tr = document.createElement("tr");
     tr.dataset.tag = rowKey;
@@ -4570,34 +4869,40 @@ function updateLive(t){
   if(t.phase === "prefill"){
     c[5].textContent = isPrime ? "预热中" : isMedia ? "请求中" : "Prefill 中";
     c[5].style.color = isPrime ? "var(--blue)" : "var(--yellow)"; c[5].style.fontWeight = "500";
-    if(t.ttft != null){
-      // 首 token 到达：prefill 实测读数（请求级），即刻刷新 KPI 与实时表
-      // （覆盖等待期的 ≈ 估值），不等整点完成（ADR-0007）；预热帧只上表不进 KPI
+    if(t.ttft != null && !t.est){
+      // 真·实测 prefill（流末帧，prompt_tokens 取服务端 usage 真值）：即刻刷新
+      // KPI 与实时表，不等整点完成（ADR-0007）；预热帧只上表不进 KPI
       if(t.speed){
         if(!isPrime){
-          kpiPush("#kpiPrefill", "#prefillBarWrap", "#prefillBarFill", t.speed, "最快 Prefill");
+          kpiPush("#kpiPrefill", t.speed, "实测 Prefill");
           state.preMeasured.add(livePointKey(t));   // 本点已有实测：后续估值帧不再回退 KPI
         }
         c[8].textContent = t.speed + " tok/s";
+        c[8].title = "";
       }
     } else if(t.speed){
-      // 等待期估值：若此刻完成的 prefill 速度。实时表与 KPI 同步显示（标 ≈），
-      // 首 token 实测帧到达后 KPI 切换为实测值（ADR-0007）
+      // 估值帧两类，同样标 ≈：①等待期帧（若此刻完成的 prefill 速度）；②首 token
+      // 帧——TTFT 已实测但分子（prompt tokens）仍是估算（usage 此时未到），构造
+      // 偏离时成倍虚高（真机：实发 19.7 万 token 估成 26 万，显示 5000+ 而真值
+      // 3722），不上「实测」牌、不冻结本点后续估值（ADR-0007）
+      // weak（引擎带）：先验曲线最高档比本档低 ≥1 个倍频程（单点复测/冷启动
+      // 没有历史台账锚点时就是这样），平台值是从低档平推出来的，系统性偏低
+      const weak = t.weak ? "；先验未覆盖本档（曲线最高档远低），按低档速率保守显示，实测通常更快" : "";
       c[8].textContent = "≈" + t.speed + " tok/s";
+      c[8].title = "分子为估算（usage 未回），非实测" + weak;
       // conc≥2 时 r0 已出实测而 r1 仍在等待：估值帧不把 KPI 主数值退回「≈」
-      if(!isPrime && !state.preMeasured.has(livePointKey(t))) kpiPushEst("#kpiPrefill", t.speed);
+      if(!isPrime && !state.preMeasured.has(livePointKey(t))) kpiPushEst("#kpiPrefill", t.speed, weak);
     }
   }
   else if(t.phase === "decode"){
     c[5].textContent = isPrime ? "预热中" : t.thinking ? "Decode·含思考" : (isMedia ? (k === "tts" ? "合成中" : "转写中") : "Decode");
     c[5].style.color = isPrime ? "var(--blue)" : "var(--green)"; c[5].style.fontWeight = "500";
-    state.activeReqs.add(rowKey); updateKpis();
     if(isMedia){
       // 媒体 decode 帧：tokens = 音频秒（asr/tts 完成帧）或已收 KB（tts 中途），
       // speed = 倍速或 KB/s——只更新实时表，不混入 tok/s KPI
       if(t.speed != null) c[8].textContent = k === "tts" ? t.speed + " KB/s" : t.speed + " ×";
     } else if(!isPrime){
-      kpiPush("#kpiDecode", "#decodeBarWrap", "#decodeBarFill", t.speed || 0, "最快 Decode");
+      kpiPush("#kpiDecode", t.speed || 0, "实测 Decode");
     }
   }
   else if(t.phase === "error"){
@@ -4605,7 +4910,6 @@ function updateLive(t){
     c[9].textContent = (t.msg||"").slice(0,40);
     c[9].title = t.msg || "";   // 错误全文留痕：40 字符截断仅作显示
     tr.classList.add("err");
-    state.activeReqs.delete(rowKey); updateKpis();
   }
   if(t.ttft != null) c[6].textContent = t.ttft + "s";
   if(t.tokens != null) c[7].textContent = isMedia && k === "tts" ? t.tokens + " KB" : Math.round(t.tokens);
@@ -4623,7 +4927,6 @@ function markLiveDone(p){
     tr.children[5].textContent = (r && r.err) ? "失败" : "完成";
     tr.children[5].style.color = (r && r.err) ? "var(--red)" : "var(--ink-4)";
     tr.classList.add("fade");
-    state.activeReqs.delete(tag); updateKpis();
     setTimeout(() => tr.remove(), 2500);
   });
 }
@@ -4907,15 +5210,21 @@ function parseTok(v){
   return n > 0 ? n : NaN;
 }
 
-/* ---------------- 历史记录分组与选择（ADR-0125 / ADR-0126）----------------
-   分组是**视图层**的事：存档不动。**只有一种组**：人起的组名，活在
-   results/.history-groups.json（后端贴到摘要的 group 字段上），没组名的落进「未分组」。
-   曾经还有“按模型/按天”两种算出来的组，用户判为缝合怪（同一个列表里两种组长得一样
-   但含义不同，答不出“我到底有几个组”），ADR-0125 追加轮删掉：“按模型分组”从常驻
-   视图降级为**一次动作**（histAutoPlan）。
-   入参都是「摘要数组」（= GET /api/bench/history 回的 history，已按新→旧排序）。 */
-const HIST_UNGROUPED = "未分组";   // 显示名；组键用空串表示它（不是能起的组名）
+/* ---------------- 历史记录分组与选择（ADR-0129 / ADR-0130）----------------
+   分组是**视图层**的事：存档不动。**组是实体**：有自己的 id、名字、备注，活在
+   results/.history-groups.json 的 groups 数组里（后端把它贴到摘要的 group/group_id 上）；
+   没归组的记录落进「未分组」——它是兵底桶，不是一个组。
+   旧形状（组名当主键的 `run_id → 组名`）答不出“新建一个空组”这个动作，也没地方存
+   备注与顺序，ADR-0129 把它换成了实体；“按模型/按天”两种算出来的组早在 ADR-0125
+   追加轮删过一轮（同一个列表里两种组长得一样但含义不同），“按模型分组”仍只是
+   一**次动作**（histAutoPlan），不是一种视图。
+   入参约定：
+   - `items` = GET /api/bench/history 回的摘要数组（新→旧排序，每条带 group / group_id）
+   - `groups` = 同一次响应里的 groups 数组（`[{id,name,note,count}]`，**含 count=0 的空组**） */
+const HIST_UNGROUPED = "未分组";   // 兵底桶显示名；桶键用空串表示它（不是能起的组名）
 const HIST_MAX_CMP = 10;           // RUN_COLORS 只有 10 色，超过就真的分不出谁是谁了
+const GROUP_NAME_MAX = 40;         // 与后端同名常量，超长**报错不截断**（ADR-0126 已定）
+const GROUP_NOTE_MAX = 60;
 
 /* 默认组名 = 本条记录的**模型集合整体**（一条记录只进一个组：进多个组会让同一个
    勾选有三个位置，勾没勾看不准）。它同时是「收入新组…」输入框的默认值——
@@ -4924,16 +5233,17 @@ function histModelKey(h){
   const ms = [...new Set((h && h.models || []).map(String))].sort();
   return ms.length ? ms.join(" + ") : "（无模型信息）";
 }
-/* 分组：只按 group。返回 [{key, name, count, latest, items[]}]，key 为组名（未分组 = ""）。
+/* 分桶：按 group_id。返回 [{key, name, count, latest, items[]}]，key = 组 id（未分组 = ""）。
    未分组永远垫底（它是“还没归组”，不是一个组），其余按组内最新一条降序
-   （= 刚跑过的那组永远在头几行） */
+   （= 刚跑过的那组永远在头几行）。无 id 的老摘要退回按组名归桶，同一条不会被拆进两桶 */
 function histGroups(items){
   const map = new Map();
   for(const h of (items || [])){
     if(!h || !h.run_id) continue;
-    const k = String(h.group || "").trim();
+    const k = String(h.group_id || h.group || "").trim();
     let g = map.get(k);
-    if(!g){ g = {key:k, name:k || HIST_UNGROUPED, count:0, latest:"", items:[]}; map.set(k, g); }
+    if(!g){ g = {key:k, name:String(h.group || "").trim() || HIST_UNGROUPED,
+                 count:0, latest:"", items:[]}; map.set(k, g); }
     g.count++;
     g.items.push(h);
     const ts = String(h.started_at || h.run_id || "");
@@ -4944,14 +5254,84 @@ function histGroups(items){
     : String(b.latest).localeCompare(String(a.latest))));
   return out;
 }
-/* 折叠默认**全展开**：组是人自己建的、通常就几个，“有哪些组、组里有什么”要一眼看到 */
-function histFoldDefault(){ return true; }
-/* “全选”只选**当前看得见**的（折叠的组不算）：一勾全部历史既没意义，也会把
-   对比曲线画成没人分得出的十色乱麻 */
-function histVisibleIds(groups, isOpen){
-  const ids = [];
-  (groups || []).forEach((g, i) => { if(isOpen(g, i)) ids.push(...g.items.map(h => h.run_id)); });
-  return ids;
+/* 台账左栏的桶清单：组按**存储序**（包括 count=0 的空组）+ 「未分组」永远垫底。
+   空组必须能出现在这里——「新建组」这个动作的全部意义就是先有个组、再往里放记录；
+   旧形状（组名即主键）里没人引用的名字根本不存在，所以那个动作当时做不出来 */
+function histLedgerBuckets(groups, items){
+  const known = new Set((groups || []).map(g => g && String(g.id || "")));
+  const b = new Map(histGroups(items).map(x => [x.key, x]));
+  const rows = [];
+  for(const g of (groups || [])){
+    if(!g || !g.id) continue;
+    const hit = b.get(String(g.id));
+    rows.push({key:String(g.id), name:String(g.name || "").trim() || HIST_UNGROUPED,
+               note:String(g.note || ""), count:hit ? hit.count : 0,
+               items: hit ? hit.items : []});
+  }
+  // 未分组桶 = 没有组的 + 指着失踪组的（后者服务端本应已经把 group 清空，这里是保险：
+  // 一条记录在任何视图里都看不见，比它落错桶更难被发现）
+  const none = [...(b.get("") ? b.get("").items : [])];
+  for(const [k, v] of b){
+    if(k === "" || known.has(k)) continue;
+    none.push(...v.items);
+  }
+  none.sort((x, y) => String(y.started_at || y.run_id || "")
+    .localeCompare(String(x.started_at || x.run_id || "")));
+  rows.push({key:"", name:HIST_UNGROUPED, note:"", count:none.length, items:none});
+  return rows;
+}
+/* 「移动分组」下拉的选项（纯函数）：占位项充当标签，其后是全部组（按左栏同序、
+   含空组——组是实体，"先有组再往里放"是设计口径，空组照样可选），尾项是新建哨兵。
+   未分组桶不进这里（那是「移出分组」那颗按钮的活，两条动作不混一个控件）。 */
+function histMoveGroupOptions(groups, items){
+  return [{v:"", t:"移动分组…"},
+          ...histLedgerBuckets(groups, items).filter(b => b.key)
+            .map(b => ({v:b.key, t:`${b.name}（${b.count}）`})),
+          {v:"__new", t:"＋ 新建分组并移入…"}];
+}
+
+/* 勾选规则（ADR-0130）：以前“确认按钮何时能点”在四处手拄（<2 / !size / !==1），
+   “载入恰好 1 条”则是组件里的特例。现在都是一份 policy 的取值：
+   载入 {min:1,max:1}、对比 {min:2,max:HIST_MAX_CMP}、删除 {min:1}、拼接 {min:1,max:1} */
+function histPolicyCheck(n, policy){
+  const count = Number(n) || 0;
+  if(!policy) return {ok:true, count, reason:""};
+  const min = policy.min == null ? 0 : policy.min;
+  const max = policy.max == null ? Infinity : policy.max;
+  if(count < min)
+    return {ok:false, count, reason:policy.tooFew || (min === 1 ? "先勾选一条记录" : `至少勾 ${min} 条`)};
+  if(count > max)
+    return {ok:false, count, reason:policy.tooMany || (max === 1 ? "只能勾 1 条" : `最多勾 ${max} 条`)};
+  return {ok:true, count, reason:""};
+}
+/* 超过曲线配色条数 → 黄色警示（唯一用黄的地方，黄条=真墙，ADR-0115 同族）。
+   它与 policy 分开的理由：勾一撮是为了**归组**，勾 5 条不该被当成错误——
+   只有"这么多条画到一张图上分不清谁是谁"才是真墙 */
+function histDrawWarn(n, max){
+  const count = Number(n) || 0;
+  if(max == null || count <= max) return null;
+  return `已选 ${count} 条：对比曲线只有 ${max} 种颜色，超过就分不清谁是谁了`;
+}
+/* 短标题（触发按钮与台账行用）：时间 + 备注或模型。长串 historyLabel() 自 ADR-0130
+   起只给悬浮 title / aria，不再是任何可见文本的主体——否则上一轮“拆列”只完成了一半 */
+function histBrief(h){
+  if(!h) return "";
+  const t = String(h.started_at || h.run_id || "").replace(/^\d{4}-/, "").slice(0, 11);
+  return `${t} · ${h.note || (h.models || []).join(", ") || h.run_id}`;
+}
+/* 组名校验（确认框的 validate 用）：空、超长、撞保留名都当场说，不发请求。
+   超长是报错不是截断：截断后的名字与用户心里那个不是同一个，以后按旧名并并就合不上 */
+function histGroupError(name, existing){
+  const g = String(name == null ? "" : name).trim();
+  if(!g) return "组名不能为空";
+  if(g === HIST_UNGROUPED) return `「${HIST_UNGROUPED}」是保留名，换一个`;
+  if([...g].length > GROUP_NAME_MAX) return `组名不能超过 ${GROUP_NAME_MAX} 字符`;
+  if(Array.isArray(existing) && existing.includes(g)) return `已有同名组「${g}」，换一个名字或先解散它`;
+  return null;
+}
+function histNoteError(note){
+  const s = String(note == null ? "" : note).trim();
+  return [...s].length > GROUP_NOTE_MAX ? `备注不能超过 ${GROUP_NOTE_MAX} 字符` : null;
 }
 /* 「按模型自动建组」的**计划**（不是执行）：把未归组的记录按各自模型集合分拢，
    返回 [{group, run_ids[]}]。界面向它要两个数（“22 条落到 6 个组”）先报给用户，
@@ -4992,10 +5372,6 @@ function histVersionClash(items){
     ? "旧版" : String(h.metric_version)))];
   return vs.length > 1 ? vs : [];
 }
-/* 手填组改名/合并/解散前的报数：确认框必须先把“要动几条”说出来 */
-function histGroupCount(items, name){
-  return (items || []).filter(h => String(h && h.group || "").trim() === name).length;
-}
 function histGroupNames(items, except){
   const s = new Set();
   for(const h of (items || [])){
@@ -5003,6 +5379,17 @@ function histGroupNames(items, except){
     if(g && g !== except) s.add(g);
   }
   return [...s].sort();
+}
+/* 台账用的组名清单（优先读 groups 数组，含空组；没有 groups 时退回从摘要里反算）。
+   “输已有组名即并入”placeholder 与“除自身外”的候选都仍它 */
+function histGroupNamesOf(groups, items, exceptId){
+  const out = [];
+  for(const g of (groups || [])){
+    if(!g || !g.id) continue;
+    if(exceptId != null && String(g.id) === String(exceptId)) continue;
+    if(String(g.name || "").trim()) out.push(String(g.name).trim());
+  }
+  return out.length ? out.sort() : histGroupNames(items, exceptId);
 }
 
 /* 行内“元信息”短串（场景 · 上下文档位 · 并发）：记录行拆列后，备注/模型不再与
@@ -5074,6 +5461,20 @@ const ctxDevMarkOf = (target, tokens) => {
   const pct = Math.round(dev * 100), sign = pct > 0 ? "+" : "";
   return ` <span class="flag-warn" title="实际 prompt tokens 与目标档位偏差 ${sign}${pct}%（档位 ${fmtK(target)} → 实测 ${fmtK(tokens)}），超出 ±10%——上下文构造与设定不符，横向对比读数时注意口径错位">⚠偏 ${sign}${pct}%</span>`;
 };
+// 超窗删减重试留痕徽标：服务端拒收构造长度（报 context/exceed），引擎按阶梯
+// 0.75/0.5/0.3 砍掉中段填充语料重发后成功——读数对应的是**裁后**长度，与
+// ctx_target 不可比；且这类点按设计豁免构建偏离校正（偏离源于服务端超窗保护，
+// 重测必然复现），不留痕就只能从 sent_chars 对比里推（引擎 req/点级 ovf_trim）
+const OVF_KEEP_TXT = {1: "0.75×", 2: "0.5×", 3: "0.3×"};
+const ovfTrimMarkOf = p => (p && p.ovf_trim)
+  ? ` <span class="flag-warn" title="超窗删减重试：服务端拒收构造长度，已砍到首次构造量的 ${OVF_KEEP_TXT[p.ovf_trim] || ("1/" + p.ovf_trim)} 重发才成功——本行读数对应裁后长度，与设定档位不可比（此类点按设计豁免构建偏离校正，故只有本徽标提示偏差，没有 ↻校正重测）；重复轮次之间可能一轮未裁、一轮被裁">⚠超窗裁减</span>` : "";
+/* 实测长度短于档位（ctx_short）：服务端回报的 prompt_tokens 明显少于档位标签，
+   读数对应的上下文比标签短（原因可能是服务端静默截断，也可能是我们构造偏短，
+   引擎分不开，故只报事实不指认原因）。不判失败、只让标签不再说谎：只挂角标
+   （ADR-0136；与 ✂裁减 / ⚠超窗裁减 不同源，那两种是我们自己动的刀、各自有角标。
+   速率先验台账不受本标记影响——那里横轴用实测 token 数，短点正是实长锚点） */
+const ctxShortMarkOf = p => (p && p.ctx_short)
+  ? ` <span class="flag-warn" title="实测长度偏短：服务端只算了 ${fmtK(p.ctx_short.reported)} tokens，档位 ${fmtK(p.ctx_short.ctx)}（少 ${fmtK(p.ctx_short.dropped)}）——服务端截断或构造偏短，本行读数与设定档位、与其他轮次/部署不可比（速率先验台账不受影响：那里横轴用实测 token 数）">⚠长度偏短</span>` : "";
 /* 固定字长阶梯场景（translate）：ctx_target 是原文字符口径——档位标签带场景
    单位（不走 fmtK），且与 prompt_tokens 不同单位、不做偏差判别。
    贴边裁减点（带 ctx_edge）显示**裁前原档位** + 「✂裁减」角标：裁减只是为
@@ -5085,24 +5486,23 @@ const gearOf = p => {
   const m = state.scenMeta[p.scenario];
   if(m?.ladder) return `${p.ctx_target}${m.unit || ""}`;
   if(p.ctx_edge){
-    return `${fmtK(p.ctx_edge)} <span class="flag-warn" title="贴边裁减档：为保住输出预算与分词漂移余量，构造量由 ${fmtK(p.ctx_edge)} 裁到 ${fmtK(p.ctx_target)}（部署 max_ctx 上限）；逻辑档位不变，读数按裁后实测量">✂裁减</span>`;
+    return `${fmtK(p.ctx_edge)} <span class="flag-warn" title="贴边裁减档：为保住输出预算与分词漂移余量，构造量由 ${fmtK(p.ctx_edge)} 裁到 ${fmtK(p.ctx_target)}（部署 max_ctx 上限）；逻辑档位不变，读数按裁后实测量">✂裁减</span>${ctxShortMarkOf(p)}`;
   }
-  return fmtK(p.ctx_target);
+  return `${fmtK(p.ctx_target)}${ctxShortMarkOf(p)}`;
 };
 const ctxDevMark = (p, tokens) =>
   (p.inst_tokens != null || state.scenMeta[p.scenario]?.ladder) ? "" : ctxDevMarkOf(p.ctx_target, tokens);   // agent 矩阵 prompt = 缓存档 + 指令档，偏差不适用
 function addPoint(p){
   if(!state.points.has(pointKey(p))) state.donePoints++;
   state.points.set(pointKey(p), p);
-  bumpProgress();
   scheduleRender();   // 合帧全量重绘（终态/阶段切换由 renderAll/setPhase 同步落地，见上）
   const pv = preOf(p);
-  if(pv) kpiPush("#kpiPrefill", "#prefillBarWrap", "#prefillBarFill", pv, "最快 Prefill");
+  if(pv) kpiPush("#kpiPrefill", pv, "实测 Prefill");
   const dv = decOf(p);
   if(dv){
     // 点完成回写权威读数：主数值=最终窗口均值（停滞点取空窗校正口径），
     // 峰值对比沿用实时逻辑（ADR-0007）
-    kpiPush("#kpiDecode", "#decodeBarWrap", "#decodeBarFill", dv, "最快 Decode");
+    kpiPush("#kpiDecode", dv, "实测 Decode");
   }
 }
 /* 结果全量平铺（ADR：模型/场景筛选下拉已移除）——固定排序：
@@ -5149,7 +5549,7 @@ function cancelScheduledRender(){
   }
 }
 /* 合帧请求：本帧已排队则合并（多次 addPoint 只换一次重绘）。注意
-   bumpProgress 与 KPI 回写仍在 addPoint 内同步执行，不参与合帧 */
+   KPI 回写仍在 addPoint 内同步执行，不参与合帧 */
 function scheduleRender(){
   if(_renderRaf) return;
   _renderRaf = requestAnimationFrame(() => { _renderRaf = 0; renderAll(); });
@@ -5517,7 +5917,7 @@ function pointRow(p, isAgent, showTotal,
     const mainRow = `<tr class="${p.all_ok?"":"err"}">
       <td>${esc(p.model)}</td>${colsPre}<td${ttTitle}>${p.ttft_s ?? "-"}</td><td${preTitle}>${preMainVal}${prePhysMarkOf(p)}</td>
       ${decCells}${isAgent ? `<td title="端到端总时长：请求发出 → 末 token（TTFT + decode 全程）">${p.total_s ?? "-"}</td>` : ""}${calcCell}<td>${p.out_tokens != null ? fmtNum(p.out_tokens) : "-"}</td>
-      <td>${finishTxt(p.finish)}</td><td>${st}${gapWarn}${discardMark}${anomalyMark}${ctxRetryMark}${spliceMark}${metricMark}${fakeOkMarkOf(p)}${retestBtn}${delBtn}</td></tr>`;
+      <td>${finishTxt(p.finish)}</td><td>${st}${gapWarn}${discardMark}${anomalyMark}${ctxRetryMark}${ovfTrimMarkOf(p)}${spliceMark}${metricMark}${fakeOkMarkOf(p)}${retestBtn}${delBtn}</td></tr>`;
     // 重复轮次子行（withReps）：弃测轮（异常首测整批作废的留痕）在前、对应
     // 轮次的保留行（重测批）在后，按 rep 对齐插入；旧存档弃测条目无 rep 字段
     // 时标签回退「弃测#序号」且一律排在保留子行之前。聚合行保持均值口径；
@@ -5566,7 +5966,7 @@ function pointRow(p, isAgent, showTotal,
         <td></td>${colsPreR}<td>${r.ttft_s ?? "-"}</td><td${preConcTipR}>${concStyle ? (r.prefill_tok_s ?? "-") : (preOf(r) ?? "-")}${prePhysMarkOf(r)}</td>
         ${rDecCells}${isAgent ? `<td>${r.total_s ?? "-"}</td>` : ""}${rCalcCell}<td>${r.out_tokens != null ? fmtNum(r.out_tokens) : "-"}</td>
         <td>${finishTxt(r.finish)}</td>
-        <td>${rSt}${rStall}${rAnomMark}${fakeOkMarkOf(r)}</td></tr>`};
+        <td>${rSt}${rStall}${rAnomMark}${ovfTrimMarkOf(r)}${fakeOkMarkOf(r)}</td></tr>`};
     });
     // 弃测子行：弃测条目只有 ttft/decode 均速/输出 tokens/finish/样本等少数
     // 字段，其余列填 "-"；decode_tok_s 放均速列（两式同槽位），多发表
@@ -6259,6 +6659,7 @@ function cardSymbolNotes(pts){
   if(has(p => p.ctx_edge)) L.push("✂裁减 = 贴边裁减档：构造量裁到 max_ctx，读数按裁后实测量");
   if(has(p => p.spliced_from)) L.push("⇢拼接 = 该点由其他存档拼接而来，非本次实测");
   if(has(p => p.ctx_retry != null)) L.push("↻校正重测 = 构建偏离超 ±10%，已按实测密度校正重测");
+  if(has(p => p.ovf_trim) || hasRep(r => r.ovf_trim)) L.push("⚠超窗裁减 = 服务端拒收构造长度，砍掉部分填充语料重发才成功（读数按裁后长度，与档位不可比）");
   if(has(isLegacyMetric)) L.push("旧口径 = 遗留口径存档，不宜与当前口径混比");
   if(has(p => p.cache_reported === false && p.cache_hit_tokens)) L.push("≈ = 缓存命中为估算口径（网关未回传真值）");
   if(has(p => p.stall_s) || hasRep(r => r.stall_s)) L.push("⚠停滞 = decode 中途停滞，只标注不改读数");
@@ -6914,77 +7315,6 @@ const RUN_COLORS = ["#4F46E5", "#EA580C", "#0D9488", "#DB2777", "#A16207",
   "#2563EB", "#7C3AED", "#16A34A", "#DC2626", "#0891B2"];
 const REPO_URL = "github.com/zify9000/LLM-SPEED";   // 卡片页脚出处链接
 /* cmpLegendKey 已移入上方 §pure 区域 */
-
-/* 对比记录选择弹窗：候选列表可分组折叠 + 可搜索，且**选择集独立于视图**（ADR-0125）。
-   默认勾选不再是“最新两条”，而是「最新一条 + 它上一次同模型同场景的那条」
-   = 用户要的“对比新旧”；找不到同配置的旧记录才退回最新两条，并把这句话说出来。 */
-const cmpSel = new Set();          // 跳折叠、跳搜索、跳弹窗保留（本次页面会话内）
-let cmpSeeded = false;             // “建议对”只给一次，不覆盖用户后来的手动选择
-async function openCmpModal(){
-  try{ await fetchHistory(); }
-  catch(e){ setPill(e.message || "历史列表加载失败", "err"); return; }
-  if(histCache.length < 2){ setPill("至少需要 2 条历史记录才能对比", ""); return; }
-  let seedNote = "";
-  if(!cmpSeeded){
-    const sug = histCmpSuggest(histCache);
-    if(sug.ids.length){
-      cmpSel.clear();
-      sug.ids.forEach(id => cmpSel.add(id));
-      seedNote = sug.same
-        ? "已默认选中最新一条与它上一次同模型同场景的记录（对比新旧）"
-        : "没找到同模型同场景的旧记录，已默认选中最新两条";
-    }
-    cmpSeeded = true;
-  }
-  histViewMount("#cmpView", {sel:cmpSel, seedNote,
-    onSync:v => { $("#btnCmpConfirm").disabled = v.sel_ids.size < 2; }});
-  $("#cmpModalRoot").hidden = false;
-  document.addEventListener("keydown", onCmpModalKey);
-  trapModalFocus($("#cmpModalRoot"));   // Tab 圈定 + 关闭后焦点还原
-}
-function closeCmpModal(){
-  $("#cmpModalRoot").hidden = true;
-  document.removeEventListener("keydown", onCmpModalKey);
-  releaseModalFocus($("#cmpModalRoot"));
-}
-function onCmpModalKey(e){ if(e.key === "Escape") closeCmpModal(); }
-async function cmpConfirm(){
-  for(const id of [...cmpSel]) if(!histById(id)) cmpSel.delete(id);   // 已不存在的记录不进对比
-  const ids = [...cmpSel];
-  if(ids.length < 2){ setPill("至少勾选 2 条记录才能生成对比卡片", "err"); return; }
-  const btn = $("#btnCmpConfirm");
-  btn.disabled = true;   // 逐条拉取期间不可重复提交
-  const archs = [];
-  try{
-    for(const id of ids){
-      try{
-        const r = await fetch(`/api/bench/history/${encodeURIComponent(id)}`);
-        if(r.ok) archs.push(await r.json().catch(() => null));
-      }catch(e){ /* 单条网络失败：跳过，继续下一条 */ }
-    }
-  } finally {
-    btn.disabled = false;
-  }
-  // 坏存档/空存档不入对比（results 校验与 hydrateArchive 同口径，另要求非空）
-  const good = archs.filter(d => d && Array.isArray(d.results) && d.results.length
-    && !d.results.some(p => !p || typeof p !== "object" || Array.isArray(p)));
-  if(good.length < 2){
-    setPill("可用存档不足 2 条（部分载入失败或为空），对比中止", "err");
-    return;
-  }
-  good.sort((a, b) => String(a.started_at || "").localeCompare(String(b.started_at || "")));   // 时间序编号
-  state.cmp = {runs: good.map((d, i) => ({
-    id: d.run_id, tag: `#${i + 1}`, color: RUN_COLORS[i % RUN_COLORS.length],
-    started_at: d.started_at || "", note: (d.cfg && d.cfg.note) || "",
-    provider_label: (d.cfg && (d.cfg.provider_label || d.cfg.provider)) || "",
-    models: [...new Set(d.results.map(p => p && p.model).filter(Boolean))],
-    cfg: {...(d.cfg || {}), started_at: d.started_at},   // started_at 并入 cfg（isColdTurn 等按存档 cfg 判别，与 hydrateArchive 同口径）
-    results: d.results}))};
-  closeCmpModal();
-  setPhase("done");
-  unhide($("#cardCard"), true);   // 对比不依赖 state.points，卡片区显式展开
-  genCmpCards();
-}
 
 /* 对比卡片渲染：跨次跨模型合并为**一张**对比卡——两次结果叠进同一张图才
    直观（颜色=运行，系列名 #N 标签经运行色签条映射到模型/时间）；图例/数据
@@ -7699,6 +8029,7 @@ function historyLabel(h){
    改一处漏三处）。现在 fetchHistory() 是唯一入口；写操作后由 loadHistoryList()
    强制刷新，并让所有已挂载的视图重绘。 */
 let histCache = [];                                  // 当前列表（未搜索时 = 最近 limit 条摘要）
+let histGroupsCache = [];                            // 组实体清单 [{id,name,note,count}]，含空组
 let histMeta = {total:0, matched:0, truncated:false, limit:0, query:""};
 let histPending = null;
 async function fetchHistory(force){
@@ -7711,6 +8042,7 @@ async function fetchHistory(force){
     }
     const d = await r.json();
     histCache = d.history || [];
+    histGroupsCache = d.groups || [];                // 台账左栏与“移到哪个组”的唯一清单
     histMeta = {total:d.total ?? histCache.length, matched:d.matched ?? histCache.length,
                 truncated:!!d.truncated, limit:d.limit || histCache.length, query:""};
     return histCache;
@@ -7727,487 +8059,907 @@ async function histQuery(q){
     throw new Error(e.detail || `搜索失败（HTTP ${r.status}）`);
   }
   const d = await r.json();
-  return {items:d.history || [], total:d.total || 0, matched:d.matched || 0,
+  return {items:d.history || [], groups:d.groups || histGroupsCache,
+          total:d.total || 0, matched:d.matched || 0,
           truncated:!!d.truncated, limit:d.limit || 0};
 }
 const histById = id => histCache.find(h => h && h.run_id === id);
-/* 列表刷新 = 唯一的失效入口：刷新后同步选项、当前记录显示、所有已挂载视图 */
+/* 列表刷新 = 唯一的失效入口：刷新后同步当前记录显示与所有已挂载视图。
+   自 ADR-0130 起**不再有 histRenderOptions()**：没有 `<option>` 要重算，也就不必
+   为每条记录生成长串标题（那是隐藏下拉框留下的唯一“必须算它”的理由） */
 async function loadHistoryList(){
   try{ await fetchHistory(true); }
   catch(e){
-    $("#historySel").innerHTML = '<option value="">历史列表加载失败</option>';
     histSetCurrent("");
     setPill(e.message || "历史列表加载失败", "err");
     return;
   }
-  histRenderOptions();
-  histViewsRefresh();
+  // 当前记录可能已被删：按目录重对一次，对不上就归空（旧代码靠重注 option 实现同一件事）
+  if(state.histId && !histById(state.histId)) state.histId = "";
+  histSetCurrent(state.histId);
+  hdRefreshIfOpen();
+  renderHistQuick();
   renderActiveRuns();
 }
-function histRenderOptions(){
-  // 隐藏下拉框仍按 run_id 留 option：十余处 `#historySel.value = id` 靠它还原选中
-  $("#historySel").innerHTML = histCache.map(h => {
-    try{
-      return `<option value="${esc(h.run_id)}">${esc(historyLabel(h))}</option>`;
-    }catch(e){
-      return `<option value="${esc(h && h.run_id || "")}">（记录元数据损坏）${esc(h && h.run_id || "")}</option>`;
-    }
-  }).join("") || '<option value="">暂无记录</option>';
-  histSetCurrent($("#historySel").value);   // 选项重建后若该条已被删，自动掉回空
-}
-/* 当前记录的**唯一写入口**：隐藏下拉框仍是事实源，触发按钮只是它的显示面 */
+/* 当前记录的**唯一事实源是 `state.histId`**（ADR-0130）。以前这里坐着一个隐藏
+   `<select>`，十余处按 `.value` 取值——它早不是控件，只是借 DOM 节点当变量 */
+function histCurrent(){ return state.histId || ""; }
 function histSetCurrent(id){
-  const sel = $("#historySel");
-  const want = id && [...sel.options].some(o => o.value === id) ? id : "";
-  sel.value = want;
-  const h = histById(want), t = $("#histPickT"), btn = $("#histPick");
+  state.histId = (id && histById(id)) ? id : "";     // 不在目录里的 id 一律接不住
+  const h = histById(state.histId), t = $("#histPickT"), btn = $("#histPick");
   if(!t || !btn) return;
-  const txt = h ? historyLabel(h) : (histCache.length ? "选择历史记录…" : "暂无历史记录");
+  const txt = h ? histBrief(h)
+    : (histCache.length ? `全部记录（${histCache.length}）` : "暂无历史记录");
   t.textContent = txt;
-  t.classList.toggle("empty", !h);
-  btn.title = h ? `当前记录：${txt}`
-    : "点开选择历史记录（可搜索、可按模型/天/分组折叠）";
+  t.classList.toggle("is-empty", !h);
+  btn.title = h ? `当前记录：${historyLabel(h)}` : "打开历史浏览器：单击选中一条，双击载入；勾多条可对比 / 归组 / 删除";
+  hdSyncCurMark();
 }
-/* 历史记录「…」菜单的开合。三条纪律与浮层一致：点外面关（mousedown 捕获，菜单项在包裹
-   层内所以不会自己把自己关掉）、Esc 关并把焦点还给开关按钮、开的时候把 aria-expanded
-   写对（读屏靠它播报"已展开"）。菜单项点击 → 先收菜单再执行动作，否则弹窗压在一个还
-   开着的菜单上面 */
-function openHistMenu(){
-  const m = $("#histMenu"), btn = $("#histMoreBtn");
-  m.hidden = false;
-  m.classList.toggle("down", btn.getBoundingClientRect().top < m.offsetHeight + 12);
-  btn.setAttribute("aria-expanded", "true");
-  document.addEventListener("mousedown", histMenuOutside, true);
-  document.addEventListener("keydown", histMenuEsc, true);
+/* ---------------- 历史浏览器抽屉（ADR-0132：五面归一）----------------
+   旧形状：载入浮层 / 对比 / 删除 / 拼接 / 分组台账 五个面各自渲染同一份列表
+   （同一列表五份挂载，"勾多条是为了归组不是为了载入"这种提示本身就是交互失败的自白）。
+   现在只剩这一个抽屉，三条手势说清全部：
+   - **单击行 = 选中/取消**（未选中行立即加选；已选中行等双击窗口 450ms 过后取消——取消必须等窗口确认"真的只是一击"；与勾选框同源）；**双击行 = 载入**（查看是成本最低的默认动作；拼接选源态仍是单击 = 选来源）
+   - **勾选 = 选集**：对比 / 移动分组 / 移出 / 删除 都作用于它；选集跨搜索/切桶/开合保留，
+     且永远在底栏芯片里看得见（删除确认框再逐条列名，危险动作不吃"看不见的勾选"）
+   - **左栏点组 = 过滤，拖到组名上 = 归组**：组导航与组管理同栏（改名/并入/解散收 ⋯），
+     折叠机制随旧浮层一起退役——左栏导航上任后，折叠失去了存在理由
+   纪律沿用：搜索走服务端全集（ADR-0126）；选择集独立于视图；组是实体（ADR-0129） */
+const HIST_RUN_GROUP_KEY = "llmspeed.histRunGroup";  // 上次跑测速用过的组名（启动表单记忆）
+const hdSel = new Set();          // 唯一选集（旧 cmpSel/histPopIds/ledgerIds 三 Set 归一）
+let hdBucket = null;              // 当前过滤桶：null=全部；""=未分组；其余=组 id
+let hdCollapsed = new Set();  // 「全部记录」目录态下折叠了的组键（纯展示态，切桶/搜索不涉及；组级过滤是左栏的活）
+let hdSearched = null;            // 搜索态 {items, meta}；null = 目录态（histCache）
+let hdMode = "browse";            // "browse" | "splice"（拼接选源：抽屉就地换模式）
+let hdSpliceTarget = "";          // splice 模式：目标存档（拼接到哪条）
+let hdSpliceSrc = "";             // splice 模式：已选的来源存档
+let hdSearchTimer = 0;
+let hdRowFirstClick = null;     // 双击判定：{rid, t}（同一行 450ms 窗口内的第二击 = 载入/选源）
+let hdRowUnpick = new Map();    // 待取消选中：rid → timer（点已选中行，双击窗口过后才兑现；双击则撤掉）
+let hdHideTimer = null;           // 关抽屉的 300ms 退场计时（与 cfgDrawer 同手法）
+
+async function openHistDrawer(){
+  try{ await fetchHistory(); }
+  catch(e){ setPill(e.message || "历史列表加载失败", "err"); return; }
+  clearTimeout(hdHideTimer);
+  const root = $("#histDrawerRoot");
+  root.hidden = false;
+  lockScroll();
+  requestAnimationFrame(() => requestAnimationFrame(() => root.classList.add("open")));
+  document.addEventListener("keydown", onHistDrawerKey);
+  hdRenderAll();
+  $("#histPick").setAttribute("aria-expanded", "true");
+  $("#hdSearch").focus();
 }
-function closeHistMenu(){
-  const m = $("#histMenu");
-  if(m.hidden) return;
-  m.hidden = true;
-  $("#histMoreBtn").setAttribute("aria-expanded", "false");
-  document.removeEventListener("mousedown", histMenuOutside, true);
-  document.removeEventListener("keydown", histMenuEsc, true);
+function closeHistDrawer(){
+  const root = $("#histDrawerRoot");
+  if(root.hidden) return;
+  hdRowUnpick.clear();           // 关抽屉时未兑现的待取消全部作废（抽屉已关，不该背后改选集）
+  hdMenuClose();
+  root.classList.remove("open");
+  unlockScroll();
+  clearTimeout(hdHideTimer);
+  hdHideTimer = setTimeout(() => { root.hidden = true; }, 300);
+  document.removeEventListener("keydown", onHistDrawerKey);
+  const btn = $("#histPick");
+  btn.setAttribute("aria-expanded", "false");
+  btn.focus();   // 焦点还给触发钮（读屏与键盘流的回程票）
 }
-function toggleHistMenu(){ $("#histMenu").hidden ? openHistMenu() : closeHistMenu(); }
-function histMenuOutside(e){ if(!e.target.closest("#histMoreWrap")) closeHistMenu(); }
-function histMenuEsc(e){ if(e.key === "Escape"){ closeHistMenu(); $("#histMoreBtn").focus(); } }
-function histAct(kind){
-  closeHistMenu();
-  if(kind === "note") editHistoryNote();
-  else if(kind === "rename") openRenameModal();
-  else openSpliceModal();   // 分组不在这里：归组是“挑哪几条”的事，在历史浮层里做
-}
-/* ---------------- 历史列表视图组件（ADR-0125 追加轮：只有组，没有“维度”）----------------
-   一个视图 = 工具条（搜索 + 归组动作）+ 说明行 + 提示行 + 已选条 + 分组列表 (+ 载入底栏)。
-   **一律复选框**（旧的 pick / radio 两种模式删掉了）：同一个列表既要能挑一条来载入，也要
-   能勾一撮来归组，摆两套选择控件就是缝合怪。规则只剩一条：**「载入」要求恰好勾 1 条**，
-   勾多条时按钮禁用并把原因写在旁边——不猜用户想要哪一条。
-   opt：load（载入底栏）/ manage（组操作与归组入口，只在载入浮层开：对比、删除、拼接只是
-        挑记录的地方，不该长出第二套管理界面）/ itemsSrc / onSync / sel / cur / seedNote
-   **选择集独立于视图**：折叠与搜索都不清选——折叠只是“不显示”，若折叠顺手取消勾选，
-   最终对比卡里的读数就被一次“收起”动作静默改变（隐形输入）。
-   重绘只换 .hp-list 与几行文案，**搜索框不在重绘范围内**（否则边打字边丢焦点）。 */
-const HIST_VIEWS = {};                               // 挂载点选择器 -> 视图状态
-const HIST_RUN_GROUP_KEY = "llmspeed.histRunGroup";  // 上次跑测速用过的组名
-const HIST_FOLD_KEY = "llmspeed.histFold2";          // {组名: 是否展开}；只存浏览器，换机器丢
-const CHEVRON = '<svg class="ic chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
-function histFoldMap(){
-  try{ const m = JSON.parse(localStorage.getItem(HIST_FOLD_KEY) || "{}");
-       return m && typeof m === "object" ? m : {}; }catch(e){ return {}; }
-}
-function histFoldSet(key, open){
-  const m = histFoldMap();
-  m[key] = open;
-  try{ localStorage.setItem(HIST_FOLD_KEY, JSON.stringify(m)); }
-  catch(e){ /* 隐私模式：本会话生效即可 */ }
-}
-function histViewMount(sel, opt){
-  let v = HIST_VIEWS[sel];
-  if(!v){
-    v = HIST_VIEWS[sel] = {sel, q:"", items:[],
-                           meta:{total:0, matched:0, truncated:false, limit:0},
-                           sel_ids:new Set(), cur:"", onSync:null, timer:0, skelKey:""};
-    histViewBind(v);          // 监听挂在**容器**上，骨架重建不影响
+function toggleHistDrawer(){ $("#histDrawerRoot").hidden ? openHistDrawer() : closeHistDrawer(); }
+function onHistDrawerKey(e){
+  if(e.key === "Escape"){
+    if(!$("#hdMenu").hidden){ hdMenuClose(); return; }          // 菜单开着先收菜单
+    if(hdMode === "splice"){ hdSpliceExit(); return; }          // 拼接模式先退回浏览
+    closeHistDrawer(); return;
   }
-  for(const k of ["load", "manage", "itemsSrc", "onSync", "seedNote", "cur"])
-    if(opt[k] !== undefined) v[k] = opt[k];
-  if(opt.sel !== undefined) v.sel_ids = opt.sel;
-  /* 骨架必须在选项**之后**建：载入底栏与「收入新组…」都是按 load/manage 长出来的，
-     先建骨架就会得到一个“有列表但按钮永远不在”的浮层（踩过） */
-  const skel = (v.load ? "L" : "-") + (v.manage ? "M" : "-");
-  if(skel !== v.skelKey){ v.skelKey = skel; histViewSkeleton(v); }
-  histViewItems(v);
-  histViewRender(v.sel);
-  return v;
+  wrapTabWithin($("#histDrawer"), e);   // 焦点圈定在抽屉内（共享实现）
 }
-function histViewItems(v){
-  if(v.q){ return; }                                 // 搜索中：items 由 histViewSearch 写入
-  v.items = typeof v.itemsSrc === "function" ? v.itemsSrc() : histCache;
-  v.meta = {total:histMeta.total, matched:histMeta.matched,
-            truncated:histMeta.truncated, limit:histMeta.limit};
+/* 抽屉开着时的全量失效入口（列表写过一次就调它；关着则什么都不用做） */
+function hdRefreshIfOpen(){
+  if($("#histDrawerRoot").hidden) return;
+  if(hdBucket !== null && hdBucket !== "" && !hdBuckets().some(b => b.key === hdBucket))
+    hdBucket = null;                      // 桶没了（解散/并入）退回全部，别指着失踪的组
+  hdRenderAll();
 }
-function histViewSkeleton(v){
-  const foot = v.load
-    ? `<div class="hp-foot"><span class="hint">勾 1 条再按「载入」；勾多条是为了归组</span><span class="hp-fbtns"><button type="button" class="btn-primary hp-load" disabled>载入</button></span></div>`
-    : "";
-  $(v.sel).innerHTML = `<div class="hp-bar">
-      <input class="hp-search" type="search" aria-label="搜索历史记录"
-             placeholder="搜备注 / 模型 / 组名 / 日期 / 记录编号（走全部记录）">
-      ${v.manage ? `<button type="button" class="btn-ghost nav-btn hp-mk">收入新组…</button>
-        <button type="button" class="btn-ghost nav-btn hp-all">全选可见</button>
-        <button type="button" class="btn-ghost nav-btn hp-none">清空所选</button>`
-                 : `<button type="button" class="btn-ghost nav-btn hp-all">全选可见</button>
-        <button type="button" class="btn-ghost nav-btn hp-none">清空所选</button>`}
-    </div>
-    <div class="hp-disc" hidden></div>
-    <div class="hp-warn" hidden></div>
-    <div class="hp-chips" hidden></div>
-    <div class="hp-list"></div>${foot}`;
+function hdBuckets(){ return histLedgerBuckets(histGroupsCache, histCache); }
+/* 「当前载入」标记的轻量刷新：histSetCurrent 时不必整列表重渲 */
+function hdSyncCurMark(){
+  if($("#histDrawerRoot").hidden) return;
+  const cur = histCurrent();
+  for(const el of $("#hdList").querySelectorAll(".hd-row"))
+    el.classList.toggle("cur", el.dataset.rid === cur);
 }
-function histViewBind(v){
-  const root = $(v.sel);
-  root.addEventListener("input", e => {
-    if(e.target.classList.contains("hp-search")) histViewSearch(v.sel, e.target.value);
-  });
-  root.addEventListener("click", e => {
-    const fold = e.target.closest("[data-fold]");
-    if(fold){ histFoldSet(fold.dataset.fold, !histViewOpen(v, fold.dataset.fold));
-      histViewRender(v.sel); return; }
-    const gop = e.target.closest("[data-gop]");
-    if(gop){ histGroupOp(gop.dataset.gop, gop.dataset.g, v); return; }
-    if(e.target.closest(".hp-mk")){ histViewMakeGroup(v); return; }
-    if(e.target.closest(".hp-all")){ histViewSelectVisible(v, true); return; }
-    // 全选只吃**可见**（折叠的不偷进选择），清空则吃全部：清空是往安全方向走，
-    // 名字必须说清它清的是什么（旧版“清空”只清可见，与字面不符）
-    if(e.target.closest(".hp-none")){ v.sel_ids.clear(); histViewRender(v.sel); return; }
-    const chip = e.target.closest("[data-chip]");
-    if(chip){ v.sel_ids.delete(chip.dataset.chip); histViewRender(v.sel); return; }
-    if(e.target.closest(".hp-load")){ histViewLoad(v); return; }
-  });
-  // 勾选走原生 input（label 包控件，整行可点），这里只同步选择集与周边文案；
-  // 用户一改勾选，“默认已选…”那句提示就该消失（还挂着会误导）
-  root.addEventListener("change", e => {
-    if(e.target.closest("[data-rid], [data-gck]")) v.seedNote = "";
-    const ck = e.target.closest("[data-rid]");
-    if(ck){
-      ck.checked ? v.sel_ids.add(ck.dataset.rid) : v.sel_ids.delete(ck.dataset.rid);
-      histViewRowStates(v); histViewSync(v.sel); return;
-    }
-    const gck = e.target.closest("[data-gck]");
-    if(gck){
-      const g = histViewGroups(v).find(x => x.key === gck.dataset.gck);
-      if(g) for(const h of g.items){ gck.checked ? v.sel_ids.add(h.run_id) : v.sel_ids.delete(h.run_id); }
-      histViewRender(v.sel); return;
-    }
-  });
+function hdVisibleItems(){
+  if(hdSearched) return hdSearched.items;
+  if(hdBucket === null) return histCache;
+  const b = hdBuckets().find(x => x.key === hdBucket);
+  return b ? b.items : [];
 }
-function histViewGroups(v){ return histGroups(v.items); }
-function histViewOpen(v, key){
-  if(v.q) return true;              // 搜索中强制展开：命中却藏在收起的组里比不分组更糟
-  const m = histFoldMap();
-  return key in m ? !!m[key] : histFoldDefault();
+function hdRenderAll(){
+  hdRenderGroups(); hdRenderList(); hdSync();
 }
-function histViewSearch(sel, q){
-  const v = HIST_VIEWS[sel];
-  clearTimeout(v.timer);
-  v.q = q.trim();
-  v.timer = setTimeout(async () => {
-    try{
-      if(!v.q){ histViewItems(v); histViewRender(sel); return; }
-      const d = await histQuery(v.q);
-      if(HIST_VIEWS[sel] !== v) return;               // 期间被重建/关掉：丢弃过期响应
-      v.items = d.items;
-      v.meta = {total:d.total, matched:d.matched, truncated:d.truncated, limit:d.limit};
-      histViewRender(sel);
-    }catch(e){ setPill(e.message || "搜索失败", "err"); }
-  }, 250);
+/* 左栏：全部 / 各组（含空组）/ 未分组垫底。空组必须能出现——「新建组」的全部意义
+   就是先有个组、再往里放记录（ADR-0129） */
+function hdRenderGroups(){
+  const rows = [{key:null, name:"全部记录", note:"", count:histCache.length}, ...hdBuckets()];
+  $("#hdGroups").innerHTML = rows.map(r => {
+    const on = r.key === hdBucket || (r.key === null && hdBucket === null);
+    const ops = r.key
+      ? `<button type="button" class="hg-op" data-gop="${esc(r.key)}" aria-label="组「${esc(r.name)}」操作"
+           title="改名 / 备注 / 并入 / 解散"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg></button>` : "";
+    return `<div class="hd-gitem${on ? " on" : ""}${r.note ? " has-note" : ""}" data-bkt="${esc(r.key == null ? "" : r.key)}"${r.key == null ? ' data-all="1"' : ` title="${esc(r.name)}"`}
+        role="button" tabindex="0" aria-pressed="${on}">
+      <span class="hg-n">${esc(r.name)}</span><span class="hg-c">${r.count}</span>${ops}
+      ${r.note ? `<span class="hg-note">${esc(r.note)}</span>` : ""}
+    </div>`;
+  }).join("");
 }
-function histViewRender(sel){
-  const v = HIST_VIEWS[sel];
-  if(!v) return;
-  const root = $(v.sel);
-  const g = histViewGroups(v);
-  root.querySelector(".hp-list").innerHTML = g.length
-    ? g.map(x => histSecHTML(v, x)).join("")
-    : `<div class="hp-empty">${v.q ? "没有匹配的记录（试更短的关键词）" : "还没有记录归过组，勾几条点「收入新组…」"}</div>`;
-  histViewSync(sel);
+/* 主列表。目录态的「全部」视图按组分节（节头 = 整组勾选 + 折叠开关）；
+   桶内视图与搜索结果都是平铺 */
+/* 渲染用条目集：splice 模式下排除目标自身（自己不能当自己的来源） */
+function hdListItems(){
+  const arr = hdVisibleItems();
+  return hdMode === "splice" ? arr.filter(it => it.run_id !== hdSpliceTarget) : arr;
 }
-/* 只换行的底色与勾选态，不重建列表：选一条记录不该让搜索框/滚动位置飞掉 */
-function histViewRowStates(v){
-  for(const el of $(v.sel).querySelectorAll(".hp-row")){
-    const on = v.sel_ids.has(el.dataset.rid);
-    el.classList.toggle("on", on);
-    const i = el.querySelector("input");
-    if(i) i.checked = on;
+function hdRenderList(){
+  const box = $("#hdList");
+  box.classList.toggle("pick", hdMode === "splice");
+  const cur = histCurrent();
+  if(hdMode === "splice" && !hdListItems().length){
+    box.innerHTML = `<div class="hd-empty">没有其他历史记录可作拼接来源</div>`; return;
   }
+  if(hdSearched){
+    const items = hdListItems();
+    box.innerHTML = items.length
+      ? items.map(it => hdRowHTML(it, cur)).join("")
+      : `<div class="hd-empty">没有匹配的记录（试更短的关键词）</div>`;
+    return;
+  }
+  if(hdBucket !== null){
+    const items = hdListItems();
+    box.innerHTML = items.length
+      ? items.map(it => hdRowHTML(it, cur)).join("")
+      : `<div class="hd-empty">这一组还没有记录：从「全部记录」里勾几条拖到左侧组名上，或用底栏「移动分组」</div>`;
+    return;
+  }
+  if(!histCache.length){
+    box.innerHTML = `<div class="hd-empty">还没有记录，先跑一轮测速</div>`; return;
+  }
+  const secs = hdBuckets().filter(b => b.count > 0);
+  box.innerHTML = secs.map(b => {
+    const nSel = b.items.filter(it => hdSel.has(it.run_id)).length;
+    const closed = hdCollapsed.has(b.key);
+    return `<div class="hd-sec-t">
+        <input type="checkbox" data-gck="${esc(b.key)}" ${nSel && nSel === b.count ? "checked" : ""}
+          aria-label="勾选「${esc(b.name)}」全部 ${b.count} 条">
+        <span class="hd-sec-n" data-bkt="${esc(b.key)}" role="button" tabindex="0"
+          aria-expanded="${!closed}" title="${closed ? "展开" : "折叠"}「${esc(b.name)}」的记录">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>${esc(b.name)}</span>
+        <span>${b.count} 条${hdMode === "browse" && nSel ? ` · 已选 ${nSel}` : ""}</span>
+      </div>` + (closed ? "" : b.items.filter(it => hdMode !== "splice" || it.run_id !== hdSpliceTarget)
+        .map(it => hdRowHTML(it, cur)).join(""));
+  }).join("");
 }
-function histSecHTML(v, g){
-  const open = histViewOpen(v, g.key);
-  const nSel = g.items.filter(h => v.sel_ids.has(h.run_id)).length;
-  /* 组操作只在 manage 视图出现，且用**带文字的安静按钮**：图标看不懂、下拉菜单又多一层
-     「未分组」也有整组复选框——「勾一撮 → 收进一个组」是这条链路的主路径，不给整组勾选
-     就等于让用户点 N 次（旧决策“未分组不给批量入口”是旧形状下的结论，ADR-0126 追加轮作废） */
-  const ops = v.manage
-    ? (g.key ? `<span class="hp-gops"><button type="button" class="hp-gop" data-gop="rename" data-g="${esc(g.key)}">改名</button><button type="button" class="hp-gop" data-gop="merge" data-g="${esc(g.key)}">并入</button><button type="button" class="hp-gop" data-gop="dissolve" data-g="${esc(g.key)}">解散</button></span>`
-             : `<span class="hp-gops"><button type="button" class="hp-gop" data-gop="auto">按模型自动建组</button></span>`)
-    : "";
-  const bits = [`${g.count} 条`, g.latest ? g.latest.slice(0, 16) : ""];
-  if(nSel) bits.push(`已选 ${nSel}`);
-  return `<div class="hp-sec" data-key="${esc(g.key)}">
-    <div class="hp-head">
-      <input type="checkbox" class="hp-gck" data-gck="${esc(g.key)}" ${nSel === g.count ? "checked" : ""}
-        aria-label="勾选「${esc(g.name)}」全部 ${g.count} 条">
-      <button type="button" class="hp-foldb${open ? "" : " closed"}" data-fold="${esc(g.key)}"
-              aria-expanded="${open}" aria-label="展开或折叠分组 ${esc(g.name)}">${CHEVRON}
-        <span class="hg-k">${esc(g.name)}</span>
-        <span class="hg-m">${esc(bits.filter(Boolean).join(" · "))}</span>
-      </button>${ops}
+/* 记录行：两行式。[勾] 时间+模型名+备注（主行；备注不再顶替模型名）/ 元信息（次行） | 徽标+hover 动作 */
+function hdRowHTML(it, cur){
+  const on = hdSel.has(it.run_id);
+  const t = String(it.started_at || it.run_id || "").replace(/^\d{4}-/, "").slice(0, 11);
+  const models = (it.models || []).join(", ") || it.run_id;
+  const sub = [histSubOf(it, SCEN_LABEL)];
+  const ck = hdMode === "splice" ? ""
+    : `<input type="checkbox" class="hd-ck" data-rid="${esc(it.run_id)}" ${on ? "checked" : ""}
+        aria-label="勾选记录 ${esc(it.run_id)}">`;
+  const acts = hdMode === "splice" ? ""
+    : `<div class="hd-acts">
+        <button type="button" class="icon-btn" data-more="${esc(it.run_id)}" aria-label="记录操作"
+          title="备注 / 改名 / 拼接 / 删除"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg></button>
+      </div>`;
+  return `<div class="hd-row${on ? " on" : ""}${it.run_id === cur ? " cur" : ""}${it.run_id === hdSpliceSrc ? " src" : ""}"
+      data-rid="${esc(it.run_id)}" role="button" tabindex="0" ${hdMode === "browse" ? 'draggable="true"' : ""}
+      title="${esc(historyLabel(it))}${hdMode === "splice" ? "（点选为拼接来源）" : "（单击选中 / 再单击取消 / 双击载入控制台）"}">
+    ${ck}
+    <div class="hd-rowtxt">
+      <div class="hd-r1"><span class="hd-time">${esc(t)}</span>
+        <span class="hd-name">${esc(models)}${it.note ? ` <span class="hd-name-note">【${esc(it.note)}】</span>` : ""}</span></div>
+      ${sub.filter(Boolean).length ? `<div class="hd-r2">${esc(sub.filter(Boolean).join(" · "))}</div>` : ""}
     </div>
-    ${open ? `<div class="hp-rows">${g.items.map(h => histRowHTML(h, v, g)).join("")}</div>` : ""}
+    <span class="hd-side-r">
+      ${it.n_failed ? `<span class="hd-badge" title="失败测点数">✗${it.n_failed}</span>` : ""}
+      ${acts}
+    </span>
   </div>`;
 }
-function histRowHTML(h, v, g){
-  const on = v.sel_ids.has(h.run_id);
-  const t = String(h.started_at || h.run_id || "").replace(/^\d{4}-/, "").slice(0, 11);
-  const nm = h.note || (h.models || []).join(", ") || h.run_id;
-  /* 组名就是模型名时，带备注的行不再把模型重复一遍（整组都是那个模型，重复只是噪声） */
-  const redundantModel = !!(g && g.key) && histModelKey(h) === g.key;
-  const sub = h.note
-    ? [redundantModel ? "" : (h.models || []).join(", "), histSubOf(h, SCEN_LABEL)]
-    : [histSubOf(h, SCEN_LABEL)];
-  const badges = [];
-  /* 组名不再进徽标：列表本身就是按组排的，再贴一遍是噪音。只剩会改变**比较结论**的东西 */
-  if(h.run_id === v.cur) badges.push(`<span class="hp-badge cur" title="控制台当前打开的记录">当前</span>`);
-  if(h.metric_version != null) badges.push(`<span class="hp-badge" title="测量口径版本">口径v${esc(String(h.metric_version))}</span>`);
-  if(h.n_failed) badges.push(`<span class="hp-badge bad" title="失败测点数">✗${h.n_failed}</span>`);
-  return `<label class="hp-row${on ? " on" : ""}" data-rid="${esc(h.run_id)}" title="${esc(historyLabel(h))}">
-    <input type="checkbox" data-rid="${esc(h.run_id)}" ${on ? "checked" : ""} aria-label="勾选记录 ${esc(h.run_id)}">
-    <span class="hp-t">${esc(t)}</span>
-    <span class="hp-nm">${esc(nm)}${sub.filter(Boolean).length ? `<i>${esc(sub.filter(Boolean).join(" · "))}</i>` : ""}</span>
-    <span class="hp-bd">${badges.join("")}</span></label>`;
-}
-/* 文案与按钮态：计数/披露/提示/已选条/组头三态（indeterminate 没有属性可写，只能 JS 打） */
-function histViewSync(sel){
-  const v = HIST_VIEWS[sel];
-  if(!v) return;
-  const root = $(v.sel);
-  const disc = root.querySelector(".hp-disc");
-  const bits = [];
-  if(v.q) bits.push(`搜索走的是全部 ${v.meta.total} 条记录，命中 ${v.meta.matched} 条`);
+/* 文案与按钮态：披露行 / 提示行 / 底栏 / 当前条 */
+function hdSync(){
+  const items = hdVisibleItems();
+  const disc = [];
+  if(hdSearched)
+    disc.push(`搜索走的是全部 ${hdSearched.meta.total} 条记录，命中 ${hdSearched.meta.matched} 条`
+      + (hdBucket !== null ? "（下面只显示当前组里的命中）" : ""));
   else{
-    bits.push(`共 ${v.meta.total} 条记录`);
-    if(v.meta.truncated) bits.push(`当前只显示最近 ${v.meta.limit} 条，更早的要靠搜索`);
+    disc.push(hdBucket === null ? `共 ${histMeta.total} 条记录` : `本组 ${items.length} 条`);
+    if(hdBucket === null && histMeta.truncated)
+      disc.push(`当前只显示最近 ${histMeta.limit} 条，更早的要靠搜索`);
   }
-  disc.textContent = bits.join(" · ");
-  disc.hidden = !bits.length;
-  const missing = v.sel_ids.size - [...v.sel_ids].filter(id => histById(id)).length;
-  const selItems = [...v.sel_ids].map(histById).filter(Boolean)
-    .sort((a, b) => String(a.started_at || "").localeCompare(String(b.started_at || "")));
-  /* 提示行默认灰字（只是把状态说出来），**只有"超出曲线色数"才用黄色**：那是真墙，
-     而口径混排、默认已选这类是"你自己判断"的信息，染黄等于天天拉警报 */
-  const warn = root.querySelector(".hp-warn");
+  $("#hdDisc").textContent = disc.join(" · ");
+  /* 提示行：默认灰字说状态，只有"超出曲线配色数"才黄底（真墙，ADR-0115 同族） */
+  const selItems = [...hdSel].map(histById).filter(Boolean);
   const w = [];
   let hard = false;
-  if(v.sel_ids.size > HIST_MAX_CMP){
-    w.push(`已选 ${v.sel_ids.size} 条：对比曲线只有 ${HIST_MAX_CMP} 种颜色，建议收到 5 条以内`);
-    hard = true;
-  }
+  const draw = histDrawWarn(hdSel.size, HIST_MAX_CMP);
+  if(draw){ w.push(draw); hard = true; }
   const clash = histVersionClash(selItems);
   if(clash.length) w.push(`选中记录的测量口径版本不同（${clash.join(" / ")}），卡片会混排——差异由你裁决，不阻断`);
-  if(v.seedNote) w.push(v.seedNote);
+  const warn = $("#hdWarn");
   warn.textContent = w.join(" · ");
   warn.classList.toggle("soft", !hard);
   warn.hidden = !w.length;
-  const chips = root.querySelector(".hp-chips");
-  if(v.sel_ids.size){
-    const shown = selItems.slice(0, 8).map(h =>
-      `<span class="hp-chip"><b title="${esc(historyLabel(h))}">${esc(String(h.started_at || "").slice(5, 16) + " " + ((h.models || []).join(",") || h.run_id))}</b><button type="button" data-chip="${esc(h.run_id)}" aria-label="取消选择 ${esc(h.run_id)}">×</button></span>`).join("");
-    chips.innerHTML = `<span class="hp-n">已选 ${v.sel_ids.size} 条${missing > 0 ? `（${missing} 条已不存在，将自动剔除）` : ""}</span>${shown}${selItems.length > 8 ? `<span class="hp-chip"><b>另 ${selItems.length - 8} 条</b></span>` : ""}`;
-    chips.hidden = false;
-  } else chips.hidden = true;
-  for(const el of root.querySelectorAll(".hp-gck")){
-    const g = histViewGroups(v).find(x => x.key === el.dataset.gck);
-    if(!g) continue;
-    const n = g.items.filter(h => v.sel_ids.has(h.run_id)).length;
-    el.indeterminate = n > 0 && n < g.count;
-  }
-  const load = root.querySelector(".hp-load");
-  if(load) load.disabled = v.sel_ids.size !== 1;   // 恰好 1 条才能载入：不猜用户要哪条
-  if(v.onSync) v.onSync(v);
+  hdRenderFoot();
 }
-function histViewSelectVisible(v, on){
-  const ids = histVisibleIds(histViewGroups(v), x => histViewOpen(v, x.key));
-  if(on) ids.forEach(id => v.sel_ids.add(id));
-  else ids.forEach(id => v.sel_ids.delete(id));
-  histViewRender(v.sel);
-}
-function histViewsRefresh(){
-  for(const sel of Object.keys(HIST_VIEWS)){
-    const v = HIST_VIEWS[sel];
-    if(v.q){ v.q = ""; const box = $(sel).querySelector(".hp-search"); if(box) box.value = ""; }
-    histViewItems(v);
-    histViewRender(sel);
-  }
-}
-/* 浮层底栏「载入」：先写事实源，再走原有载入链路（行为一字不改） */
-function histViewLoad(v){
-  const ids = [...v.sel_ids].filter(id => histById(id));
-  if(ids.length !== 1){
-    setPill(ids.length ? `载入只能一条：先取消多余的勾选（现在勾了 ${ids.length} 条）` : "先勾选一条记录", "err");
+/* 底栏三态：拼接模式条 / 无选集引导 / 选集动作条 */
+function hdRenderFoot(){
+  const foot = $("#hdFoot");
+  if(hdMode === "splice"){
+    const src = hdSpliceSrc ? histBrief(histById(hdSpliceSrc)) : "（在列表里点一条来源）";
+    foot.innerHTML = `<span class="hd-seln">来源：${esc(src)}</span>
+      <span class="hd-actsbar">
+        <button type="button" class="btn-ghost" id="hdSpliceExit">退出拼接</button>
+        <button type="button" class="btn-primary" id="hdSpliceGo" ${hdSpliceSrc ? "" : "disabled"}>拼接进目标</button>
+      </span>`;
     return;
   }
-  histSetCurrent(ids[0]);
-  closeHistPop();
+  const missing = hdSel.size - [...hdSel].filter(id => histById(id)).length;
+  if(!hdSel.size){
+    foot.innerHTML = `<p class="hd-hint">单击选中一条记录，双击载入控制台；勾选多条后可对比 / 归组 / 删除，拖到左侧组名上即归组</p>`;
+    return;
+  }
+  const selItems = [...hdSel].map(histById).filter(Boolean)
+    .sort((a, b) => String(a.started_at || "").localeCompare(String(b.started_at || "")));
+  const chips = selItems.slice(0, 3).map(it =>
+    `<span class="hd-chip"><b title="${esc(historyLabel(it))}">${esc(histBrief(it))}</b><button type="button" data-chip="${esc(it.run_id)}" aria-label="取消选择 ${esc(it.run_id)}">×</button></span>`).join("")
+    + (selItems.length > 3 ? `<span class="hd-chip"><b>另 ${selItems.length - 3} 条</b></span>` : "");
+  const st = histPolicyCheck(hdSel.size, {min:2, max:HIST_MAX_CMP});
+  foot.innerHTML = `<span class="hd-seln">已选 ${hdSel.size} 条${missing > 0 ? `（${missing} 条已不存在，将自动剔除）` : ""}</span>
+    <span class="hd-chips">${chips}</span>
+    <span class="hd-actsbar">
+      <button type="button" class="btn-primary" id="hdBtnCmp" ${st.ok ? "" : "disabled"}
+        title="${st.ok ? "按模型合并生成对比卡片" : esc(st.reason)}">对比${hdSel.size >= 2 ? ` ${hdSel.size} 条` : ""}</button>
+      <select class="hd-sel" id="hdMoveSel" aria-label="移动分组"
+        title="把已勾选的记录移进某个组：点一下即移动（触屏与键盘也走得通）；末尾一项可新建分组">
+        ${histMoveGroupOptions(histGroupsCache, histCache)
+          .map(o => `<option value="${esc(o.v)}">${esc(o.t)}</option>`).join("")}
+      </select>
+      <button type="button" class="btn-ghost" id="hdBtnOut">移出分组</button>
+      <button type="button" class="btn-ghost danger" id="hdBtnDel">删除</button>
+    </span>`;
+}
+/* ---------------- 抽屉事件（委托挂抽屉，挂一次） ---------------- */
+function hdBindOnce(){
+  if(hdBindOnce.done) return;
+  hdBindOnce.done = true;
+  const root = $("#histDrawer");
+  /* 底栏「移动分组」下拉：选一个组＝立刻移进去（归组的常态是"进已有的某个组"，
+     不再弹窗逼人回忆组名）；选新建才问名字。先复位再动手：取消新建时不该让
+     「＋ 新建…」一直挂着，看着像已经移动过了 */
+  root.addEventListener("change", e => {
+    const sel = e.target.closest("#hdMoveSel");
+    if(!sel) return;
+    const v = sel.value;
+    sel.value = "";
+    if(v) hdMoveTo(v);
+  });
+  root.addEventListener("click", e => {
+    const gop = e.target.closest("[data-gop]");
+    if(gop){ hdGroupMenu(gop, gop.dataset.gop); return; }
+    const chip = e.target.closest("[data-chip]");
+    if(chip){ hdSel.delete(chip.dataset.chip); hdRenderAll(); return; }
+    const more = e.target.closest("[data-more]");
+    if(more){ hdRowMenu(more, more.dataset.more); return; }
+    if(e.target.closest("#hdSelVis")){ hdSelectVisible(); return; }
+    if(e.target.closest("#hdSelNone")){ hdSel.clear(); hdRenderAll(); return; }
+    if(e.target.closest("#hdBtnCmp")){ hdCompare(); return; }
+    if(e.target.closest("#hdBtnOut")){ hdMoveOut(); return; }
+    if(e.target.closest("#hdBtnDel")){ hdDelete(); return; }
+    if(e.target.closest("#hdSpliceGo")){ hdSpliceConfirm(); return; }
+    if(e.target.closest("#hdSpliceExit")){ hdSpliceExit(); return; }
+    /* 「全部记录」目录态：节头组名 = 折叠/展开本组（展示态）；左栏组名 = 切过滤桶——
+       两者同带 data-bkt，必须先查节头，否则会落到下面的切桶分支 */
+    const sec = e.target.closest(".hd-sec-n");
+    if(sec && !e.target.closest(".hd-ck")){ hdToggleSection(sec.dataset.bkt); return; }
+    const bkt = e.target.closest("[data-bkt]");
+    if(bkt && !e.target.closest(".hd-ck")){
+      hdPickBucket(bkt.dataset.all === "1" ? null : bkt.dataset.bkt); return;
+    }
+    const row = e.target.closest(".hd-row");
+    if(row && !e.target.closest(".hd-ck")){
+      /* 浏览态：单击 = 选中/取消（未选中行立即加选；已选中行排待取消，双击窗口 450ms
+         过后才兑现——取消是低频动作，等窗口无感；双击第一击与单击物理上不可区分，
+         取消必须等窗口确认"真的只是一击"）。双击 = 载入（撤掉该行的待取消）。
+         拼接选源态：单击立即选来源，第二击重选同一来源（幂等）。跨行连点不算双击；
+         多行待取消各自独立（Map），互不取消 */
+      const rid = row.dataset.rid;
+      const sameRow = hdRowFirstClick && hdRowFirstClick.rid === rid;
+      if(sameRow && performance.now() - hdRowFirstClick.t <= 450){
+        const u = hdRowUnpick.get(rid);
+        if(u){ clearTimeout(u); hdRowUnpick.delete(rid); }
+        hdRowFirstClick = null;
+        hdRowActivate(rid);                  // 浏览态 = 载入；拼接态 = 选源（hdRowActivate 内分派）
+      }else{
+        hdRowFirstClick = {rid, t: performance.now()};
+        if(hdMode === "splice") hdRowActivate(rid);      // 选源态单击立即选来源
+        else if(hdSel.has(rid) && !hdRowUnpick.has(rid))
+          hdRowUnpick.set(rid, setTimeout(() => { hdRowUnpick.delete(rid); hdRowUnpickSel(rid); }, 450));
+        else if(!hdSel.has(rid)) hdRowPickSel(rid);      // 未选中行立即加选
+      }
+    }
+  });
+  root.addEventListener("change", e => {
+    const ck = e.target.closest(".hd-ck[data-rid]");
+    if(ck){
+      const u = hdRowUnpick.get(ck.dataset.rid);
+      if(u){ clearTimeout(u); hdRowUnpick.delete(ck.dataset.rid); }   // 勾选框已明摆着表态，待取消不再背后补一刀
+      ck.checked ? hdSel.add(ck.dataset.rid) : hdSel.delete(ck.dataset.rid);
+      hdRowStates(); hdSync(); return;
+    }
+    const gck = e.target.closest("[data-gck]");
+    if(gck){
+      const b = hdBuckets().find(x => x.key === gck.dataset.gck);
+      if(b) for(const it of b.items){ gck.checked ? hdSel.add(it.run_id) : hdSel.delete(it.run_id); }
+      hdRenderAll();
+    }
+  });
+  root.addEventListener("input", e => {
+    if(e.target.id === "hdSearch"){
+      clearTimeout(hdSearchTimer);
+      const q = e.target.value.trim();
+      hdSearchTimer = setTimeout(() => hdDoSearch(q), 250);
+    }
+  });
+  root.addEventListener("keydown", e => {
+    if(e.key !== "Enter" && e.key !== " ") return;
+    const row = e.target.closest(".hd-row");
+    if(row && e.target === row){ e.preventDefault(); hdRowActivate(row.dataset.rid); return; }
+    const sec = e.target.closest(".hd-sec-n");
+    if(sec && e.target === sec){ e.preventDefault(); hdToggleSection(sec.dataset.bkt); return; }
+    const g = e.target.closest(".hd-gitem");
+    if(g && e.target === g){ e.preventDefault(); hdPickBucket(g.dataset.all === "1" ? null : g.dataset.bkt); }
+  });
+  /* 拖拽归组：抓起一行（若它在选集里则拖着整个选集），投到左栏组名上。
+     投放 = move op，不加确认框——它可逆（再拖回未分组即可），setPill 会给回执 */
+  root.addEventListener("dragstart", e => {
+    const row = e.target.closest(".hd-row");
+    if(row && hdMode !== "browse") return;
+    if(row){
+      const u = hdRowUnpick.get(row.dataset.rid);
+      if(u){ clearTimeout(u); hdRowUnpick.delete(row.dataset.rid); }   // 拖起来就别再"取消选中"了
+    }
+    if(!row) return;
+    const ids = hdSel.has(row.dataset.rid) && hdSel.size > 1 ? [...hdSel] : [row.dataset.rid];
+    e.dataTransfer.setData("text/plain", JSON.stringify(ids));
+    e.dataTransfer.effectAllowed = "move";
+    row.classList.add("dragging");
+  });
+  root.addEventListener("dragend", e => {
+    const row = e.target.closest(".hd-row");
+    if(row) row.classList.remove("dragging");
+    for(const el of root.querySelectorAll(".hd-gitem.dropok")) el.classList.remove("dropok");
+  });
+  root.addEventListener("dragover", e => {
+    const g = e.target.closest(".hd-gitem");
+    if(!g || g.dataset.all === "1") return;   // 「全部记录」是视图不是桶，不能投放
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    g.classList.add("dropok");
+  });
+  root.addEventListener("dragleave", e => {
+    const g = e.target.closest(".hd-gitem");
+    if(g) g.classList.remove("dropok");
+  });
+  root.addEventListener("drop", e => {
+    const g = e.target.closest(".hd-gitem");
+    if(!g || g.dataset.all === "1") return;
+    e.preventDefault();
+    g.classList.remove("dropok");
+    let ids = [];
+    try{ ids = JSON.parse(e.dataTransfer.getData("text/plain") || "[]"); }catch(err){ return; }
+    ids = ids.filter(id => histById(id));
+    if(!ids.length) return;
+    hdDropToGroup(g.dataset.bkt, ids);
+  });
+  /* 菜单点外面关（mousedown 捕获，菜单项在包裹层内所以不会自己把自己关掉） */
+  document.addEventListener("mousedown", e => {
+    const m = $("#hdMenu");
+    if(!m.hidden && !e.target.closest("#hdMenu") && !e.target.closest("[data-more]") && !e.target.closest("[data-gop]"))
+      hdMenuClose();
+  }, true);
+}
+/* 只换行的勾选/来源态，不重建列表：勾一条不该让滚动位置飞掉 */
+function hdRowStates(){
+  for(const el of $("#hdList").querySelectorAll(".hd-row")){
+    const on = hdSel.has(el.dataset.rid);
+    el.classList.toggle("on", on);
+    el.classList.toggle("src", el.dataset.rid === hdSpliceSrc);
+    const i = el.querySelector(".hd-ck");
+    if(i) i.checked = on;
+  }
+}
+/* 「全部记录」目录态：点组节头名 = 折叠/展开本组记录（只动展示态不切过滤；
+   组级过滤归左栏）。只重渲列表，不动披露行/底栏，滚动位置也留得住 */
+function hdToggleSection(key){
+  if(hdCollapsed.has(key)) hdCollapsed.delete(key);
+  else hdCollapsed.add(key);
+  hdRenderList();
+}
+function hdPickBucket(key){
+  hdBucket = key;
+  hdSearched = null;                        // 切桶清搜索（旧台账同口径）
+  const box = $("#hdSearch"); if(box) box.value = "";
+  if(innerWidth <= 720) hdToggleSide(false);
+  hdRenderAll();
+}
+function hdToggleSide(force){
+  const side = $("#hdSide");
+  const open = force === undefined ? !side.classList.contains("open") : !!force;
+  side.classList.toggle("open", open);
+  $("#hdSideTab").setAttribute("aria-expanded", String(open));
+}
+async function hdDoSearch(q){
+  if(!q){ hdSearched = null; hdRenderAll(); return; }
+  try{
+    const d = await histQuery(q);
+    let arr = d.items;
+    if(hdBucket !== null) arr = arr.filter(it => String(it.group_id || "") === hdBucket);
+    hdSearched = {items:arr, meta:{total:d.total, matched:d.matched, truncated:d.truncated, limit:d.limit}};
+    hdRenderAll();
+  }catch(e){ setPill(e.message || "搜索失败", "err"); }
+}
+function hdSelectVisible(){
+  for(const it of hdVisibleItems()) hdSel.add(it.run_id);
+  hdRenderAll();
+}
+/* 单击行加选：选中 = 进选集（与勾选框同源 hdSel），行上勾选框同步点亮。
+   只动行态 + 底栏，不整列表重渲，滚动位置留得住 */
+function hdRowPickSel(rid){
+  if(!histById(rid)) return;
+  hdSel.add(rid);
+  hdRowStates(); hdRenderFoot();
+}
+/* 待取消兑现（双击窗口 450ms 已过）：撤选集 + 同步勾选框/底栏。窗口内模式变了
+   （进拼接）或记录被删则不兑现 */
+function hdRowUnpickSel(rid){
+  if(hdMode !== "browse") return;
+  if(!histById(rid)) return;
+  hdSel.delete(rid);
+  hdRowStates(); hdRenderFoot();
+}
+function hdRowActivate(id){
+  if(hdMode === "splice"){
+    if(id === hdSpliceTarget) return;       // 目标自己不能做来源（列表里已排除，双保险）
+    hdSpliceSrc = id; hdRowStates(); hdRenderFoot(); return;
+  }
+  hdLoadRecord(id);
+}
+function hdLoadRecord(id){
+  if(!histById(id)) return;
+  histSetCurrent(id);
+  closeHistDrawer();
   loadHistory();
 }
-
-/* 载入浮层的开合：与「…」菜单三条纪律一致（点外关 mousedown 捕获 / Esc 关并回焦
-   / aria-expanded 随开合写对），默认向上开，上方放不下才 .down 翻转（先显形再量高） */
-function openHistPop(){
-  const p = $("#histPop"), btn = $("#histPick");
-  p.hidden = false;
-  histViewMount("#histPop", {load:true, manage:true, cur:$("#historySel").value,
-                             sel:new Set($("#historySel").value ? [$("#historySel").value] : [])});
-  p.classList.toggle("down", btn.getBoundingClientRect().top < p.offsetHeight + 12);
-  btn.setAttribute("aria-expanded", "true");
-  document.addEventListener("mousedown", histPopOutside, true);
-  document.addEventListener("keydown", histPopEsc, true);
-  const s = p.querySelector(".hp-search");
-  if(s) s.focus();
-}
-function closeHistPop(){
-  const p = $("#histPop");
-  if(p.hidden) return;
-  p.hidden = true;
-  $("#histPick").setAttribute("aria-expanded", "false");
-  document.removeEventListener("mousedown", histPopOutside, true);
-  document.removeEventListener("keydown", histPopEsc, true);
-}
-function toggleHistPop(){ $("#histPop").hidden ? openHistPop() : closeHistPop(); }
-function histPopOutside(e){
-  /* 不能只护住触发区：确认框/弹窗就长在浮层之外，点它们的「确定」如果把浮层顺手
-     关掉，用户建完组就看不到那个组真的出现了（看起来像“没生效”） */
-  if(e.target.closest("#histPickWrap, #uiDialogRoot, #cmpModalRoot, #delModalRoot, #spliceModalRoot")) return;
-  closeHistPop();
-}
-function histPopEsc(e){ if(e.key === "Escape"){ closeHistPop(); $("#histPick").focus(); } }
-/* ---------------- 手填分组（ADR-0126 追加轮：组是唯一的组织方式）----------------
-   组名**不进存档**，活在服务端的 results/.history-groups.json。两个端点各管一种改法：
-   `POST /api/bench/groups/assign` 按**具体哪几条**改（建组、归组、移出；新组没有旧名字，
-   只能按 id 说）；`POST /api/bench/groups` 按**旧组名**整体改（改名 / 并入 / 解散）。
-   两条路都**不可撤销**（分组是视图层的东西，不满意直接删映射文件），所以每个动作的确认
-   框都先把“要动几条”报出来。 */
-async function histAssign(assign, msg){
-  let d;
-  try{
-    const r = await fetch("/api/bench/groups/assign",
-      {method:"POST", headers:{"Content-Type":"application/json"},
-       body:JSON.stringify({assign})});
-    d = await r.json().catch(() => ({}));
-    if(!r.ok){ setPill(d.detail || "归组失败", "err"); return false; }
-  }catch(e){ setPill("归组请求失败：" + e.message, "err"); return false; }
-  await loadHistoryList();                       // 列表与所有打开的视图一起刷
-  setPill(msg || `已归组 ${d.moved} 条`, "");
-  return true;
-}
-/* 「收入新组…」：勾了几条 → 起个名 → 一次请求。默认名给**最新那条的模型集合**，
-   于是最常见的“按模型分一组”通常一个字都不用打；输已有组名 = 并入那个组 */
-async function histViewMakeGroup(v){
-  const ids = [...v.sel_ids].filter(id => histById(id));
-  if(!ids.length){ setPill("先勾选要归组的记录（勾 1 条也行）", "err"); return; }
-  const newest = ids.map(histById).sort((a, b) => String(b.started_at || "").localeCompare(
-    String(a.started_at || "")))[0];
-  const others = histGroupNames(v.items);
-  const name = await uiDialog({title:`把 ${ids.length} 条记录收进一个组`,
-    sub:"默认用最新那条的模型名——按模型分组通常不用改。组名不进存档，只决定历史怎么归类；不可撤销。",
-    okText:`收进这个组（${ids.length} 条）`,
-    input:{value:histModelKey(newest), maxlength:40,
-           placeholder: others.length ? `输已有组名即并入：${others.join("、")}` : "新组名"}});
-  if(name === false) return;
-  const g = name.trim();
+/* 拖拽落点：组 id（"" = 未分组 = 移出） */
+async function hdDropToGroup(key, ids){
+  const g = hdBuckets().find(x => x.key === key);
   if(!g) return;
-  if(g === HIST_UNGROUPED){ setPill("「未分组」是保留名，换一个", "err"); return; }
-  const existed = others.includes(g);
-  await histAssign({[g]: ids},
-    existed ? `已并入既有组「${g}」（${ids.length} 条）`
-            : `已建组「${g}」，放入 ${ids.length} 条`);
+  const already = ids.every(id => String(histById(id).group_id || "") === key);
+  if(already){ setPill(`这些记录本来就在「${g.name}」里，没动到`, ""); return; }
+  await histGroupOps([{op:"move", id:key, run_ids:ids}],
+    d => key === "" ? `已把 ${d.touched} 条移出分组` : `已把 ${d.touched} 条移进「${g.name}」`);
 }
-/* 「按模型自动建组」：一次性把未归组的记录按各自模型集合落组。计划由纯函数算
-   （histAutoPlan），界面先报数再执行；执行是**一次**请求（每模型一次会互相覆盖映射文件） */
-async function histViewAutoGroup(v){
-  const plan = histAutoPlan(v.items);
-  const n = plan.reduce((s, p) => s + p.run_ids.length, 0);
+/* ---------------- 行/组「⋯」共享上下文菜单 ---------------- */
+let hdMenuFor = null;   // 菜单当前为谁开（行/组重开同一对象时只挪位置不重建监听）
+function hdMenuOpen(anchor, items, forKey){
+  const m = $("#hdMenu");
+  if(hdMenuFor === forKey && !m.hidden){ hdMenuClose(); return; }
+  hdMenuFor = forKey;
+  m.innerHTML = items.map(it => it.sep
+    ? `<div class="hd-gsep" role="separator"></div>`
+    : `<button type="button" class="hd-mitem${it.danger ? " danger" : ""}" role="menuitem"
+        data-mi="${esc(it.key)}">${it.icon || ""}<span>${esc(it.label)}</span></button>`).join("");
+  m.hidden = false;
+  /* 落位：贴触发钮下沿，右对齐；下方放不下翻到上方。先显形再量高（与阶梯浮层同手法） */
+  const dr = $("#histDrawer").getBoundingClientRect();
+  const ar = anchor.getBoundingClientRect();
+  const mw = m.offsetWidth, mh = m.offsetHeight;
+  let top = ar.bottom - dr.top + 4;
+  if(top + mh > dr.height - 8) top = ar.top - dr.top - mh - 4;
+  m.style.top = Math.max(8, top) + "px";
+  m.style.left = Math.max(8, Math.min(ar.right - dr.left - mw, dr.width - mw - 8)) + "px";
+  m.onclick = e => {
+    const b = e.target.closest("[data-mi]");
+    if(!b) return;
+    const act = items.find(x => x.key === b.dataset.mi);
+    hdMenuClose();
+    if(act && act.run) act.run();
+  };
+}
+function hdMenuClose(){
+  const m = $("#hdMenu");
+  if(m.hidden) return;
+  m.hidden = true; hdMenuFor = null;
+  for(const el of $("#histDrawer").querySelectorAll(".menu-open")) el.classList.remove("menu-open");
+}
+function hdRowMenu(anchor, rid){
+  const row = anchor.closest(".hd-row");
+  if(row) row.classList.add("menu-open");
+  hdMenuOpen(anchor, [
+    {key:"note", label:"备注…", run:() => editHistoryNote(rid)},
+    {key:"rename", label:"存档模型改名…", run:() => openRenameModal(rid)},
+    {key:"splice", label:"拼接来源…", run:() => hdSpliceEnter(rid)},
+    {sep:true},
+    {key:"del", label:"删除该条", danger:true, run:() => hdDeleteOne(rid)},
+  ], "row:" + rid);
+}
+function hdGroupMenu(anchor, gid){
+  const row = hdBuckets().find(x => x.key === gid);
+  if(!row) return;
+  hdMenuOpen(anchor, [
+    {key:"edit", label:"改名…", run:() => hdGroupOp("edit", gid)},
+    {key:"note", label:"备注…", run:() => hdGroupOp("note", gid)},
+    {key:"merge", label:"并入另一个组…", run:() => hdGroupOp("merge", gid)},
+    {sep:true},
+    {key:"dissolve", label:"解散该组", danger:true, run:() => hdGroupOp("dissolve", gid)},
+  ], "grp:" + gid);
+}
+/* ---------------- 选集动作：对比 / 移动 / 移出 / 删除 ---------------- */
+/* 对比：拉全量存档 → 合并生成对比卡片（旧 cmpModal 的核心，入口从弹窗换成底栏） */
+async function hdCompare(){
+  for(const id of [...hdSel]) if(!histById(id)) hdSel.delete(id);   // 已不存在的记录不进对比
+  const ids = [...hdSel];
+  if(ids.length < 2){ setPill("至少勾选 2 条记录才能生成对比卡片", "err"); return; }
+  const archs = [];
+  for(const id of ids){
+    try{
+      const r = await fetch(`/api/bench/history/${encodeURIComponent(id)}`);
+      if(r.ok) archs.push(await r.json().catch(() => null));
+    }catch(e){ /* 单条网络失败：跳过，继续下一条 */ }
+  }
+  // 坏存档/空存档不入对比（results 校验与 hydrateArchive 同口径，另要求非空）
+  const good = archs.filter(d => d && Array.isArray(d.results) && d.results.length
+    && !d.results.some(p => !p || typeof p !== "object" || Array.isArray(p)));
+  if(good.length < 2){
+    setPill("可用存档不足 2 条（部分载入失败或为空），对比中止", "err");
+    return;
+  }
+  good.sort((a, b) => String(a.started_at || "").localeCompare(String(b.started_at || "")));   // 时间序编号
+  state.cmp = {runs: good.map((d, i) => ({
+    id: d.run_id, tag: `#${i + 1}`, color: RUN_COLORS[i % RUN_COLORS.length],
+    started_at: d.started_at || "", note: (d.cfg && d.cfg.note) || "",
+    provider_label: (d.cfg && (d.cfg.provider_label || d.cfg.provider)) || "",
+    models: [...new Set(d.results.map(p => p && p.model).filter(Boolean))],
+    cfg: {...(d.cfg || {}), started_at: d.started_at},   // started_at 并入 cfg（isColdTurn 等按存档 cfg 判别，与 hydrateArchive 同口径）
+    results: d.results}))};
+  closeHistDrawer();
+  setPhase("done");
+  unhide($("#cardCard"), true);   // 对比不依赖 state.points，卡片区显式展开
+  genCmpCards();
+}
+/* 「移动分组」：下拉里点已有组＝立刻移进那个组，选「＋ 新建分组…」才问名字。
+   2026-10-17 从"输名字的弹窗"改成下拉：弹窗把"记住组名"变成必经步骤，而归组的
+   常态是移进已有的某个组；下拉顺带让触屏与键盘也能走完这条路（原先这条路只有
+   鼠标拖拽 + 一条文本框）。按组 id 指（组是实体，改名不改身份），ops 不变。 */
+async function hdMoveTo(gid){
+  const ids = [...hdSel].filter(id => histById(id));
+  if(!ids.length){ setPill("先勾选要移动的记录", "err"); return; }
+  if(gid === "__new"){
+    const others = histGroupNamesOf(histGroupsCache, histCache);
+    const name = await uiDialog({title:"新建分组并移入",
+      sub:`已勾 ${ids.length} 条。建组后直接装入，不可撤销。`,
+      input:{placeholder: others.length ? `现有组：${others.join("、")}` : "新组名",
+             maxlength:GROUP_NAME_MAX, validate:v => histGroupError(v)},
+      okText:`建组并移入（${ids.length} 条）`});
+    if(name === false) return;
+    const g = name.trim();
+    await histGroupOps([{op:"create", name:g, run_ids:ids}],
+      d => !d.touched ? "这些记录没动到" : `已建组「${g}」并放入 ${d.touched} 条`);
+    return;
+  }
+  const g = histGroupsCache.find(x => String(x.id) === String(gid));
+  if(!g) return;   // 组刚被别处解散/改名：静默不猜目的地
+  const label = String(g.name || "").trim();
+  await histGroupOps([{op:"move", id:g.id, run_ids:ids}],
+    d => !d.touched ? `这些记录本来就在「${label}」里，没动到`
+                    : `已把 ${d.touched} 条移进「${label}」`);
+}
+async function hdMoveOut(){
+  const ids = [...hdSel].filter(id => histById(id));
+  if(!ids.length){ setPill("先勾选要移出的记录", "err"); return; }
+  if(!await uiDialog({title:"移出分组",
+    body:`已勾的 ${ids.length} 条记录将回到「未分组」。不动任何测速数据；不可撤销。`,
+    okText:`移出（${ids.length} 条）`})) return;
+  await histGroupOps([{op:"move", id:"", run_ids:ids}],
+    d => d.touched ? `已把 ${d.touched} 条移出分组` : "这些记录本来就没分组，没动到");
+}
+/* 删除：确认框逐条列名（危险动作不吃"看不见的勾选"），循环 DELETE 与旧弹窗同口径 */
+async function hdDelete(){
+  const ids = [...hdSel].filter(id => histById(id));
+  if(!ids.length){ setPill("先勾选要删除的记录", "err"); return; }
+  const names = ids.map(id => histBrief(histById(id)));
+  const preview = names.slice(0, 6).join("\n") + (names.length > 6 ? `\n…另 ${names.length - 6} 条` : "");
+  if(!await uiDialog({title:`删除 ${ids.length} 条历史记录？`,
+    body:`将删除：\n${preview}\n删除后不可恢复（模拟运行不在列表内）。`,
+    okText:`删除（${ids.length} 条）`, danger:true})) return;
+  let ok = 0;
+  for(const id of ids){
+    try{
+      const r = await fetch(`/api/bench/history/${encodeURIComponent(id)}`, {method:"DELETE"});
+      if(r.ok){ ok++; hdSel.delete(id); }
+    }catch(e){ /* 单条网络失败：计入未删，继续下一条 */ }
+  }
+  if(ok === ids.length) setPill(`已删除 ${ok} 条历史记录`, "");
+  else setPill(`删除未全部完成：成功 ${ok}/${ids.length} 条（失败条目仍在列表中）`, "err");
+  await loadHistoryList();
+}
+async function hdDeleteOne(rid){
+  const h = histById(rid);
+  if(!h) return;
+  if(!await uiDialog({title:"删除这条历史记录？",
+    body:`将删除：${historyLabel(h)}\n删除后不可恢复。`, okText:"删除", danger:true})) return;
+  try{
+    const r = await fetch(`/api/bench/history/${encodeURIComponent(rid)}`, {method:"DELETE"});
+    if(!r.ok){ setPill("删除失败", "err"); return; }
+  }catch(e){ setPill("删除请求失败：" + e.message, "err"); return; }
+  hdSel.delete(rid);
+  setPill("已删除 1 条历史记录", "");
+  await loadHistoryList();
+}
+/* ---------------- 组管理（旧台账逻辑原样迁移，组是实体 ADR-0129 不变） ---------------- */
+async function hdNewGroup(){
+  const others = histGroupNamesOf(histGroupsCache, histCache);
+  const name = await uiDialog({title:"新建分组",
+    sub:"可以先建空组，之后再把记录搬进来。组名不进存档，只决定历史怎么归类；不可撤销。",
+    input:{placeholder:"组名（如模型名或主题名）", maxlength:GROUP_NAME_MAX,
+           validate:v => histGroupError(v, others)},
+    okText:"建组（空组）"});
+  if(name === false) return;
+  await histGroupOps([{op:"create", name:name.trim()}], d => `已建组「${name.trim()}」（现在 ${histGroupsCache.length} 个组）`);
+}
+async function hdAutoGroup(){
+  const plan = histAutoPlan(histCache);
+  const n = plan.reduce((s, x) => s + x.run_ids.length, 0);
   if(!n){ setPill("没有未归组的记录", "err"); return; }
-  const preview = plan.slice(0, 4).map(p => `${p.group}（${p.run_ids.length}）`).join("、");
+  const preview = plan.slice(0, 4).map(x => `${x.group}（${x.run_ids.length}）`).join("、");
   if(!await uiDialog({title:"按模型自动建组",
     body:`${n} 条未归组的记录将按各自的模型集合落到同名组，共 ${plan.length} 个组：\n`
-         + `${preview}${plan.length > 4 ? " …" : ""}\n`
-         + `已有组名的记录不动；模型集合相同的会并到同一个组。不可撤销。`,
+         + `${preview}${plan.length > 4 ? " …" : ""}\n已有组里的记录不动。不可撤销。`,
     okText:`归组（动 ${n} 条）`})) return;
-  const assign = {};
-  for(const p of plan) assign[p.group] = p.run_ids;
-  await histAssign(assign, `已按模型把 ${n} 条落到 ${plan.length} 个组`);
+  await histGroupOps(plan.map(x => ({op:"create", name:x.group, run_ids:x.run_ids})),
+    d => `已按模型把 ${d.touched} 条落到 ${plan.length} 个组`);
 }
-/* 启动后给本次运行盖组名：此时存档还没写出（存档在跑完才落盘），所以映射先记
-   一条、跑完自然对得上（读列表时按目录过滤，写错了/没跑完都不会冒出幽灵条目） */
-async function histStampGroup(runId, group){
-  const g = String(group || "").trim();
-  if(!g) return;
+/* ---------------- 分组合并（左栏按钮，多组并成一个） ---------------- */
+function hdMergeGroups(){
+  const groups = histGroupsCache.filter(g => g && g.id);
+  if(groups.length < 2){ setPill("要合并至少需要 2 个组", "err"); return; }
+  const buckets = new Map(hdBuckets().map(b => [b.key, b]));
+  $("#gmList").innerHTML = groups.map(g => {
+    const c = buckets.get(g.id) ? buckets.get(g.id).count : 0;
+    return `<label class="gm-opt">
+      <input type="checkbox" data-gid="${esc(g.id)}" aria-label="合并组「${esc(g.name)}」">
+      <span class="gm-n" title="${esc(g.name)}">${esc(g.name)}</span>
+      <span class="gm-c">${c} 条</span>
+    </label>`;
+  }).join("");
+  $("#gmTarget").value = "";
+  $("#gmMsg").textContent = "";
+  $("#btnGmConfirm").disabled = false;
+  $("#gmModalRoot").hidden = false;
+  document.addEventListener("keydown", onGmModalKey);
+  trapModalFocus($("#gmModalRoot"));
+  $("#gmTarget").focus();
+}
+function closeMergeModal(){
+  $("#gmModalRoot").hidden = true;
+  document.removeEventListener("keydown", onGmModalKey);
+  releaseModalFocus($("#gmModalRoot"));
+}
+function onGmModalKey(e){ if(e.key === "Escape") closeMergeModal(); }
+/* 目标解析：空名 = 并入第一个勾选组；填了名字 = 已有同名组并入它、否则新建目标组 */
+function gmResolveTarget(name){
+  if(!name) return {kind:"first"};
+  if(name === HIST_UNGROUPED) return {err:`「${HIST_UNGROUPED}」是保留名（未归组的记录都算它）`};
+  if([...name].length > GROUP_NAME_MAX) return {err:`组名不能超过 ${GROUP_NAME_MAX} 字符`};
+  const hit = histGroupsCache.find(g => g && String(g.name || "").trim() === name);
+  return hit ? {kind:"into", id:hit.id, name:hit.name}
+             : {kind:"new", name};
+}
+async function mergeConfirm(){
+  const checked = [...$("#gmList").querySelectorAll("input:checked")].map(i => i.dataset.gid);
+  const gmMsg = m => { $("#gmMsg").textContent = m; return; };
+  if(checked.length < 2) return gmMsg("至少勾选 2 个组才能合并");
+  const target = gmResolveTarget($("#gmTarget").value.trim());
+  if(target.err) return gmMsg(target.err);
+  const buckets = new Map(hdBuckets().map(b => [b.key, b]));
+  let ops, say;
+  if(target.kind === "new"){
+    const items = checked.map(id => buckets.get(id)).filter(Boolean)
+      .flatMap(b => b.items).map(x => x.run_id);
+    ops = [{op:"create", name:target.name, run_ids:items}]
+      .concat(checked.map(id => ({op:"dissolve", id})));
+    say = `新建「${target.name}」承接 ${checked.length} 个组的 ${items.length} 条记录，源组解散`;
+  }else{
+    const srcs = target.kind === "first"
+      ? checked.slice(1)                                     // 并入第一个勾选组，其余都并入它
+      : checked.filter(id => id !== target.id);              // 填了名字：不在勾选里的同名组直接接；勾选里排除它自己
+    if(!srcs.length) return gmMsg("只剩一个组，没有可并入的源组");
+    ops = srcs.map(id => ({op:"merge", id, into: target.kind === "first" ? checked[0] : target.id}));
+    say = `把 ${checked.length} 个组并进「${target.kind === "first"
+      ? (histGroupsCache.find(g => g.id === checked[0]) || {}).name : target.name}」`;
+  }
+  $("#btnGmConfirm").disabled = true;
+  const d = await histGroupOps(ops, () => `已合并：${say}`);
+  $("#btnGmConfirm").disabled = false;
+  if(d) closeMergeModal();   // 请求失败（histGroupOps 已 setPill 报错）则留在弹窗里，勾选不丢
+}
+async function hdGroupOp(op, id){
+  const row = hdBuckets().find(x => x.key === id);
+  if(!row){ setPill("这个组已经不在了，刷新列表看看", "err"); return; }
+  const n = row.count;
+  if(op === "dissolve"){
+    if(!await uiDialog({title:"解散分组",
+      body:`组「${row.name}」的 ${n} 条记录将回到「未分组」（组本身消失）。分组只是记录的归类方式，不动任何测速数据；此操作不可撤销。`,
+      okText:`解散（${n} 条）`, danger:true})) return;
+    await histGroupOps([{op:"dissolve", id}], `已解散「${row.name}」（${n} 条回到未分组）`);
+    return;
+  }
+  if(op === "merge"){
+    const others = histGroupsCache.filter(x => x.id !== id);
+    if(!others.length){ setPill("没有可并入的另一个组", "err"); return; }
+    const name = await uiDialog({title:"并入另一个组",
+      sub:`组「${row.name}」共 ${n} 条记录，将整体改到目标组名下（目标组没有就先建一个）。不可撤销。`,
+      input:{placeholder:`现有组：${others.map(x => x.name).join("、")}`, maxlength:GROUP_NAME_MAX,
+             validate:v => histGroupError(v)},
+      okText:`并入（动 ${n} 条）`});
+    if(name === false) return;
+    const g = name.trim();
+    const hit = others.find(x => String(x.name || "").trim() === g);
+    if(hit) await histGroupOps([{op:"merge", id, into:hit.id}], `已把「${row.name}」并进「${g}」（${n} 条）`);
+    else
+      await histGroupOps([{op:"create", name:g, run_ids:row.items.map(x => x.run_id)},
+                          {op:"dissolve", id}], `已把「${row.name}」的 ${n} 条移到新组「${g}」`);
+    return;
+  }
+  if(op === "note"){
+    const note = await uiDialog({title:"组备注（留空即清除）",
+      sub:`给「${row.name}」写一句备注（≤${GROUP_NOTE_MAX} 字符），显示在左栏组名下面。只动组的说明，不动记录归属。`,
+      input:{value:row.note, maxlength:GROUP_NOTE_MAX, placeholder:"如：本地 nvfp4 + fp8 KV",
+             validate:v => histNoteError(v)},
+      okText:"保存备注"});
+    if(note === false) return;
+    return histGroupOps([{op:"rename", id, name:row.name, note:note.trim()}],
+      d => note.trim() ? `已给「${row.name}」写上备注` : `已清除「${row.name}」的备注`);
+  }
+  const name = await uiDialog({title:"分组改名",
+    sub:`组「${row.name}」共 ${n} 条记录。改名只动组自身（按组编号说，不再拿旧名字当键）——拼错一个字不会变出第二个组。`,
+    input:{value:row.name, maxlength:GROUP_NAME_MAX, placeholder:"组名",
+           validate:v => histGroupError(v, histGroupNamesOf(histGroupsCache, histCache, id))},
+    okText:`改名（组内 ${n} 条跟着换名）`});
+  if(name === false) return;
+  await histGroupOps([{op:"rename", id, name:name.trim(), note:row.note}],
+    d => `组已改名：${row.name} → ${name.trim()}`);
+}
+/* ---------------- 拼接选源模式（旧 spliceModal 退役，抽屉就地换模式） ---------------- */
+function hdSpliceEnter(targetId){
+  if(!histById(targetId)) return;
+  if(histCache.length < 2){ setPill("没有其他历史记录可作拼接来源", ""); return; }
+  hdRowUnpick.clear();                 // 浏览态的待取消随模式退出作废（不在拼接背后改选集）
+  hdMode = "splice"; hdSpliceTarget = targetId; hdSpliceSrc = "";
+  $("#hdModeBar").innerHTML = `<span style="min-width:0">拼接模式：<b>点一条来源存档</b>，它的全部测速点合并进
+    「<b>${esc(histBrief(histById(targetId)))}</b>」</span>
+    <button type="button" class="btn-ghost" id="hdSpliceExit2"
+      title="同身份点以来源覆盖、新点追加；拼接点带「⇢拼接」溯源徽标，操作留痕于目标存档">退出</button>`;
+  $("#hdModeBar").hidden = false;
+  $("#hdModeBar #hdSpliceExit2").onclick = hdSpliceExit;
+  hdRenderAll();
+}
+function hdSpliceExit(){
+  hdMode = "browse"; hdSpliceTarget = ""; hdSpliceSrc = "";
+  $("#hdModeBar").hidden = true;
+  hdRenderAll();
+}
+async function hdSpliceConfirm(){
+  const target = hdSpliceTarget, src = hdSpliceSrc;
+  if(!target || !src) return;
+  let d;
   try{
-    const r = await fetch("/api/bench/groups/assign",
+    const r = await fetch(`/api/bench/history/${encodeURIComponent(target)}/splice`,
       {method:"POST", headers:{"Content-Type":"application/json"},
-       body:JSON.stringify({assign: {[g]: [runId]}})});
-    if(!r.ok){
-      const d = await r.json().catch(() => ({}));
-      setPill(d.detail || "分组名未保存（测速照常跑）", "err");
-    }
-  }catch(e){ setPill("分组名未保存（测速照常跑）", "err"); }
+       body:JSON.stringify({source_run_id: src})});
+    d = await r.json().catch(() => ({}));   // 错误体未必是 JSON
+    if(!r.ok){ setPill(d.detail || "拼接失败", "err"); return; }
+  }catch(e){ setPill("拼接请求失败：" + e.message, "err"); return; }
+  hdSpliceExit();
+  const warn = (d.warnings || []).length ? `；⚠ ${d.warnings.join("；")}` : "";
+  setPill(`拼接完成：新增 ${d.added} 点、覆盖 ${d.replaced} 点${warn}`, "");
+  await loadHistoryList();
+  if(state.runId === target && state.phase === "done" && !state.running) loadHistory();
 }
-async function histGroupsPost(from, to){
+hdBindOnce();
+
+/* ---------------- 面板快捷载入气泡（ADR-0132 追加轮）----------------
+   「最近 / 常看」至多 3 颗，点一下直接载入。载入次数只记浏览器本地
+   （llmspeed.histLoads，不上服务端、不进存档）——它是"这台机器上我常看谁"的便利，
+   不是测速数据的一部分。当前已载入的那条不进气泡（它就在按钮上，重复是噪声） */
+const HIST_LOADS_KEY = "llmspeed.histLoads";
+function histLoadsGet(){
+  try{ const m = JSON.parse(localStorage.getItem(HIST_LOADS_KEY) || "{}");
+       return m && typeof m === "object" ? m : {}; }catch(e){ return {}; }
+}
+function histLoadBump(id){
+  if(!id) return;
+  const m = histLoadsGet();
+  m[id] = (Number(m[id]) || 0) + 1;
+  const ks = Object.keys(m);
+  if(ks.length > 60){   // 只留次数最多的 60 条，本地表不许无限长
+    const keep = new Set(ks.sort((a, b) => m[b] - m[a]).slice(0, 60));
+    for(const k of ks) if(!keep.has(k)) delete m[k];
+  }
+  try{ localStorage.setItem(HIST_LOADS_KEY, JSON.stringify(m)); }catch(e){}
+}
+function renderHistQuick(){
+  const box = $("#hdQuick"), grid = $("#histPanelGrid");
+  if(!box) return;
+  const cur = histCurrent();
+  const loads = histLoadsGet();
+  /* 常看 = 载入 ≥2 次按次数降序；最新 = histCache 头部（本就新→旧）。两行**各自
+     独立、允许同现**：曾经这里写成 `!freq.includes(h)`（最新行排斥常看条目），于是
+     一条记录一旦攒够 2 次载入就从「最新」消失、常看排名一掉出前三又冒回来——同一条
+     在两行之间窜，用户读成"记录在跳"。两行是两个独立的排序键（新度 / 次数），
+     同一条同现两行不是重复噪声，而排斥它才骗人。空行整行消失；当前已载入的那条
+     两边都不进（它就在入口按钮上，那才是真重复） */
+  const freq = histCache.filter(h => (loads[h.run_id] || 0) > 1 && h.run_id !== cur)
+    .sort((a, b) => loads[b.run_id] - loads[a.run_id]).slice(0, 3);
+  const recent = histCache.filter(h => h.run_id !== cur).slice(0, 3);
+  const chip = h => {
+    const n = loads[h.run_id] || 0;
+    return `<button type="button" class="hd-qchip" data-q="${esc(h.run_id)}"
+        title="${esc(historyLabel(h))}${n ? ` · 载入过 ${n} 次` : ""}&#10;点击直接载入控制台">
+      <b>${esc(histBrief(h))}</b></button>`;
+  };
+  const rows = [
+    recent.length ? `<div class="hd-qrow"><span class="hd-qhint">最新</span>${recent.map(chip).join("")}</div>` : "",
+    freq.length ? `<div class="hd-qrow"><span class="hd-qhint">常看</span>${freq.map(chip).join("")}</div>` : "",
+  ].filter(Boolean);
+  box.innerHTML = rows.join("");
+  box.hidden = !rows.length;
+  if(grid) grid.classList.toggle("no-quick", !rows.length);
+}
+$("#hdQuick").addEventListener("click", e => {
+  const b = e.target.closest("[data-q]");
+  if(b) hdLoadRecord(b.dataset.q);
+});
+
+/* ---------------- 组：一个写入口 + 台账（ADR-0129 / ADR-0130）----------------
+   组是**实体**（自己的 id + 名字 + 备注），住在 results/.history-groups.json，不进存档。
+   写入口只有这一个：`POST /api/bench/groups`，body `{ops:[…]}`，**整笔原子**（任一 op
+   非法则一个字都不写：半截归组比不做更难解释），**一次请求做完整笔**（拆成每模型一次
+   就是并发重写同一份映射文件，后写的把先写的覆盖掉——那是真坏数据，不是不美观）。
+   不可撤销（分组只是视图层，不满意删掉那个文件即归零），所以每个动作的确认框都先把
+   "要动几条"报出来。 */
+async function histGroupOps(ops, msg){
   let d;
   try{
     const r = await fetch("/api/bench/groups",
       {method:"POST", headers:{"Content-Type":"application/json"},
-       body:JSON.stringify({from, to})});
+       body:JSON.stringify({ops})});
     d = await r.json().catch(() => ({}));
-    if(!r.ok){ setPill(d.detail || "分组操作失败", "err"); return; }
-  }catch(e){ setPill("分组操作请求失败：" + e.message, "err"); return; }
-  await loadHistoryList();
-  if(!d.moved) setPill(`组「${from}」里没有记录（名字是否拼错？）`, "err");
-  else setPill(to ? `已把 ${d.moved} 条记录归入「${to}」` : `已解散「${from}」（${d.moved} 条回到未分组）`, "");
+    if(!r.ok){ setPill(d.detail || "分组操作失败", "err"); return null; }
+  }catch(e){ setPill("分组操作请求失败：" + e.message, "err"); return null; }
+  await loadHistoryList();                       // 列表与所有打开的视图一起刷
+  hdRefreshIfOpen();                             // 抽屉开着的话，左栏与列表都要跟着换
+  setPill(typeof msg === "function" ? msg(d) : (msg || `已动 ${d.touched ?? 0} 条记录`), "");
+  return d;
 }
-async function histGroupOp(op, name, v){
-  if(op === "auto") return histViewAutoGroup(v);
-  const n = histGroupCount(histCache, name);
-  if(op === "dissolve"){
-    if(!await uiDialog({title:"解散分组",
-      body:`组「${name}」的 ${n} 条记录将回到「未分组」。\n分组只是记录的归类方式，不动任何测速数据；此操作不可撤销。`,
-      okText:`解散（动 ${n} 条）`, danger:true})) return;
-    return histGroupsPost(name, "");
-  }
-  if(op === "merge"){
-    const others = histGroupNames(histCache, name);
-    const to = await uiDialog({title:"并入另一个组",
-      sub:`组「${name}」共 ${n} 条记录，将整体改到目标组名下。可输现有组名，也可新建一个。不可撤销。`,
-      input:{placeholder: others.length ? `现有组：${others.join("、")}` : "新组名", maxlength:40},
-      okText:`并入（动 ${n} 条）`});
-    if(to === false) return;
-    const t = to.trim();
-    if(!t || t === name) return;
-    return histGroupsPost(name, t);
-  }
-  const to = await uiDialog({title:"分组改名",
-    sub:`组「${name}」共 ${n} 条记录，改名后这 ${n} 条一起变。不可撤销。`,
-    input:{value:name, maxlength:40}, okText:`改名（动 ${n} 条）`});
-  if(to === false) return;
-  const t = to.trim();
-  if(!t || t === name) return;
-  return histGroupsPost(name, t);
-}
-
 /* 事后改备注：写回存档 cfg.note（与启动时填的同一字段），空串即清除 */
-async function editHistoryNote(){
-  const id = $("#historySel").value;
+async function editHistoryNote(rid){
+  const id = rid || histCurrent();
   if(!id){ setPill("请先在历史记录中选择一条存档", "err"); return; }
   const cur = histCache.find(h => h.run_id === id);
   const note = await uiDialog({title:"任务备注", sub:"留空即清除备注",
@@ -8220,20 +8972,20 @@ async function editHistoryNote(){
     if(!r.ok){ setPill("备注保存失败", "err"); return; }
   }catch(e){ setPill("备注保存请求失败：" + e.message, "err"); return; }
   setPill(note.trim() ? "备注已更新" : "备注已清除", "");
-  await loadHistoryList();
-  histSetCurrent(id);   // 刷新后保持选中原记录
+  await loadHistoryList();   // 当前记录由 loadHistoryList 保住（不再需要重设选中）
 }
 /* 存档模型改名适配（本地部署改名后对不上号的解方）：把选中存档内的旧模型名
    改写为新名，服务端原子写回并追加 model_renames 留痕；正在查看该存档时
    改名后重新水合，避免页面上残留旧名 */
-function openRenameModal(){
-  const id = $("#historySel").value;
+function openRenameModal(rid){
+  const id = rid || histCurrent();
   if(!id){ setPill("请先在历史记录中选择一条存档", ""); return; }
   const models = histCache.find(h => h.run_id === id)?.models || [];
   if(!models.length){ setPill("该记录没有可改名的模型", ""); return; }
   $("#renOld").innerHTML = models.map(m =>
     `<option value="${esc(m)}">${esc(m)}</option>`).join("");
   $("#renNew").value = "";
+  $("#renModalRoot").dataset.rid = id;
   $("#renModalRoot").hidden = false;
   document.addEventListener("keydown", onRenModalKey);
   trapModalFocus($("#renModalRoot"));   // Tab 圈定 + 关闭后焦点还原
@@ -8245,7 +8997,7 @@ function closeRenameModal(){
 }
 function onRenModalKey(e){ if(e.key === "Escape") closeRenameModal(); }
 async function renameConfirm(){
-  const id = $("#historySel").value;
+  const id = $("#renModalRoot").dataset.rid || histCurrent();
   const old = $("#renOld").value, name = $("#renNew").value.trim();
   if(!id || !old) return;
   if(!name){ setPill("新模型名不能为空", "err"); return; }
@@ -8262,7 +9014,6 @@ async function renameConfirm(){
   closeRenameModal();
   setPill(`已将存档模型「${old}」改名为「${name}」（${d.points ?? 0} 个测速点）`, "");
   await loadHistoryList();
-  histSetCurrent(id);   // 刷新后保持选中原记录
   if(state.runId === id && state.phase === "done" && !state.running) loadHistory();
 }
 /* 进行中的任务（多标签页入口，ADR-0009）：任意标签页可进入正在跑的测速 */
@@ -8296,15 +9047,13 @@ async function enterRun(rid, totalPoints, {skipConfirm} = {}){
      !await uiDialog({title:"进入进行中的任务？",
        body:"当前多次对比视图将被清空（存档仍在，可重新生成对比）。", okText:"进入"})) return;
   if(state.es) state.es.close();
-  state.points.clear(); state.maxSeq = -1; state.activeReqs.clear();
+  state.points.clear(); state.maxSeq = -1;
   state.cmp = null;   // 进入运行任务 = 退出多次对比态
   state.preMeasured.clear();
   state.donePoints = 0; state.totalPoints = totalPoints || 0;
   clearSkipNotes();
   $("#liveTable tbody").innerHTML = "";
-  renderAll(); resetKpis();
-  $("#progWrap").hidden = false;
-  $("#progFill").style.width = "0%";   // 接管他人任务：进度从零重建（回放会推进）
+  renderAll(); resetKpis();   // 接管他人任务：读数从零重建（回放会推进测速点）
   state.runId = rid; state.running = true; state.cfg = null;   // cfg 事件随回放到达
   state.runStartTs = Date.now();   // 接管时刻起算（任务真实起点在他处，标「约」）
   $("#btnStart").hidden = true; $("#btnStop").hidden = false; setStopBtn(false); $("#btnDl").disabled = true;
@@ -8312,98 +9061,6 @@ async function enterRun(rid, totalPoints, {skipConfirm} = {}){
   setPill("测速运行中…", "run");
   state.es = new EventSource(`/api/bench/events/${rid}`);
   wireEvents();
-}
-/* 删除弹窗：候选列表同样分组折叠 + 可搜索，但**每次打开都清空选择**——危险动作
-   不吃“上次留下的选择”（对比那边故意留着，这边故意不留） */
-let delSel = new Set();
-async function openDelModal(){
-  try{ await fetchHistory(); }
-  catch(e){ setPill(e.message || "历史列表加载失败", "err"); return; }
-  if(!histCache.length){ setPill("暂无历史记录可删除", ""); return; }
-  delSel = new Set();
-  histViewMount("#delView", {sel:delSel,
-    onSync:v => { $("#btnDelConfirm").disabled = !v.sel_ids.size; }});
-  $("#delModalRoot").hidden = false;
-  document.addEventListener("keydown", onDelModalKey);
-  trapModalFocus($("#delModalRoot"));   // Tab 圈定 + 关闭后焦点还原
-}
-function closeDelModal(){
-  $("#delModalRoot").hidden = true;
-  document.removeEventListener("keydown", onDelModalKey);
-  releaseModalFocus($("#delModalRoot"));
-}
-function onDelModalKey(e){ if(e.key === "Escape") closeDelModal(); }
-async function delConfirm(){
-  const ids = [...delSel].filter(id => histById(id));
-  if(!ids.length) return;
-  const btn = $("#btnDelConfirm");
-  btn.disabled = true;   // 循环删除期间不可重复提交
-  let ok = 0;
-  try{
-    for(const id of ids){
-      try{
-        const r = await fetch(`/api/bench/history/${encodeURIComponent(id)}`, {method:"DELETE"});
-        if(r.ok) ok++;
-      }catch(e){ /* 单条网络失败：计入未删，继续下一条 */ }
-    }
-  } finally {
-    btn.disabled = false;
-  }
-  closeDelModal();
-  if(ok === ids.length) setPill(`已删除 ${ok} 条历史记录`, "");
-  else setPill(`删除未全部完成：成功 ${ok}/${ids.length} 条（失败条目仍在列表中）`, "err");
-  await loadHistoryList();
-}
-/* 拼接弹窗：目标 = 当前选中存档；来源用同一套列表组件（单选、排除目标） */
-async function openSpliceModal(){
-  const target = $("#historySel").value;
-  if(!target){ setPill("请先在历史记录中选择目标存档（拼接到哪条）", ""); return; }
-  try{ await fetchHistory(); }
-  catch(e){ setPill(e.message || "历史列表加载失败", "err"); return; }
-  if(!histCache.some(h => h && h.run_id !== target)){
-    setPill("没有其他历史记录可作拼接来源", ""); return;
-  }
-  $("#spliceSub").textContent = `来源存档的全部测速点将合并进「${spliceTargetLabel()}」：同身份点以来源覆盖、新点追加；拼接点带「⇢拼接」溯源徽标，操作留痕于目标存档`;
-  histViewMount("#spliceView", {sel:new Set(),
-    itemsSrc:() => histCache.filter(h => h && h.run_id !== target),
-    onSync:v => { $("#btnSpliceConfirm").disabled = v.sel_ids.size !== 1; }});
-  $("#btnSpliceConfirm").disabled = true;
-  $("#spliceModalRoot").hidden = false;
-  document.addEventListener("keydown", onSpliceModalKey);
-  trapModalFocus($("#spliceModalRoot"));   // Tab 圈定 + 关闭后焦点还原
-}
-function spliceTargetLabel(){
-  const id = $("#historySel").value;
-  const h = histCache.find(x => x.run_id === id);
-  try{ return h ? historyLabel(h) : id; }catch(e){ return id; }
-}
-function closeSpliceModal(){
-  $("#spliceModalRoot").hidden = true;
-  document.removeEventListener("keydown", onSpliceModalKey);
-  releaseModalFocus($("#spliceModalRoot"));
-}
-function onSpliceModalKey(e){ if(e.key === "Escape") closeSpliceModal(); }
-async function spliceConfirm(){
-  const target = $("#historySel").value;
-  const src = [...(HIST_VIEWS["#spliceView"]?.sel_ids || [])][0];   // 恰好一条（按钮已保证）
-  if(!target || !src) return;
-  const btn = $("#btnSpliceConfirm");
-  btn.disabled = true;
-  let d;
-  try{
-    const r = await fetch(`/api/bench/history/${encodeURIComponent(target)}/splice`,
-      {method:"POST", headers:{"Content-Type":"application/json"},
-       body:JSON.stringify({source_run_id: src})});
-    d = await r.json().catch(() => ({}));   // 错误体未必是 JSON
-    if(!r.ok){ setPill(d.detail || "拼接失败", "err"); return; }
-  }catch(e){ setPill("拼接请求失败：" + e.message, "err"); return; }
-  finally{ btn.disabled = false; }
-  closeSpliceModal();
-  const warn = (d.warnings || []).length ? `；⚠ ${d.warnings.join("；")}` : "";
-  setPill(`拼接完成：新增 ${d.added} 点、覆盖 ${d.replaced} 点${warn}`, "");
-  await loadHistoryList();
-  histSetCurrent(target);   // 刷新后保持选中目标存档
-  if(state.runId === target && state.phase === "done" && !state.running) loadHistory();
 }
 /* ---------------- 单点删除（历史存档） ----------------
    服务端按身份五元组 + turn 移除该点并留 deletions 审计；删除不可恢复，
@@ -8425,8 +9082,7 @@ async function deletePoint(ident){
     if(!r.ok){ setPill(d.detail || "删除失败", "err"); return; }
   }catch(e){ setPill("删除请求失败：" + e.message, "err"); return; }
   setPill(`已删除该测试点（存档剩余 ${d.remaining} 点）`, "");
-  await loadHistoryList();
-  histSetCurrent(archiveId);   // 刷新后保持选中该存档（隐藏下拉框仍是事实源）
+  await loadHistoryList();   // 当前记录由 loadHistoryList 自己保住（ADR-0130）
   if(state.phase === "done") loadHistory();
 }
 /* 历史存档/断线兜底的公共水合路径：runId、points、进度、cfg（含 provider 回切）。
@@ -8451,7 +9107,7 @@ function hydrateArchive(d){
   results.forEach(p => state.points.set(pointKey(p), p));
   state.donePoints = state.points.size;
   state.totalPoints = state.points.size;
-  bumpProgress();   // 断线兜底路径借此刷新「已完成测试点」KPI 与进度条（loadHistory 随后自覆写）
+  // donePoints/totalPoints 仍然维护，但只给 ETA 外推用，不再有 KPI 展示
   if(d.cfg){
     state.cfg = {...d.cfg, started_at: d.started_at};
     if(d.cfg.provider && [...$("#fProvider").options].some(o => o.value === d.cfg.provider)){
@@ -8466,13 +9122,13 @@ function hydrateArchive(d){
   return true;
 }
 async function loadHistory(){
-  const id = $("#historySel").value;
+  const id = histCurrent();
   if(!id){ setPill("请先在历史记录中选择一条存档", "err"); return; }
   let r;
   try{ r = await fetch(`/api/bench/history/${encodeURIComponent(id)}`); }
   catch(e){ setPill("历史载入请求失败：" + e.message, "err"); return; }
   // 竞态防护：await 期间用户可能已改选别的存档，慢响应不得回写当前视图
-  if($("#historySel").value !== id) return;
+  if(histCurrent() !== id) return;
   if(!r.ok){
     const d = await r.json().catch(() => ({}));   // 错误体未必是 JSON
     setPill(d.detail || `历史记录载入失败（HTTP ${r.status}）`, "err");
@@ -8483,10 +9139,9 @@ async function loadHistory(){
   if(!hydrateArchive(d)) return;   // 坏存档：hydrateArchive 内已报错，中止载入
   setPhase("done");   // 载入历史直接进入统计展示阶段
   resetKpis();
-  $("#kpiPoints").innerHTML = `${state.donePoints} <small>个点</small>`;
-  $("#progWrap").hidden = true;
   renderAll();
   genCards();   // 载入历史：直接展示卡片数据并滚动到卡片位置
+  histLoadBump(id); renderHistQuick();   // 常看计数 + 气泡即时更新
 }
 
 /* ---------------- 单点复测（历史存档） ----------------
@@ -8533,12 +9188,10 @@ async function reloadAfterRetest(msg, cls, expectMerge){
             if(!hydrateArchive(d)) return;
             setPhase("done");
             resetKpis();
-            $("#kpiPoints").innerHTML = `${state.donePoints} <small>个点</small>`;
-            $("#progWrap").hidden = true;
             renderAll();
             genCards();
             setPill(msg, cls || "");
-            loadHistoryList().then(() => histSetCurrent(id));
+            loadHistoryList();
             return;
           }
         }

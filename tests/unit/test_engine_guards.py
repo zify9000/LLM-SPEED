@@ -35,6 +35,7 @@ from bench import (
     _is_transient_http_status,
     _plan_ctx_edge,
     _retry_after_s,
+    _ctx_short,
     _trim_middle,
     build_messages,
     TRANSIENT_RETRY_MAX,
@@ -210,6 +211,54 @@ class TestCtxEdgeTrim(unittest.TestCase):
         mode, eff, _ = _plan_ctx_edge(100, self.MAX_CTX - CTX_HEADROOM + 10,
                                       self.MAX_CTX)
         self.assertEqual(mode, "skip")   # excess 在 10% 内但贴边量为负
+
+
+class TestCtxShort(unittest.TestCase):
+    """「实际喂进去的长度比档位标签短」判定（`_ctx_short`，ADR-0136）：服务端
+    200 不报错，却明显少算 prompt_tokens——档位标签开始说谎，必须留痕。"""
+
+    @staticmethod
+    def _req(tok, real=True):
+        return {"usage_real": real, "prompt_tokens": tok}
+
+    def test_real_archive_cases_detected(self):
+        """存档里真出现过的两例（无 ovf_trim/ctx_edge 留痕、各 rep 一致）：
+        2026-10-13 构造 262144 服务端只算 240536（−8.2%）、2026-09-16 的 206524
+        （−21.2%）→ 都该判，留痕带构造量/回报量/差额。"""
+        self.assertEqual(_ctx_short(262144, [self._req(240536)]),
+                         {"ctx": 262144, "reported": 240536, "dropped": 21608})
+        self.assertIsNotNone(_ctx_short(262144, [self._req(206524)]))
+
+    def test_normal_rungs_not_flagged(self):
+        """同词表的正常计数抖动（真机同轮其余档位 ±1% 内）不得误判。"""
+        for ctx, got in [(16384, 16340), (32768, 32772), (65536, 64915),
+                         (131072, 131168), (262144, 260619)]:
+            self.assertIsNone(_ctx_short(ctx, [self._req(got)]),
+                              f"{ctx} → {got} 属正常抖动，不该判")
+
+    def test_threshold_is_five_percent_with_floor(self):
+        """判据 = max(5%·ctx, 2048)：卡在阈内不算，越过才算。"""
+        self.assertIsNone(_ctx_short(262144, [self._req(262144 - 13107)]))
+        self.assertIsNotNone(_ctx_short(262144, [self._req(262144 - 13108)]))
+        # 小档位靠绝对下限兜：4096 档少 2000（49%）仍低于 2048 下限，不判
+        self.assertIsNone(_ctx_short(4096, [self._req(2096)]))
+
+    def test_requires_server_reported_truth(self):
+        """无 usage 真值（字符估算兜底）时不判：估算靶值自指，判不了。"""
+        self.assertIsNone(_ctx_short(262144, [self._req(100000, real=False)]))
+        # 并发批里有一条没回真值 → 整点不判（判不准不如不判）
+        self.assertIsNone(_ctx_short(262144, [self._req(206524),
+                                             self._req(100000, real=False)]))
+
+    def test_only_trims_we_know_about_are_exempt(self):
+        """我们自己动的刀不重复判（各有角标归口）：超窗删减 ovf_trim、贴边裁减
+        ctx_edge（点级已按裁前档位显示）。而按实测密度重建过（ctx_retry）**不**
+        豁免——重建后仍短，正是"服务端吃不下这么多"，最该留痕。"""
+        self.assertIsNone(_ctx_short(262144, [self._req(206524)], trimmed=True))
+        self.assertIsNotNone(_ctx_short(262144, [self._req(240536)]))
+        # 0K/小档固定开销主导、无 ok 请求：不判
+        self.assertIsNone(_ctx_short(512, [self._req(1)]))
+        self.assertIsNone(_ctx_short(262144, []))
 
 
 class TestDegenerateText(unittest.TestCase):

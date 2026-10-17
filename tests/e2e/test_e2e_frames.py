@@ -50,7 +50,13 @@ class TestE2EFrames(MockGatewayTest):
                 try:
                     run = BenchRun(self.std_cfg(ctx_list=[4096], max_tokens=8))
                     run.cpt_calib[("mock-llm-7b", "creative")] = 1.8   # 跳过探测，直奔主题
-                    run.prefill_curve[("mock-llm-7b", "creative")] = [(2048, 600.0)]   # 探测正常时会播种曲线
+                    # 探测正常时会播种曲线。两个子例故意用不同覆盖度的曲线，顺带
+                    # 验 weak 标记的两个方向：只有低档锚点（比本档低整一个倍频程）
+                    # → 带 weak；有 4000 的近档锚点 → 不带（2026-10-17 真机单点复测
+                    # 256K 全程 1100+ 就是前一种处境，见 ADR-0134）
+                    run.prefill_curve[("mock-llm-7b", "creative")] = (
+                        [(2048, 600.0)] if check_throttle
+                        else [(2048, 600.0), (4000, 600.0)])
                     q: asyncio.Queue = asyncio.Queue()
                     run.subs.add(q)
                     task = asyncio.create_task(run.run())
@@ -62,20 +68,71 @@ class TestE2EFrames(MockGatewayTest):
                 ticks = [e for e in events
                          if e.get("type") == "tick" and e.get("phase") == "prefill"]
                 est = [t for t in ticks if t.get("ttft") is None and t.get("speed")]
-                measured = [t for t in ticks if t.get("ttft") is not None]
+                # 带 ttft 的帧分两档：首 token 帧分子仍是估算（带 est），
+                # 流末帧分子才是 usage 真值（不带 est，前端据此上「实测」牌）
+                first_tok = [t for t in ticks if t.get("ttft") is not None and t.get("est")]
+                measured = [t for t in ticks
+                            if t.get("ttft") is not None and not t.get("est")]
                 self.assertGreaterEqual(len(est), 3, f"{miss_msg}（仅 {len(est)} 帧）")
-                self.assertEqual(len(measured), 1, "首 token 实测帧应恰好一帧")
+                self.assertEqual(len(first_tok), 1, "首 token 估值帧应恰好一帧")
+                self.assertEqual(len(measured), 1, "流末权威 prefill 帧应恰好一帧")
                 # 先验速率封顶：估值在先验实测速率带内（PP=600），不再从
                 # est_prompt/1s（≈4096，数量级虚高）双曲起步
                 for t in est:
                     self.assertTrue(300 <= t["speed"] <= 900,
                                     f"估值 {t['speed']} 越出先验速率带 [300,900]")
+                # 先验覆盖度上到线上（前端据此说明「按低档速率保守显示，实测通常更快」）
+                for t in est:
+                    self.assertEqual(bool(t.get("weak")), check_throttle,
+                                     f"weak 标记错（先验覆盖度判据失效）: {t}")
                 if check_throttle:
                     # est_tick 0.95s 节流边界回归：相邻估值帧不得隔拍成 ~2s 一帧
                     est_ts = [t["ts"] for t in est]
                     for a, b in zip(est_ts, est_ts[1:]):
                         self.assertLess(b - a, 1.8,
                                         f"估值帧间隔 {b - a:.2f}s 超出 0.95s 节流边界")
+
+    async def test_prefill_frames_split_estimate_from_measured(self):
+        """首 token 帧只能算「估」，usage 到手的流末帧才是「实测」（真机事故回归）。
+
+        2026-10-17 真机 256K 档：实发 19.7 万 token，而首 token 帧的分子按
+        「字符 ÷ 全局平均系数」估成 22~26 万 → KPI 显示 4200~5000（真值 3722），
+        且该帧被前端当实测冻结，直到整点（3 轮 ≈3 分钟）跑完才回写。
+        本例故意把 cpt_calib 播成偏小的 0.6（mock 真值 1.8）使估算分子成倍
+        虚高，断言：①首 token 帧带 est 且明显高于真值（=它确实是估的）；
+        ②流末补一帧不带 est 的权威 prefill，读数与存档 usage 口径闭合。
+        cache=stable 是为旁路构建偏离校正重测（仅 bust 生效），否则首测会被
+        整批替换、两帧分属两次尝试。"""
+        run = BenchRun(self.std_cfg(ctx_list=[4096], max_tokens=8,
+                                    cache="stable", repeats=1))
+        run.cpt_calib[("mock-llm-7b", "creative")] = 0.6   # 故意偏小三倍
+        run.prefill_curve[("mock-llm-7b", "creative")] = [(2048, 600.0)]
+        q: asyncio.Queue = asyncio.Queue()
+        run.subs.add(q)
+        task = asyncio.create_task(run.run())
+        events = await self._drain(q, task, timeout=25)
+        pts = [e["point"] for e in events if e.get("type") == "point"]
+        self.assertEqual(len(pts), 1)
+        point = pts[0]
+        self.assertTrue(point["all_ok"], f"点应成功: {point.get('reqs')}")
+        frames = [e for e in events if e.get("type") == "tick"
+                  and e.get("phase") == "prefill" and e.get("ttft") is not None]
+        first = [t for t in frames if t.get("est")]
+        final = [t for t in frames if not t.get("est")]
+        self.assertEqual(len(first), 1, f"首 token 估值帧应恰好一帧: {frames}")
+        self.assertEqual(len(final), 1, f"流末权威 prefill 帧应恰好一帧: {frames}")
+        truth = point["prefill_tok_s"]
+        # 估算分子虚高 ≈ 真系数/坏系数 = 1.8/0.6 = 3×（TTFT 两侧同值）
+        self.assertGreater(first[0]["speed"], 1.5 * truth,
+                           f"构造偏 3× 时首 token 帧应显著虚高："
+                           f"{first[0]['speed']} vs 真值 {truth}")
+        # 权威帧用 usage 真值：与点级毛/净两口径之一闭合（RTT 基线在
+        # 进程内 mock 上只有毫秒级，两者几平相等）
+        self.assertTrue(any(abs(final[0]["speed"] - c) / c <= 0.05
+                            for c in (point["prefill_tok_s"],
+                                      point["prefill_net_tok_s"]) if c),
+                        f"权威帧 {final[0]['speed']} 与点级 usage 口径不闭合："
+                        f"{point['prefill_tok_s']} / {point['prefill_net_tok_s']}")
 
     async def test_max_gap_detects_decode_stall(self):
         """decode 中段停滞被 max_gap_s 捕获：传输/调度空窗会拖尾 decode 窗口、

@@ -79,6 +79,38 @@ class TestRatePrior(unittest.TestCase):
         # 曲内点取实测
         self.assertAlmostEqual(rate_prior(pts, 32768), 852.8)
 
+    def test_near_duplicate_reps_do_not_break_extrapolation(self):
+        """repeats≥2 的同档近重复点不得毁掉外推（2026-10-17 真机事故）。
+
+        曲线由 _note_prefill_rate 逐复测登记，同一档位会留下三个「几乎同 x」
+        的点（131018/131075/131411，x 差 0.26%）。旧实现拿它们当末两点算斜率：
+        分母（Δ log2）只有 0.0037，斜率被放大成 −2897/倍频程，外推到 256K 得负值
+        再钳到 0.35× 地板 → 等待期显示 1310 tok/s（实测 3702）。
+        近重复合并成一组后，外推沿 64K→128K 的真实斜率。"""
+        curve = [(2048, 1200.0),
+                 (4112, 1715.0),
+                 (8212, 1919.8), (8191, 1999.0), (8194, 1994.8),
+                 (16307, 2078.0), (16340, 2185.2), (16374, 2183.9),
+                 (32765, 3160.3), (32769, 3163.8), (32781, 3168.0),
+                 (63657, 3486.6), (65493, 3480.4), (65596, 3465.6),
+                 (131411, 3744.2), (131018, 3754.4), (131075, 3754.9)]
+        got = rate_prior(curve, 262144)
+        # 真值 3660：先验应落在真值的 [0.8, 1.3] 带内，而不是 0.35× 地板
+        self.assertGreater(got, 0.8 * 3660, f"外推被钳到地板（{got:.0f}）")
+        self.assertLess(got, 1.3 * 3660, f"外推越上界（{got:.0f}）")
+        # 各档等待期同样不得靠近重复点算斜率（旧实现 16K 档算出 672，真值 2148）
+        self.assertGreater(rate_prior(curve[:8], 32768), 0.7 * 3163)
+
+    def test_near_duplicate_merge_averages(self):
+        """近重复点合并：组内速率取均值（同档三轮的噪声互打对）。"""
+        from bench import _rate_groups
+        g = _rate_groups([(8191, 2000.0), (8194, 1990.0), (8212, 1980.0),
+                          (16384, 2100.0)])
+        self.assertEqual(len(g), 2)
+        self.assertAlmostEqual(g[0][1], 1990.0)
+        # 差超过合并阈值（log2 0.05 ≈ 3.5%）就不归同一组
+        self.assertEqual(len(_rate_groups([(4096, 1.0), (4400, 2.0)])), 2)
+
 
 class TestCacheHitVerdict(unittest.TestCase):
     """_cache_hit_verdict（C>0 未回传点缓存迹象判别）：三通道 OR + 运行级

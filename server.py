@@ -13,6 +13,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import tempfile
 import time
 import urllib.parse
@@ -622,9 +623,29 @@ def _atomic_write(path: str, text: str, private: bool = False):
 
 # 历史列表摘要缓存：文件名 → (mtime, size, 摘要)。只缓存列表页真正需要的字段，
 # 不缓存 results（那是 MB 级）；存档被 note/env/rename/retest 改写时 mtime 变，
-# 缓存自然失效。超上限整体清空（列表页最多 50 项，够用且实现最简）。
+# 缓存自然失效。超上限**按插入序逐条淘汰**（旧写法是整体 clear()：注释还写着
+# “列表页最多 50 项，够用”，上限提到 500 后那条前提就没了——条目一过上限，
+# 每开一次历史面板都要全量重解目录，正是 ADR-0082 避免的那类事）。
 _HIST_CACHE: dict[str, tuple[float, int, dict]] = {}
-_HIST_CACHE_MAX = 200
+_HIST_CACHE_MAX = 1000
+
+# 手填分组（存储边界见 ADR-0126，形状与写入口见 ADR-0129）：组名**不落存档**，落这
+# 一份映射文件，形状 `{"v":2,"groups":[{id,name,note}],"assign":{run_id: group_id}}`。
+# 判据仍是“分组只是视图层，不满意直接删了就行”——删掉这个文件，归组全部消失，存档
+# 一个字没改过。文件名以点开头，`_valid_run_id` 的白名单（不含 `.`）于是天然把它挡在
+# 所有 /history/{run_id} 路由之外，不需要额外开洞或拉黑名单。
+HISTORY_GROUPS_FILE = ".history-groups.json"
+GROUP_NAME_MAX = 40
+GROUP_NOTE_MAX = 60
+# 「未分组」是列表给未归组记录的伪组名，不允许被当成真组名：两组同名（其中一组还叫
+# 伪组名）会让搜索与“输已有组名即并入”同时出现两个答案
+GROUP_RESERVED_NAME = "未分组"
+# 组数与单次 touch 的记录数上限：只为拦住“把整个目录拖进一个组”这类手抽与异常请求，
+# 不是产品限制（本机现在 72 条）
+GROUP_ASSIGN_MAX_GROUPS = 200
+GROUP_ASSIGN_MAX_IDS = 2000
+HISTORY_LIMIT_DEFAULT = 500
+HISTORY_LIMIT_MAX = 2000
 
 
 def _archive_summary(path: str, name: str) -> dict | None:
@@ -634,6 +655,7 @@ def _archive_summary(path: str, name: str) -> dict | None:
         return None
     prev = _HIST_CACHE.get(name)
     if prev and prev[0] == st.st_mtime and prev[1] == st.st_size:
+        _HIST_CACHE[name] = prev   # 命中即移到插入序末尾：淘汰的是“最丽没被列表碰到”的那条
         return prev[2]
     try:
         with open(path, encoding="utf-8") as fp:
@@ -641,12 +663,19 @@ def _archive_summary(path: str, name: str) -> dict | None:
     except (OSError, json.JSONDecodeError, ValueError):
         return None   # 损坏/半截存档不进列表，也不阻塞其余条目
     cfg = d.get("cfg", {})
+    results = d.get("results", [])
     summary = {
         "run_id": d.get("run_id", name), "started_at": d.get("started_at"),
         "models": cfg.get("models", []),
         "scenarios": cfg.get("scenarios", []),
         "ctx_list": cfg.get("ctx_list", []),
         "concurrencies": cfg.get("concurrencies", []),
+        # 分组/筛选用的元数据（ADR-0126）：provider 以前没进摘要（按 Provider 分组要用），
+        # n_failed 支撑“只看含失败点”，size/mtime 给组头摘要与“这一条多大”
+        "provider": cfg.get("provider_label") or cfg.get("provider") or "",
+        "n_failed": sum(1 for p in results
+                        if isinstance(p, dict) and p.get("all_ok") is False),
+        "size": st.st_size, "mtime": st.st_mtime,
         "agent_cache_ladder": cfg.get("agent_cache_ladder"),
         "agent_inst_ladder": cfg.get("agent_inst_ladder"),
         # 旧存档（连续任务链口径）标题展示回退用
@@ -655,12 +684,14 @@ def _archive_summary(path: str, name: str) -> dict | None:
         "agent_turns_p2": cfg.get("agent_turns_p2"),
         "agent_cold_ctx": cfg.get("agent_cold_ctx"),
         "note": cfg.get("note") or "",
-        "n_points": len(d.get("results", [])),
+        "n_points": len(results),
         # 口径版本（无该字段 = 本机制引入前的遗留口径，见 bench.METRIC_VERSION）
         "metric_version": d.get("metric_version"),
     }
-    if len(_HIST_CACHE) >= _HIST_CACHE_MAX:
-        _HIST_CACHE.clear()
+    # 逐条淘汰而不是整体清空；用 while 而非 if：上限被调低时（或缓存已高于上限）
+    # 一次调用就能收敛到上限，不会永远停在超限状态
+    while _HIST_CACHE and len(_HIST_CACHE) >= _HIST_CACHE_MAX:
+        _HIST_CACHE.pop(next(iter(_HIST_CACHE)), None)
     _HIST_CACHE[name] = (st.st_mtime, st.st_size, summary)
     return summary
 
@@ -1395,21 +1426,271 @@ async def bench_active():
     return {"runs": out}
 
 
+def _groups_path() -> str:
+    return os.path.join(RESULTS_DIR, HISTORY_GROUPS_FILE)
+
+
+def _legacy_group_id(name: str, taken: set[str]) -> str:
+    """旧平铺文件折算出来的组 id：按**组名**派生（sha1 前 6 位），不用随机数。
+
+    旧文件不写盘（ADR-0129 第 2 条），于是每次 GET 都要重新折算一遍；随机 id 会让同一
+    个组名每次换一个 id，前端刚拿到的 id 下一步就 400「组不存在」。派生 id 保证「文件
+    内容不变 ⇒ id 不变」；撞上已有 id（随机 id 或另一个派生 id）时加盐重算，仍确定性。"""
+    salt = 0
+    while True:
+        gid = "g-" + hashlib.sha1(f"{salt}\x00{name}".encode("utf-8")).hexdigest()[:6]
+        if gid not in taken:
+            return gid
+        salt += 1
+
+
+def _new_group_id(taken: set[str]) -> str:
+    """新建组的 id：`g-` + 6 位十六进制，服务端生成、退役不复用。
+
+    撞车概率 1/16M，仍重摇到不撞——两个组共用一个 id 比“拿着失踪 id 得 400”难解释得多。"""
+    while True:
+        gid = "g-" + secrets.token_hex(3)
+        if gid not in taken:
+            return gid
+
+
+def _normalize_groups(raw: dict) -> dict:
+    """把 v2 原文归一化成 `{"groups": [{id,name,note}], "assign": {run_id: group_id}}`。
+
+    逐条目宽容、整体不炸：单条坏项（非 dict / id 或 name 不合法 / 重复 id）丢掉其余照用；
+    `assign` 里指向失踪组的条目直接落掉——它按未分组处理（ADR-0129 第 1 条），留着只会
+    在下一次写盘时继续往文件里掺垃圾。"""
+    groups: list[dict] = []
+    taken: set[str] = set()
+    for g in raw.get("groups") or []:
+        if not isinstance(g, dict):
+            continue
+        gid, name = g.get("id"), g.get("name")
+        if not isinstance(gid, str) or not isinstance(name, str) or not gid or not name.strip():
+            continue
+        if gid in taken:
+            continue          # 重复 id 只留第一条：“动哪个组”在两组共 id 时没有答案
+        taken.add(gid)
+        note = g.get("note")
+        groups.append({"id": gid, "name": name.strip(),
+                       "note": note.strip() if isinstance(note, str) else ""})
+    live = {g["id"] for g in groups}
+    assign: dict[str, str] = {}
+    pair = raw.get("assign")
+    if isinstance(pair, dict):
+        for rid, gid in pair.items():
+            if isinstance(rid, str) and rid and isinstance(gid, str) and gid in live:
+                assign[rid] = gid
+    return {"groups": groups, "assign": assign}
+
+
+def _fold_legacy_groups(raw: dict) -> dict:
+    """ADR-0126 的旧平铺 `{run_id: 组名}` → v2 结构，只在内存里做（ADR-0129 第 2 条）。
+
+    折算规则 = 按**名字首次出现序**建组、run_id 跟着搬，于是组的顺序就是用户第一次碰到
+    它的顺序。空组名、非字符串键/值按未分组落掉（旧写入口本来也写不出这些东西）。"""
+    groups: list[dict] = []
+    by_name: dict[str, str] = {}
+    assign: dict[str, str] = {}
+    for rid, name in raw.items():
+        if not isinstance(rid, str) or not isinstance(name, str) or not rid:
+            continue
+        name = name.strip()
+        if not name:
+            continue
+        gid = by_name.get(name)
+        if gid is None:
+            gid = _legacy_group_id(name, set(by_name.values()))
+            by_name[name] = gid
+            groups.append({"id": gid, "name": name, "note": ""})
+        assign[rid] = gid
+    return {"groups": groups, "assign": assign}
+
+
+def _read_groups_sync() -> dict:
+    """读组映射（在线程池里跑），**统一归一化成 v2 形状**。
+
+    顶层**没有 `v` 键就当成旧平铺文件**就地折算（不写盘、不备份：为一个纯视图层文件在
+    启动时改用户的盘，收益只有“文件整齐”，代价是多一条写盘路径要防）；下一次任何写操作
+    自然落成 v2。
+
+    缺失/损坏/形态不对都当“没有分组”：不报错不阻塞列表——分组是锦上添花的视图东西，
+    不能因为一个映射文件写环了就看不了历史（与 ADR-0101“损坏存档不进列表也不阻塞其余
+    条目”同一思路）。"""
+    try:
+        with open(_groups_path(), encoding="utf-8") as fp:
+            d = json.load(fp)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {"groups": [], "assign": {}}
+    if not isinstance(d, dict):
+        return {"groups": [], "assign": {}}
+    if "v" not in d:            # 旧形状判别只看顶层有没有 `v`，不猜内容
+        return _fold_legacy_groups(d)
+    return _normalize_groups(d)
+
+
+def _group_name_or_400(raw) -> str:
+    """组名校验：去首尾空白 + 限长，**超长报错而不静默截断**。
+
+    截断后的名字与用户心里那个不是同一个，以后按旧名合并就合不上（备注那种一个入位的
+    东西才适合截断）——这是 ADR-0126 定下的口径，v2 里组名从“映射值”变成实体主键，更不容
+    易发现被截了。"""
+    if not isinstance(raw, str):
+        raise HTTPException(400, "组名须为字符串")
+    name = raw.strip()
+    if len(name) > GROUP_NAME_MAX:
+        raise HTTPException(400, f"组名不能超过 {GROUP_NAME_MAX} 字符（不截断，请改短）")
+    return name
+
+
+def _group_note_or_400(raw) -> str:
+    """组备注校验：与组名同口径——超长报错不截断；缺省/空串 = 无备注。"""
+    if raw is None:
+        return ""
+    if not isinstance(raw, str):
+        raise HTTPException(400, "note 须为字符串")
+    note = raw.strip()
+    if len(note) > GROUP_NOTE_MAX:
+        raise HTTPException(400, f"组备注不能超过 {GROUP_NOTE_MAX} 字符（不截断，请改短）")
+    return note
+
+
+def _run_ids_or_400(raw, where: str, *, optional: bool = False) -> list[str]:
+    """run_ids 校验：数组、逐个过 `_valid_run_id`（白名单天然挡住路径穿越），有序去重。
+
+    **不要求存档已存在**：刚点「启动」时存档还没落盘，而组名要在那一刻就能盖上
+    （ADR-0126）。写早了/写错了都不污染列表——列表只给目录里真在的存档贴组名。
+    `optional=True` 用于 create（允许建不带记录的空组）。"""
+    if raw is None and optional:
+        return []
+    if not isinstance(raw, list):
+        raise HTTPException(400, f"{where} 的 run_ids 须为数组")
+    out: list[str] = []
+    for rid in raw:
+        _valid_run_id(rid)                       # 白名单：路径穿越与怪字符天然不可达
+        if rid not in out:
+            out.append(rid)
+    return out
+
+
+def _group_by_name(groups: list[dict], name: str) -> dict | None:
+    for g in groups:
+        if g["name"] == name:
+            return g
+    return None
+
+
+def _require_group(staged: dict, raw_id, where: str, field: str = "id") -> dict:
+    """组引用校验：必须是字符串、非空、且在（本次事务的）groups 里。
+
+    拿着失踪 id 操作 = 老浏览器标签页里的旧列表（merge/dissolve 后 id 退役不复用，
+    ADR-0129 代价第 3 条）：给 400 并说出“刷新列表”，不做乐观回滚。"""
+    gid = raw_id.strip() if isinstance(raw_id, str) else None
+    if not gid:
+        raise HTTPException(400, f"{where} 的 {field} 须为非空组 id")
+    for g in staged["groups"]:
+        if g["id"] == gid:
+            return g
+    raise HTTPException(400, f"组不存在（{field}={gid}），请刷新历史列表后重试")
+
+
+def _claim_run_ids(rids: list[str], claimed: set[str], seq: int) -> None:
+    """一请求内“一条记录只能被一个 op 动归属”的占地盘检查 + 总量上限。
+
+    不拦会怎样：同一请求先 move 进 A 再 move 进 B，按顺序执行得到 B——等于服务端替
+    用户静默选了一个答案（与 ADR-0126“同一条出现在两个组直接拒”同口径）。"""
+    for rid in rids:
+        if rid in claimed:
+            raise HTTPException(400, f"记录 {rid} 在一次请求里被两个 op 动归属（第 {seq} 个 op）")
+        claimed.add(rid)
+    if len(claimed) > GROUP_ASSIGN_MAX_IDS:
+        raise HTTPException(400, f"一次最多动 {GROUP_ASSIGN_MAX_IDS} 条记录")
+
+
+def _hist_hay(s: dict) -> str:
+    """搜索文本拼一块比（ADR-0126：note/group/models/run_id/started_at 五处子串，
+    不分词不模糊）。组名在装配时已贴到摘要上，所以这里能搜到分组。"""
+    return " ".join([
+        s.get("note") or "", s.get("group") or "",
+        " ".join(str(m) for m in (s.get("models") or [])),
+        s.get("run_id") or "", str(s.get("started_at") or ""),
+    ]).lower()
+
+
+def _collect_summaries_sync() -> list[dict]:
+    """列目录→存档摘要（带 (mtime,size) 缓存，在线程池里跑）。
+
+    组映射也在本目录且同样 .json 结尾，不排掉就会被当成一份存档进列表。"""
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    files = sorted((f for f in os.listdir(RESULTS_DIR)
+                    if f.endswith(".json") and f != HISTORY_GROUPS_FILE),
+                   reverse=True)
+    # 损坏/半截存档不进列表也不阻塞其余条目（_archive_summary 回 None）
+    return [s for s in (_archive_summary(os.path.join(RESULTS_DIR, f), f) for f in files) if s]
+
+
+async def _history_view() -> tuple[list[dict], list[dict]]:
+    """装配历史视图：每条摘要贴 `group`/`group_id`，顶层给出 `groups`。
+
+    GET /api/bench/history 与 POST /api/bench/groups 的回包共用它，两处的 `groups`
+    形状与 count 口径必须一致（前端只照一份写）：
+    `groups: [{id, name, note, count}]`，**含 count=0 的空组**，按存储序（= 创建序）。
+
+    - 组名/组 id **不进 `_HIST_CACHE`**：缓存键是存档的 (mtime,size)，而组住在另一个文件
+      里，改组不动存档 mtime，烤进去就会出现“改了组名界面不变”（ADR-0126 第 4 条）；
+      因此这里只往 `{**s}` 副本上贴字段，不返缓存里的共享 dict；
+    - `count` 数的是**目录里真在的存档**：已删存档留下的孤儿 assign 条目读时过滤不报错
+      （ADR-0126 第 6 条），指向失踪组的条目同样按未分组（已在 `_read_groups_sync` 落掉）。
+      所以一个组可能显示 0 条而文件里仍留着它的 id——那是空组而不是幽灵（ADR-0129）。"""
+    items = [{**s, "group": "", "group_id": ""}
+             for s in await asyncio.to_thread(_collect_summaries_sync)]
+    gdata = await asyncio.to_thread(_read_groups_sync)
+    names = {g["id"]: g["name"] for g in gdata["groups"]}
+    counts = {g["id"]: 0 for g in gdata["groups"]}
+    by_id = {s["run_id"]: s for s in items}
+    for rid, gid in gdata["assign"].items():
+        s = by_id.get(rid)
+        if s is None or gid not in counts:
+            continue
+        s["group_id"] = gid
+        s["group"] = names[gid]
+        counts[gid] += 1
+    groups = [{**g, "count": counts[g["id"]]} for g in gdata["groups"]]
+    return items, groups
+
+
 @app.get("/api/bench/history")
-async def bench_history():
-    """历史列表：只回摘要，且带 (mtime,size) 缓存 + 线程池执行。
+async def bench_history(limit: int = HISTORY_LIMIT_DEFAULT, q: str | None = None):
+    """历史列表：默认回最近 500 条摘要，`q` 走**全集**搜索（ADR-0126）。
 
-    旧实现每次请求都同步 json.load 最多 50 份完整存档（实测单份 11MB、
-    全量 ~70ms 占住事件循环），把"打开历史面板"变成对正在跑的测速的计时干扰
-    （ADR-0082）。摘要缓存让同一份未变动的存档只解析一次。"""
-    def _collect():
-        os.makedirs(RESULTS_DIR, exist_ok=True)
-        files = sorted((f for f in os.listdir(RESULTS_DIR) if f.endswith(".json")),
-                       reverse=True)[:50]
-        return [_archive_summary(os.path.join(RESULTS_DIR, f), f) for f in files]
+    两个口径必须钉住：
 
-    out = await asyncio.to_thread(_collect)
-    return {"history": [s for s in out if s]}
+    1. **不再静默截断**。旧实现写死 `[:50]`，条目过 50 后最早的记录在界面上根本
+       不存在（本机实测 72 条藏了 22 条）。现在回 `total`（目录里到底几条）/`matched`
+       （命中几条）/`truncated`，前端必须把"只显示最近 N 条"说出来。
+    2. **搜索在服务端做**：前端只拿到 500 条，在残缺集上搜"全集"是假的全集。
+
+    摘要仍按 (mtime,size) 缓存且在线程池里解（ADR-0082：不能把历史面板变成对正在
+    跑的测速的计时干扰）；**组名/组 id 不进这份缓存**（见 `_history_view`）。
+
+    字段位置（ADR-0129 第 4 条）：每条摘要带 `group`（组名，"" = 未分组）与 `group_id`；
+    顶层带 `groups: [{id,name,note,count}]`（含空组，按存储序，**不受 `limit`/`q` 影响**
+    ——它是组台账而不是当前视图的统计）。"""
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = HISTORY_LIMIT_DEFAULT
+    limit = max(1, min(limit, HISTORY_LIMIT_MAX))
+
+    items, groups = await _history_view()
+    total = len(items)
+    needle = (q or "").strip().lower()
+    if needle:
+        items = [s for s in items if needle in _hist_hay(s)]
+    matched = len(items)
+    return {"history": items[:limit], "total": total, "matched": matched,
+            "truncated": matched > limit, "limit": limit, "query": needle,
+            "groups": groups}
 
 
 @app.get("/api/bench/history/{run_id}")
@@ -1465,6 +1746,136 @@ async def bench_history_note(run_id: str, body: dict):
     # 原子替换写回：直接覆写会因进程被杀留下写了一半的存档，永久损坏既有测速记录
     await _write_json(path, d)
     return {"ok": True, "note": note}
+
+
+_GROUPS_LOCK = asyncio.Lock()   # 读-改-写串行：两个请求并发改同一份映射 = 后写的覆盖先写的
+
+
+@app.post("/api/bench/groups")
+async def bench_groups_apply(body: dict):
+    """组操作的**唯一写入口**（ADR-0129 第 3 条）：body `{"ops": [ ... ]}`，整笔原子。
+
+    | op | 载荷 | 语义 |
+    |---|---|---|
+    | `create` | `name, note?, run_ids?` | 建组（**可以不带记录 = 空组**）；同名组已存在 →
+      不新建，等价于把这些 run_ids 移进去（保留“输已有组名即并入”的老便利） |
+    | `move` | `id, run_ids` | 按**具体哪几条**移进该组；`id` 传 `""` = 移出组（回未分组） |
+    | `rename` | `id, name?, note?` | 就地改组自身（不再依赖旧名字当键，改错字不会变出第二个组）；
+      新 name 撞别的组 → 400 |
+    | `merge` | `id, into` | 整组并入另一组，`id` 组从 groups 消失 |
+    | `dissolve` | `id` | 解散，记录回未分组 |
+
+    口径逐条沿用：
+
+    - **整笔原子**：先在全内存副本上跑完全部校验，任一 op 非法即 400 且**一个字节都不写**
+      （半截归组比不做更难解释，ADR-0126）；校验全过才落一次盘（写两次映射文件 = 后写
+      覆盖先写，那是真坏数据）；
+    - **不要求 `run_id` 已在盘上**：启动表单盖组名发生在存档写出之前（ADR-0126）；
+    - 同一条记录在一次请求里只能被一个 op 动归属（否则就是服务端替用户静默选答案）；
+    - 只写 `results/.history-groups.json`，**存档一个字节都不动**；读写全走 `to_thread`
+      + `_write_json`/`_atomic_write`（ADR-0101 第 5/4 条）；
+    - 没动到任何记录（`touched=0`）不报错——拼错组名或该组已空时“没动到”是诚实结果，
+      由前端把话说出来（沿用旧 `moved=0` 口径）；不做撤销也不写审计流水。
+
+    回 `{"ok": true, "groups": [同 GET 的形状], "touched": n, "created": [ids],
+    "dissolved": [ids]}`；`dissolved` = 本次事务后不再存在的组 id（`dissolve` 与被 `merge`
+    吞掉的源组都算），前端拿它可以把自己的选中态一起清掉。"""
+    ops = body.get("ops")
+    if not isinstance(ops, list) or not ops:
+        raise HTTPException(400, 'ops 须为非空数组，如 [{"op": "create", "name": "夜间跑批"}]')
+
+    async with _GROUPS_LOCK:
+        before = await asyncio.to_thread(_read_groups_sync)
+        staged = {"groups": [dict(g) for g in before["groups"]],
+                  "assign": dict(before["assign"])}
+        claimed: set[str] = set()      # 本次请求里已被某个 op 点了归属的记录
+        created: list[str] = []
+        dissolved: list[str] = []
+        for seq, op in enumerate(ops, start=1):
+            if not isinstance(op, dict):
+                raise HTTPException(400, f"第 {seq} 个 op 须为对象")
+            kind = op.get("op")
+            if kind == "create":
+                name = _group_name_or_400(op.get("name"))
+                if not name:
+                    raise HTTPException(400, "组名不能为空")
+                if name == GROUP_RESERVED_NAME:
+                    raise HTTPException(400, f"「{GROUP_RESERVED_NAME}」是保留名（未归组的记录都算它）")
+                rids = _run_ids_or_400(op.get("run_ids"), "create", optional=True)
+                note = _group_note_or_400(op.get("note"))   # 先校验：坏载荷不能因为“降级成移入”而被悄悄吃掉
+                hit = _group_by_name(staged["groups"], name)
+                if hit:
+                    # 同名组已在→不新建（两组同名会让搜索与“输已有名即并入”变得不确定），
+                    # 降级成“把这些记录移进去”；note 是新建时才用的字段，忽略它而不是悄悄
+                    # 改掉已有组的备注（要改备注用 rename）
+                    target = hit["id"]
+                else:
+                    if len(staged["groups"]) >= GROUP_ASSIGN_MAX_GROUPS:
+                        raise HTTPException(400, f"组数不能超过 {GROUP_ASSIGN_MAX_GROUPS} 个")
+                    target = _new_group_id({g["id"] for g in staged["groups"]})
+                    staged["groups"].append({"id": target, "name": name, "note": note})
+                    created.append(target)
+                _claim_run_ids(rids, claimed, seq)
+                for rid in rids:
+                    staged["assign"][rid] = target
+            elif kind == "move":
+                raw_id = op.get("id")
+                if not isinstance(raw_id, str):
+                    raise HTTPException(400, "move 的 id 须为字符串（空串 = 移出组）")
+                rids = _run_ids_or_400(op.get("run_ids"), "move")
+                _claim_run_ids(rids, claimed, seq)
+                gid = raw_id.strip()
+                if gid:
+                    target = _require_group(staged, gid, "move")["id"]
+                    for rid in rids:
+                        staged["assign"][rid] = target
+                else:
+                    for rid in rids:      # 移出组 = 从 assign 删键（未分组就是“不在映射里”）
+                        staged["assign"].pop(rid, None)
+            elif kind == "rename":
+                if "name" not in op and "note" not in op:
+                    raise HTTPException(400, "rename 需要 name 或 note 至少一项")
+                g = _require_group(staged, op.get("id"), "rename")
+                if "name" in op:
+                    name = _group_name_or_400(op["name"])
+                    if not name:
+                        raise HTTPException(400, "组名不能为空")
+                    if name == GROUP_RESERVED_NAME:
+                        raise HTTPException(400, f"「{GROUP_RESERVED_NAME}」是保留名")
+                    other = _group_by_name(staged["groups"], name)
+                    if other is not None and other["id"] != g["id"]:
+                        raise HTTPException(400, f"已有同名组「{name}」（要把两组合拢用 merge）")
+                    g["name"] = name
+                if "note" in op:
+                    g["note"] = _group_note_or_400(op["note"])
+            elif kind == "merge":
+                src = _require_group(staged, op.get("id"), "merge")
+                dst = _require_group(staged, op.get("into"), "merge", field="into")
+                if src["id"] == dst["id"]:
+                    raise HTTPException(400, "不能把组合并进自己")
+                for rid, gid in list(staged["assign"].items()):
+                    if gid == src["id"]:
+                        staged["assign"][rid] = dst["id"]
+                staged["groups"] = [g for g in staged["groups"] if g["id"] != src["id"]]
+                dissolved.append(src["id"])
+            elif kind == "dissolve":
+                src = _require_group(staged, op.get("id"), "dissolve")
+                for rid in [k for k, v in staged["assign"].items() if v == src["id"]]:
+                    del staged["assign"][rid]
+                staged["groups"] = [g for g in staged["groups"] if g["id"] != src["id"]]
+                dissolved.append(src["id"])
+            else:
+                raise HTTPException(400, "op 只认 create/move/rename/merge/dissolve")
+        # touched 数的是“有效归属真的变了”的记录：move 到它本来就在的组不算动过，
+        # rename/merge 空转也不会报出一个虚高的“改了 N 条”给确认框看
+        touched = sum(1 for rid in set(before["assign"]) | set(staged["assign"])
+                      if before["assign"].get(rid) != staged["assign"].get(rid))
+        await _write_json(_groups_path(), {"v": 2, "groups": staged["groups"],
+                                           "assign": staged["assign"]})
+    # 回包重读一遍视图：count 与 GET 同源同口径，不自己另算一份（否则两处“多少条”会飘）
+    _, groups = await _history_view()
+    return {"ok": True, "groups": groups, "touched": touched,
+            "created": created, "dissolved": dissolved}
 
 
 @app.post("/api/bench/history/{run_id}/rename")
@@ -1630,6 +2041,27 @@ def _point_identity(p: dict) -> tuple:
             p.get("inst_tokens"), p.get("concurrency"))
 
 
+def _point_identity_matches(p: dict, ident: tuple) -> bool:
+    """复测产出的点是否就是 ident 那个点——**档位按 ctx_edge 归一**后再比。
+
+    贴边/超窗钳制档的 `ctx_target` 是裁后长度（原档位记在 `ctx_edge`），而声明
+    `max_ctx` 之前测的旧存档把原档位直接写在 `ctx_target` 上（那时没有上限保护）。
+    于是旧档的 256K 点复测时产出 ctx_target=260608 + ctx_edge=262144 的点，逐字比
+    五元组永远不等 → 走"identity 漂移不合并"分支，用户看到"结果未合并回原存档"
+    （2026-10-17 真机）。归一口径与前端 `cmpGearOf` 一致：带 ctx_edge 的点归到
+    ctx_edge。误配风险为零——复测运行的 cfg 已窄化到单一档位，产出不可能有第二个档位。
+    """
+    if not isinstance(p, dict):
+        return False
+    got = _point_identity(p)
+    if got[:2] != ident[:2] or got[3:] != ident[3:]:
+        return False
+    if got[2] == ident[2]:
+        return True
+    gear = p.get("ctx_edge")
+    return gear is not None and gear == ident[2]
+
+
 @app.post("/api/bench/history/{run_id}/retest")
 async def bench_history_retest(run_id: str, body: dict):
     """历史存档单点复测：按存档 cfg 窄化到被复测点（同模型/场景/档位/并发，
@@ -1732,8 +2164,7 @@ async def _merge_retest(archive_id: str, new_run_id: str, ident: tuple):
             break
         await asyncio.sleep(0.1)
     new_point = next((p for p in run.results
-                      if isinstance(p, dict) and _point_identity(p) == ident),
-                     None)
+                      if _point_identity_matches(p, ident)), None)
     if new_point is None:
         return   # 未产出对应点（停止/超窗跳档等）：复测存档保留为独立记录
     apath = os.path.join(RESULTS_DIR, f"{archive_id}.json")
@@ -1748,7 +2179,7 @@ async def _merge_retest(archive_id: str, new_run_id: str, ident: tuple):
     for i, p in enumerate(results):
         if isinstance(p, dict) and _point_identity(p) == ident:
             new_point["retested_at"] = now
-            d.setdefault("retests", []).append({
+            audit = {
                 "model": ident[0], "scenario": ident[1], "ctx_target": ident[2],
                 "inst_tokens": ident[3], "concurrency": ident[4],
                 "at": now, "prev_all_ok": p.get("all_ok"),
@@ -1756,7 +2187,14 @@ async def _merge_retest(archive_id: str, new_run_id: str, ident: tuple):
                 # 口径版本留痕：新旧不同说明这次复测换了口径，读数不可直接比
                 "prev_metric_version": p.get("metric_version"),
                 "metric_version": new_point.get("metric_version"),
-                "retest_run_id": new_run_id})
+                "retest_run_id": new_run_id}
+            if p.get("ctx_target") != new_point.get("ctx_target"):
+                # 合进来的是钳制/贴边后的长度：逻辑档位（ctx_target/ctx_edge）归一
+                # 到同一行，但实际构造量变了，不留痕就看不出这一行的读数是多少
+                # token 测的（与点级 ovf_trim/srv_trunc 的留痕取向一致）
+                audit["prev_built_ctx"] = p.get("ctx_target")
+                audit["new_built_ctx"] = new_point.get("ctx_target")
+            d.setdefault("retests", []).append(audit)
             # 复测运行存档随后即删：其侧车里的 in_text 切片必须先复制进目标档
             # 侧车并改写 ref，否则合并后引用悬空（精确复跑断链）
             reloc_warnings = await asyncio.to_thread(
@@ -2079,6 +2517,9 @@ async def bench_history_clear():
             if not (os.path.isfile(p) and not os.path.islink(p)):
                 continue
             if f.endswith(".json"):
+                if f == HISTORY_GROUPS_FILE:
+                    os.remove(p)   # 存档清空后组名已无读者，一并删；**不计入 removed**
+                    continue
                 os.remove(p)
                 removed += 1
             elif f.endswith(ANOMALY_TEXT_SUFFIX):

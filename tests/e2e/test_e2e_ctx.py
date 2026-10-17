@@ -4,7 +4,8 @@
 - K 上下文窗治理：超窗整档 point_skipped（ADR-0005）、超窗贴边裁减实测
   （ctx_edge 留痕原档位）、未识别秒拒的删减回退（CTX_EDGE_FB_RATIO 军备）
   与阶梯耗尽追加提示、非贴边档不军备且空流未耗尽专属预算不得抢先改 shape、
-  空流专属重试耗尽后强制删减改 shape 自救（ADR-0085）、超窗删减中段重试、
+  空流专属重试耗尽后强制删减改 shape 自救（ADR-0085）、超窗删减中段
+  重试（含 ovf_trim 留痕：实发长度小于构造量时存档与明细表均可见）、
   fastllm 系软超窗判错（content / reasoning 双通道）、输出塌缩守卫（自定义
   占位串绕过已知文案匹配时仍按 empty_reply_suspected 收口，不出假速度）。
 - L 物理速率闸（先验带分支）集成例：MOCK_PP 拉到 8000 的假成功必须判 err，
@@ -224,6 +225,15 @@ class TestCtxWindowE2E(MockGatewayTest):
         statuses = [e["msg"] for e in events if e.get("type") == "status"]
         self.assertTrue(any("删减" in s and "重试" in s for s in statuses),
                         f"应有删减重试状态播报: {statuses}")
+        # 留痕（2026-10-17 真机事故）：这一刀以前只有当时滚过的一句 status，
+        # 存档里 err=null，只靠 sent_chars 对比才能看出来——reps 之间就混着
+        # 几种长度（上一轮正常、本轮被裁到 0.75×，聚合行看不出）。
+        # req 级 ovf_trim = 删减档数（1=0.75×），点级取本批最差档
+        req = pts[0]["reqs"][0]
+        self.assertEqual(req.get("ovf_trim"), 1,
+                         f"删减重试成功必须留痕（req 级 ovf_trim）: {req}")
+        self.assertEqual(pts[0].get("ovf_trim"), 1,
+                         "点级应带上删减档数，供明细表打超窗裁减徽标")
 
     async def test_soft_ctx_overflow_rejected(self):
         """fastllm 系软超窗（MOCK_SOFT_MAX_CTX）：HTTP 200 + 正文被替换为

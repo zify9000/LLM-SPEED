@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 
@@ -719,3 +720,111 @@ class TestDensityLedger(unittest.TestCase):
         # 内插值：100000 + (60000-31250)*100000/71428 ≈ 140560（+ 固定开销）
         self.assertLess(got, 160000,
                         "走了台账（塔陷段斜率）；若走旧公式会 >190000")
+
+
+class TestPrefillRateLedger(unittest.TestCase):
+    """prefill 速率先验台账（跨运行，ADR-0134）：播种归户、守卫、真机事故复算。
+
+    病根（2026-10-17 真机）：先验原本只在单次 run 内存里，单点复测 256K 时曲线只剩
+    探测点一个锚点（实测 2099 tokens / TTFT 2.1 s ≈ 980 tok/s，被 TTFT 固定开销地板
+    压着），等待期读数 = min(先验, est÷已等待) 全程钉在 980，真值 3661。"""
+
+    def test_seed_merges_bucket_by_median(self):
+        now = 1_800_000_000.0
+        pts = [[64915.0, 3400.0, now - 30], [65000.0, 3500.0, now - 20],
+               [65200.0, 3600.0, now - 10], [131168.0, 3751.0, now]]
+        seed = bench._prefill_ledger_seed(pts)
+        self.assertEqual(len(seed), 2, "同档（log2 差 <阈值）并成一档")
+        self.assertAlmostEqual(seed[0][1], 3500.0,
+                               msg="同档取中位数：单轮尖峰不该决定外推斜率")
+
+    def test_history_anchors_predict_256k_within_band(self):
+        """真机锚点复算：64K + 128K 两档历史点必须把 256K 先验估进真值带。"""
+        now = 1_800_000_000.0
+        seed = bench._prefill_ledger_seed([[64915.0, 3478.0, now],
+                                           [131168.0, 3751.0, now - 1]])
+        got = bench.rate_prior(seed, 262144)
+        self.assertGreater(got, 0.8 * 3661, f"先验过低（{got:.0f}）")
+        self.assertLess(got, 1.3 * 3661, f"先验过高（{got:.0f}）")
+        # 覆盖度：只有探测点 = 未覆盖（前端要如实说明），有 128K 锚点 = 覆盖
+        self.assertFalse(bench._prefill_prior_covered([(2099.0, 980.0)], 260608))
+        self.assertTrue(bench._prefill_prior_covered(seed, 260608))
+
+    def test_fingerprint_separates_deployments(self):
+        """速率是部署属性：换量化/换网关/换模型都必须换表（合错表比没表更坏）。"""
+        base = {"model_info": {"m": {"deploy_label": "d1", "quant": "nvfp4"}},
+                "model_max_ctx": {"m": 262144}, "gateway_url": "http://h:1"}
+        k0 = bench._prefill_fingerprint("m", base)
+        k1 = bench._prefill_fingerprint(
+            "m", {**base, "model_info": {"m": {"deploy_label": "d1",
+                                              "quant": "iq3_xxs"}}})
+        k2 = bench._prefill_fingerprint("m", {**base, "gateway_url": "http://other:1"})
+        k3 = bench._prefill_fingerprint("m2", base)
+        self.assertEqual(len({k0, k1, k2, k3}), 4, "量化/网关/模型变化必须换表")
+        self.assertEqual(k0, bench._prefill_fingerprint("m", dict(base)))
+
+    def test_note_caps_bucket_and_total(self):
+        now = 1_800_000_000.0
+        t: dict = {}
+        for i in range(bench.PREFILL_LEDGER_PER_BUCKET + 3):
+            bench._prefill_ledger_note(t, "m|x", "code", 60000 + i, 3000.0 + i, now + i)
+        lst = t["m|x"]["code"]
+        self.assertLessEqual(len(lst), bench.PREFILL_LEDGER_PER_BUCKET)
+        self.assertGreaterEqual(min(e[2] for e in lst), now + 3, "同档逐出最旧、留最近")
+        for i in range(bench.PREFILL_LEDGER_MAX_POINTS + 20):
+            bench._prefill_ledger_note(t, "m|x", "code", 7168 * (i + 1), 2000.0,
+                                       now + 10000 + i)
+        self.assertLessEqual(len(t["m|x"]["code"]), bench.PREFILL_LEDGER_MAX_POINTS,
+                             "每 (指纹, 场景) 有条数上限，超出逐出最旧")
+
+    def test_load_roundtrip_and_drops_bad_or_stale(self):
+        now = time.time()
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, bench.PREFILL_LEDGER_FILE)
+            table = {"m|x": {"code": [[64915.0, 3478.0, now],
+                                      [131168.0, 3751.0, now]]}}
+            bench._ledger_save(path, table)
+            self.assertEqual(bench._prefill_ledger_load(path), table)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("{trunc")
+            self.assertEqual(bench._prefill_ledger_load(path), {}, "损坏当空表")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"m|x": {"code": [[64915.0, -1.0, now],
+                                            [0.0, 3000.0, now],
+                                            [70000.0, 3000.0, now - 400 * 86400],
+                                            [80000.0, 3000.0, "x"]]}}, f)
+            self.assertEqual(bench._prefill_ledger_load(path), {},
+                             "非正读数/过期（换硬件旧表）/非数一律丢掉")
+
+    def test_write_guards_and_seeding(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, bench.PREFILL_LEDGER_FILE)
+            cfg = {"models": ["m"], "scenarios": ["code"]}
+            run = BenchRun(cfg, results_dir=td)
+            run.mock_seen = True
+            run._prefill_note("m", "code", (65000.0, 3400.0))
+            run._save_prefill_ledger()
+            self.assertFalse(os.path.exists(path), "mock 运行不得写速率先验台账")
+            run.mock_seen = False
+            run._prefill_note("m", "code", (65000.0, 3400.0))
+            run._prefill_note("m", "code", (131000.0, 3750.0))
+            run._save_prefill_ledger()
+            self.assertTrue(os.path.exists(path), "真运行落盘（守卫不是永关）")
+            # 下一轮：从盘上装载并播种，等待期先验不再是探测档单点
+            nxt = BenchRun(cfg, results_dir=td)
+            nxt.prefill_ledger = bench._prefill_ledger_load(path)
+            msgs = nxt._seed_prefill_curves()
+            curve = nxt.prefill_curve.get(("m", "code")) or []
+            self.assertEqual(len(curve), 2, "两档历史锚点都该播进来")
+            self.assertTrue(msgs, "播种要播报（先验来源必须可见）")
+            self.assertGreater(bench.rate_prior(curve, 262144), 0.8 * 3661)
+            # 别的模型/场景不播种不报鬼账
+            other = BenchRun({"models": ["zz"], "scenarios": ["code"]}, results_dir=td)
+            other.prefill_ledger = nxt.prefill_ledger
+            self.assertEqual(other._seed_prefill_curves(), [])
+            self.assertNotIn(("m", "code"), other.prefill_curve)
+            # 无 results_dir（内嵌调用）：不写不炸
+            bare = BenchRun(cfg)
+            bare.prefill_ledger = {"m|x": {"code": [[65000.0, 3400.0, time.time()]]}}
+            self.assertEqual(len(bare._seed_prefill_curves()), 1)
+            bare._save_prefill_ledger()

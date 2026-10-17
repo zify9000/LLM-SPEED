@@ -61,7 +61,7 @@ class TestAgentMatrixE2E(MockGatewayTest):
     async def test_agent_matrix_prime_ticks_visible(self):
         """预热/基线 quiet 请求发实时 tick（带 prime 标记、不入 KPI 语义）+
         批终 done 帧：大缓存档预热 prefill 长达数十秒，全程无帧会让前端实时表
-        与「进行中请求」空转（实时组件"未加载"错觉的来源）"""
+        空转（实时组件"未加载"错觉的来源；旧的「进行中请求」计数格已随 ADR-0127 删除，tick 仍供实时表逐行展示）"""
         _, events = await self._run_agent_matrix_collect(
             agent_cache_ladder=[4096], agent_inst_ladder=[128])
         prime_ticks = [e for e in events

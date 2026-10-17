@@ -617,3 +617,211 @@ test("parseTok：单位后缀/非整数/非正数一律 NaN（不得当留空悄
   for(const bad of ["128K", "1M", "abc", "132072.5", "-8", "0", "0K", "1e5", "8K tokens"])
     assert.ok(Number.isNaN(parseTok(bad)), `应判非法: ${bad}`);
 });
+
+/* ---------------- 历史记录分组与选择（ADR-0125 / ADR-0129 / ADR-0130）----------------
+   入参形状 = GET /api/bench/history 的 history 摘要（服务端已按新→旧排序），
+   自 ADR-0129 起带 group（组名）+ group_id（组实体编号）。
+   **只有一种组**（人建的组）：“按模型/按天”两个算出来的维度已删，所以这里也不再有 dim 入参
+   ——写回一个 dim 就等于把缝合怪缝回来。 */
+const sum = (run_id, over = {}) => ({
+  run_id,
+  started_at: `${run_id.slice(0,4)}-${run_id.slice(4,6)}-${run_id.slice(6,8)} `
+            + `${run_id.slice(9,11)}:${run_id.slice(11,13)}:00`,
+  models:["M"], scenarios:["code"], ctx_list:[0, 8192], concurrencies:[1],
+  note:"", group:"", group_id:"", metric_version:1, n_points:3, n_failed:0, ...over});
+const IDS = g => g.items.map(h => h.run_id);
+
+test("分组只认 group：没组名的全落「未分组」（组键是空串，不是一个叫未分组的组）", () => {
+  const g = histGroups([
+    sum("20261014-020000-a3", {group:"新战役"}),
+    sum("20261013-010000-a2", {group:"旧战役"}),
+    sum("20261014-010000-a1", {group:""}),
+    sum("20261012-010000-a4"),                       // 无 group 字段同样算未归组
+  ]);
+  assert.deepEqual(g.map(x => x.key), ["新战役", "旧战役", ""],
+    "未分组永远垫底：它是“还没归组”，不是一个组");
+  assert.deepEqual(g.map(x => x.name), ["新战役", "旧战役", HIST_UNGROUPED]);
+  assert.deepEqual(IDS(g[2]), ["20261014-010000-a1", "20261012-010000-a4"],
+    "组内保持传进来的新→旧序");
+  assert.equal(g[0].latest, "2026-10-14 02:00:00", "组头要拿得到最近一次时间");
+});
+
+test("命名组按组内最新一条降序（刚跑过的那组永远在头几行）", () => {
+  const g = histGroups([
+    sum("20261010-010000-a1", {group:"早战役"}),
+    sum("20261014-090000-a2", {group:"新战役"}),
+    sum("20261011-010000-a3", {group:"早战役"}),      // 该组最新的一条
+  ]);
+  assert.deepEqual(g.map(x => x.key), ["新战役", "早战役"]);
+  assert.equal(g[1].count, 2);
+});
+
+test("histModelKey：模型集合整体作键，与书写顺序无关（它是默认组名）", () => {
+  assert.equal(histModelKey(sum("20261014-010000-a1", {models:["B","A"]})), "A + B");
+  assert.equal(histModelKey(sum("20261014-010000-a1", {models:["A","A"]})), "A",
+    "同模型多实例不重复进组名");
+  assert.equal(histModelKey(sum("20261014-010000-a1", {models:[]})), "（无模型信息）");
+});
+
+test("histAutoPlan：只打未归组的记录，按模型集合分拢，已有组的完全不碰", () => {
+  const plan = histAutoPlan([
+    sum("20261014-010000-a1", {models:["A"]}),
+    sum("20261014-020000-a2", {models:["B","A"]}),
+    sum("20261013-010000-a3", {models:["A"]}),
+    sum("20261012-010000-a4", {models:["Z"], group:"已收好"}),
+  ]);
+  assert.deepEqual(plan.map(p => p.group), ["A", "A + B"], "条数多的在前，确认框能先报数");
+  assert.deepEqual(plan.map(p => p.run_ids.length), [2, 1]);
+  assert.ok(!JSON.stringify(plan).includes("20261012-010000-a4"),
+    "已有组名的记录不能被打散（那是用户已经整理过的东西）");
+});
+
+test("histAutoPlan：全部已归组 / 空列表 → 空计划（没东西可动时不开确认框）", () => {
+  assert.deepEqual(histAutoPlan([sum("20261014-010000-a1", {group:"x"})]), []);
+  assert.deepEqual(histAutoPlan([]), []);
+  assert.deepEqual(histAutoPlan([null, {started_at:"x"}]), [], "缺 run_id 的脏数据不进计划");
+});
+
+test("对比默认建议：最新一条 + 上一次同模型同场景（跳过中间不同模型的）", () => {
+  const s = histCmpSuggest([
+    sum("20261014-030000-a1", {models:["X"]}),
+    sum("20261014-020000-a2", {models:["Y"]}),          // 不同模型，跳过
+    sum("20261014-010000-a3", {models:["X"], scenarios:["creative"]}),   // 场景不同，跳过
+    sum("20261013-220000-a4", {models:["X"]}),          // 命中
+  ]);
+  assert.deepEqual(s.ids, ["20261014-030000-a1", "20261013-220000-a4"]);
+  assert.equal(s.same, true);
+});
+
+test("对比默认建议：找不到同配置的旧记录时退回最新两条并说明", () => {
+  const s = histCmpSuggest([sum("20261014-030000-a1", {models:["X"]}),
+                            sum("20261014-020000-a2", {models:["Y"]})]);
+  assert.equal(s.ids.length, 2);
+  assert.equal(s.same, false, "same=false 才会显示“没找到同配置”那句");
+  assert.deepEqual(histCmpSuggest([sum("20261014-030000-a1")]), {ids:[], same:false});
+});
+
+test("口径版本警示：一致不报，不一致报出全部版本（null = 旧版）", () => {
+  assert.deepEqual(histVersionClash([sum("a1"), sum("a2")]), []);
+  assert.deepEqual(histVersionClash([sum("a1", {metric_version:1}), sum("a2", {metric_version:2})]),
+    ["1", "2"]);
+  assert.deepEqual(histVersionClash([sum("a1", {metric_version:null}), sum("a2")]), ["旧版", "1"]);
+  assert.deepEqual(histVersionClash([]), []);
+});
+
+test("组级动作的报数来自桶行，目标名单排除自身（确认框必须先说动几条）", () => {
+  const items = [sum("a1", {group_id:"g-1", group:"A"}), sum("a2", {group_id:"g-1", group:"A"}),
+                 sum("a3", {group_id:"g-2", group:"B"}), sum("a4")];
+  const rows = histLedgerBuckets([{id:"g-1", name:"A"}, {id:"g-2", name:"B"}], items);
+  assert.deepEqual(rows.map(r => `${r.name}:${r.count}`), ["A:2", "B:1", HIST_UNGROUPED + ":1"]);
+  assert.deepEqual(histGroupNamesOf([{id:"g-1", name:"A"}, {id:"g-2", name:"B"}], items, "g-1"), ["B"],
+    "并入/改名的候选名单不含自己");
+});
+
+test("「移动分组」下拉：占位当标签、列全部组（含空组，组名带条数）、尾项新建，不含未分组", () => {
+  const groups = [{id:"g-1", name:"A"}, {id:"g-2", name:"B"}, {id:"g-3", name:"空组"}];
+  const items = [sum("a1", {group_id:"g-1", group:"A"}), sum("a2", {group_id:"g-1", group:"A"}),
+                 sum("a3", {group_id:"g-2", group:"B"}), sum("a4")];
+  const opts = histMoveGroupOptions(groups, items);
+  assert.equal(opts[0].v, "", "首项是占位（值空＝什么都没选，也充当控件标签）");
+  assert.deepEqual(opts.map(o => o.v), ["", "g-1", "g-2", "g-3", "__new"],
+    "按左栏同序列组、末尾是新建哨兵；未分组桶不进来（那是「移出分组」的活）");
+  assert.deepEqual(opts.map(o => o.t),
+    ["移动分组…", "A（2）", "B（1）", "空组（0）", "＋ 新建分组并移入…"]);
+  assert.deepEqual(histMoveGroupOptions([], [sum("a1")]).map(o => o.v), ["", "__new"],
+    "一个组都没有时只剩占位与新建");
+});
+
+test("histSubOf：档位区间 + 场景显示名 + 并发；agent 给矩阵规模", () => {
+  const s = histSubOf(sum("a1", {models:["X"], scenarios:["creative"], concurrencies:[5, 1]}),
+                      {creative:"创意写作"});
+  assert.equal(s, "上下文 0~8192 · 创意写作 · 并发 1/5");
+  const ag = histSubOf(sum("a2", {scenarios:["agent"], ctx_list:[], concurrencies:[],
+                                  agent_cache_ladder:[0, 8192], agent_inst_ladder:[128, 1024]}));
+  assert.equal(ag, "2×2 矩阵 · agent");
+  assert.equal(histSubOf(sum("a3", {scenarios:[], ctx_list:[], concurrencies:[]})), "");
+});
+
+/* ---------------- ADR-0129 / ADR-0130：组实体、勾选规则、短标题 ----------------
+   这几条是"组不再是字符串"与"确认按钮的规则只有一处"的直接断言。 */
+test("分桶按 group_id：组改名（id 不变）不会把同一组裂成两桶", () => {
+  const g = histGroups([
+    sum("20261014-010000-a1", {group_id:"g-1", group:"旧名"}),
+    sum("20261013-010000-a2", {group_id:"g-1", group:"新名"}),   // 改名后摘要里的名字变了
+    sum("20261012-010000-a3", {group_id:"g-2", group:"另一个组"}),
+  ]);
+  assert.deepEqual(g.map(x => x.key), ["g-1", "g-2"], "桶键是组编号，不是组名");
+  assert.equal(g[0].count, 2, "同编号的两条落进同一个桶");
+});
+
+test("分桶：没有 group_id 的摘要（老数据/未搜索的旧响应）退回按组名归桶，不丢记录", () => {
+  const g = histGroups([sum("20261014-010000-a1", {group:"只有名字"}),
+                        sum("20261013-010000-a2", {group:"只有名字"})]);
+  assert.deepEqual(g.map(x => `${x.key}:${x.count}`), ["只有名字:2"]);
+});
+
+test("台账左栏 = 组（含空组）按存储序 + 未分组垫底（空组必须看得见，否则「新建组」等于没建）", () => {
+  const rows = histLedgerBuckets(
+    [{id:"g-1", name:"A 模型", note:"本地", count:2},
+     {id:"g-2", name:"先占个位", note:"", count:0}],          // 空组
+    [sum("20261014-010000-a1", {group_id:"g-1", group:"A 模型"}),
+     sum("20261013-010000-a2", {group_id:"g-1", group:"A 模型"}),
+     sum("20261012-010000-a3", {})]);
+  assert.deepEqual(rows.map(r => r.name), ["A 模型", "先占个位", HIST_UNGROUPED],
+    "组的顺序由数据决定，不按活跃度重排；未分组永远最后");
+  assert.deepEqual(rows.map(r => r.count), [2, 0, 1]);
+  assert.equal(rows[2].key, "", "未分组的桶键是空串（与后端 move 到空组 id 同口径）");
+  assert.deepEqual(IDS(rows[2]), ["20261012-010000-a3"]);
+});
+
+test("台账左栏：assign 里指向失踪组的记录落进未分组，不报错也不变幽灵行", () => {
+  const rows = histLedgerBuckets([{id:"g-1", name:"还在", count:1}],
+    [sum("20261014-010000-a1", {group_id:"g-9", group:"已被解散的组"}),
+     sum("20261013-010000-a2", {group_id:"g-1", group:"还在"})]);
+  assert.deepEqual(rows.map(r => r.count), [1, 1], "失踪组不占一行，其记录进未分组");
+  assert.deepEqual(rows[1].items.map(h => h.run_id), ["20261014-010000-a1"]);
+});
+
+test("policy 是唯一一处「确认按钮何时能点」：载入 1 条、对比 ≥2 条、拼接恰好 1 条", () => {
+  const load = {min:1, max:1, tooFew:"先勾选一条记录", tooMany:"载入只能一条"};
+  assert.deepEqual([histPolicyCheck(0, load).ok, histPolicyCheck(1, load).ok, histPolicyCheck(3, load).ok],
+    [false, true, false]);
+  assert.equal(histPolicyCheck(3, load).reason, "载入只能一条", "禁用时得说得出为什么");
+  const cmp = {min:2, max:HIST_MAX_CMP};
+  assert.equal(histPolicyCheck(1, cmp).reason, "至少勾 2 条");
+  assert.equal(histPolicyCheck(2, cmp).ok, true);
+  assert.equal(histPolicyCheck(0, null).ok, true, "没设 policy 的面（台账）不卡勾选");
+});
+
+test("黄色警示只给「超出曲线配色数」，勾多条归组不算错", () => {
+  assert.equal(histDrawWarn(10, HIST_MAX_CMP), null, "恰好等于上限不喊");
+  assert.match(histDrawWarn(11, HIST_MAX_CMP), /11 条/);
+  assert.equal(histDrawWarn(5, null), null, "没配 max 就不该有黄条");
+});
+
+test("histBrief：触发按钮用短串（时间 + 备注或模型），长串只留给悬浮提示", () => {
+  assert.equal(histBrief(sum("20261014-020300-a1", {note:"跑批"})), "10-14 02:03 · 跑批");
+  assert.equal(histBrief(sum("20261014-020300-a1", {models:["Qwen"]})),"10-14 02:03 · Qwen");
+  assert.equal(histBrief(null), "");
+});
+
+test("组名校验：空、超长、撞保留名、撞已有组当场拦住（超长是报错不是截断）", () => {
+  assert.ok(histGroupError(""));
+  assert.ok(histGroupError("  "));
+  assert.equal(histGroupError("  A  " , []), null, "去首尾空白后合法");
+  assert.match(histGroupError(HIST_UNGROUPED, []), /保留名/);
+  assert.match(histGroupError("x".repeat(GROUP_NAME_MAX + 1), []), new RegExp(String(GROUP_NAME_MAX)));
+  assert.equal(histGroupError("x".repeat(GROUP_NAME_MAX), []), null, "正好上限要通过");
+  assert.match(histGroupError("A", ["A", "B"]), /已有同名组/);
+  assert.ok(histNoteError("y".repeat(GROUP_NOTE_MAX + 1)));
+  assert.equal(histNoteError(""), null, "备注允许留空");
+});
+
+test("组名候选名单优先读组实体（含空组），没有 groups 数组才从摘要反算", () => {
+  const items = [sum("a1", {group_id:"g-1", group:"A"}), sum("a2", {group_id:"g-2", group:"B"})];
+  const groups = [{id:"g-1", name:"A"}, {id:"g-2", name:"B"}, {id:"g-3", name:"空组"}];
+  assert.deepEqual(histGroupNamesOf(groups, items), ["A", "B", "空组"],
+    "空组也要进候选：它是个真组");
+  assert.deepEqual(histGroupNamesOf(groups, items, "g-2"), ["A", "空组"], "并入/改名的候选排除自身");
+  assert.deepEqual(histGroupNamesOf([], items), ["A", "B"], "退化路径仍可用（老响应没有 groups）");
+});

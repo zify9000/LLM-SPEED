@@ -38,6 +38,7 @@ import logging
 import math
 import os
 import random
+import statistics
 import struct
 import time
 import wave
@@ -1400,6 +1401,167 @@ def _ledger_load(path: str | None) -> dict:
         return {}
 
 
+# ---- prefill 速率先验台账（跳运行）-----------------------------------------------
+# 为什么要有：速率先验原本只在单次 run 内存里（BenchRun.prefill_curve）。复测某一档
+# （或单点测速）时曲线只剩一个锚点——探测点（≈2K tokens）——而这条部署在 2K 处被
+# TTFT 固定开销地板压到 ~1000 tok/s（2099 tokens / 2.1 s 实测），256K 真值 3700：
+# 等待期读数 = min(先验, est÷已等待) 被钉在 1/3.5 上根抬不起来（2026-10-17 真机：
+# 复测 256K 整段等待显示 1100+）。同一条 run 内早就用低档实测点外推（64K+128K →
+# 256K 误差 +10%），缺的只是“跳 run 记得它”。
+PREFILL_LEDGER_FILE = "prefill-ledger.v1"   # 不用 .json 后缀：避开历史列表扇描
+PREFILL_LEDGER_MAX_POINTS = 24              # 每 (部署指纹, 场景) 上限，逐出最旧
+PREFILL_LEDGER_PER_BUCKET = 3              # 同档最多留最近 3 条（播种取中位数）
+PREFILL_LEDGER_MAX_AGE_S = 90 * 86400       # 换硬件/换量化不该赖着不走
+PREFILL_LEDGER_BUCKET_LOG2 = 0.05           # 同档判据（≈3.5%），与 rate_prior 合并阈值同值
+
+
+def _prefill_fingerprint(model: str, cfg: dict) -> str:
+    """速率先验的归户键：模型 + 部署快照 + 上限 + 网关。
+
+    prefill 速率是**部署属性**（量化、KV 量化、推理框架、硬件、窗口大小都改变它），
+    模型名相同不代表速率相同。字段缺失就不进键——宁可多建一张表也不与旧部署合表：
+    合错表比没表更坏（拿另一台机器的曲线去估本机就是“看着很懂地猜错”）。"""
+    info = (cfg.get("model_info") or {}).get(model) or {}
+    parts = [model]
+    for k in ("deploy_label", "framework", "quant", "kv_quant", "hardware"):
+        v = info.get(k)
+        if isinstance(v, str) and v.strip():
+            parts.append(v.strip()[:48])
+    mc = (cfg.get("model_max_ctx") or {}).get(model)
+    if isinstance(mc, (int, float)) and not isinstance(mc, bool) and mc > 0:
+        parts.append(f"ctx{int(mc)}")
+    gw = cfg.get("gateway_url")
+    if isinstance(gw, str) and gw:
+        parts.append(gw[:100])
+    return "|".join(parts)
+
+
+def _prefill_ledger_load(path: str | None) -> dict:
+    """读速率先验台账：不存在/损坏/结构不合一律当空表（台账是优化项，坏了当
+    没有，不能拖死测速）。磁盘结构：`键 → {场景: [[ctx, rate, ts], …]}`；丢掉非数、
+    非正的 ctx/rate、过期条目（换硬件旧表）与超出上限的尾部。"""
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            return {}
+        horizon = time.time() - PREFILL_LEDGER_MAX_AGE_S
+        out: dict[str, dict[str, list]] = {}
+        for k, subs in raw.items():
+            if not isinstance(k, str) or not isinstance(subs, dict):
+                continue
+            kept: dict[str, list] = {}
+            for scen, pts in subs.items():
+                if not isinstance(scen, str) or not isinstance(pts, list):
+                    continue
+                rows = []
+                for p in pts:
+                    if not isinstance(p, (list, tuple)) or len(p) != 3:
+                        continue
+                    c, r, ts = p
+                    if any(isinstance(x, bool) or not isinstance(x, (int, float))
+                           for x in p):
+                        continue
+                    if c <= 0 or r <= 0 or ts < horizon:   # 旧部署的表不拿来估新机器
+                        continue
+                    rows.append([float(c), float(r), float(ts)])
+                rows.sort(key=lambda e: e[2])
+                if rows:
+                    kept[scen] = rows[-PREFILL_LEDGER_MAX_POINTS:]
+            if kept:
+                out[k] = kept
+        return out
+    except Exception:   # noqa: BLE001
+        return {}
+
+
+def _prefill_ledger_seed(pts: list) -> list[tuple[float, float]]:
+    """台账条目 → rate_prior 用的锚点：同档（log2 差 <阈值）取**中位数**——多轮
+    复测/多轮 run 的噪声互打对，单次尖峰（被别的客户端挤占那一轮）不致单独决定
+    外推斜率；ctx 取组内中位数，结果按 ctx 升序。"""
+    rows = sorted((e for e in (pts or [])
+                   if isinstance(e, (list, tuple)) and len(e) == 3
+                   and e[0] > 0 and e[1] > 0), key=lambda e: float(e[0]))
+    groups: list[list[list]] = []
+    for e in rows:
+        lg = math.log2(float(e[0]))
+        if groups and lg - math.log2(float(groups[-1][0][0])) < PREFILL_LEDGER_BUCKET_LOG2:
+            groups[-1].append(e)
+        else:
+            groups.append([e])
+    return [(float(statistics.median([float(x[0]) for x in g])),
+             float(statistics.median([float(x[1]) for x in g])))
+            for g in groups if g]
+
+
+def _prefill_ledger_note(table: dict, key: str, scenario: str, ctx: float,
+                         rate: float, now: float | None = None) -> bool:
+    """一个实测锚点归户入表（内存中，收口时落盘）。同档最多留最近
+    `PREFILL_LEDGER_PER_BUCKET` 条（播种取中位数），全表超上限逐出最旧。不写磁盘：
+    逐点落盘会把 I/O 插在测量路径上。"""
+    if ctx <= 0 or rate <= 0:
+        return False
+    now = now or time.time()
+    lst = table.setdefault(key, {}).setdefault(scenario, [])
+    same = [e for e in lst
+            if abs(math.log2(float(e[0])) - math.log2(float(ctx)))
+            < PREFILL_LEDGER_BUCKET_LOG2]
+    if len(same) >= PREFILL_LEDGER_PER_BUCKET:
+        lst.remove(min(same, key=lambda e: e[2]))   # 逐出本档最旧一条
+    lst.append([float(ctx), float(rate), float(now)])
+    if len(lst) > PREFILL_LEDGER_MAX_POINTS:
+        lst.sort(key=lambda e: e[2])
+        del lst[:len(lst) - PREFILL_LEDGER_MAX_POINTS]
+    return True
+
+
+def _prefill_prior_covered(pts: list[tuple[float, float]], ctx: float) -> bool:
+    """先验覆盖度：曲线最高档与目标 ctx 相差 <1 个倍频程算“覆盖”。不覆盖时等待期
+    平台值是从低档平推/外推来的（“只有探测点”的冷启动处境就是极限情形），读数
+    系统性偏低，得让前端能如实说明而不是装作实测。"""
+    if not pts:
+        return False
+    return math.log2(max(ctx, 2)) - math.log2(max(float(pts[-1][0]), 2)) < 1.0
+
+
+# 「实测长度比档位标签短」判据：服务端回了 usage.prompt_tokens，却比档位少这么多
+# 就算。阈值 5% + 2048 下限：同轮其余档位抖动在 ±1% 内（构建偏离校正门槛也在这个
+# 量级），而真短的历史点是 −8.2%（2026-10-13 两次独立运行，档位 262144、服务端只算
+# 到 240536/240859）与 −21.2%（2026-09-16）
+CTX_SHORT_RATIO = 0.05
+CTX_SHORT_MIN_TOKENS = 2048
+
+
+def _ctx_short(ctx: int, ok: list, *, trimmed: bool = False):
+    """实测 prompt_tokens 明显短于档位标签 ⇒ 该点读数不是本档读数（ADR-0136）。
+
+    危害不是"少算几个 token"而是**档位标签开始说谎**：存档写 256K、读数其实是
+    235K 的，跨轮/跨部署一律不可比，还被当成"贴边不崩"的证据。判据只在服务端
+    自己回了 `usage.prompt_tokens`（`usage_real`）时成立——字符估算兜底与构造靶值
+    自指，拿它判长度等于用自己的估计反驳自己。
+    **不指认原因**：既可能是服务端静默截断，也可能是我们构造短了（输入系数/分词
+    估偏）。历史上两种都出现过，而引擎手里只有"发出去多少字符"和"服务端算多少
+    token"，没有构造 token 数，分不开——所以只报事实、不猜原因。
+    **`ctx_retry` 不豁免**：那条路是按服务端计数重建构造量，重建后仍短恰恰最该
+    留痕——"分词差异已解释"不等于"长度对上了"。我们自己超窗删减（`ovf_trim`）与
+    贴边裁减（`ctx_edge`）各有角标归口，不重复判。
+    """
+    if trimmed or not ok or ctx < 1024:
+        return None
+    rep = [r.get("prompt_tokens") for r in ok
+           if r.get("usage_real") and isinstance(r.get("prompt_tokens"),
+                                                 (int, float))]
+    if len(rep) != len(ok):
+        return None   # 有一条没回真值就判不准，宁可不判
+    got = min(rep)
+    dropped = int(ctx) - got
+    if dropped > max(CTX_SHORT_MIN_TOKENS, CTX_SHORT_RATIO * ctx):
+        return {"ctx": int(ctx), "reported": int(got), "dropped": int(dropped)}
+    return None
+
+
 def _ledger_save(path: str, table: dict):
     """原子写台账（同目录临时文件 + os.replace，与 _save 同口径）：截断的 JSON
     会让下次读到半张表，而半张表比没表更坏——错误的末段锚点会被拿去外推。"""
@@ -1892,14 +2054,63 @@ def _ratio_refold(base_est: float, ratio_old: float | None,
     return events / ratio_new if ratio_new else events
 
 
+# 先验曲线的近重复合并阈值与外推斜率拟合跨度（单位 log2，1 = 一个倍频程）。
+# repeats≥2 时同一档位会登记多个「几乎同 x」的 rep 点（实测 131075 与 131411，
+# x 差 0.26%），拿它们当末两点算斜率等于用一根头发丝量坡度：实测被放大成
+# −2897 tok/s/倍频程，外推到 256K 得 −142 再钳到 0.35× 地板 = 1310 tok/s
+# （2026-10-17 真机：等待期显示 1310，实测 3702；同因把 64K 档顶到 1.3×  ceiling）
+RATE_PRIOR_MERGE_LOG2 = 0.05
+RATE_PRIOR_FIT_SPAN = 1.0
+
+
+def _rate_groups(pts: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """把 log2(ctx) 上几乎重合的实测点合并成一组（组内 x、速率各取均值）。
+    同一档位的各复测轮、以及 nonce 位数造成的长度微差，都落在同一组里；
+    不合并的话这些近重复点会占满曲线尾部，把外推斜率的杠杆臂缩到零。"""
+    out: list[list[float]] = []
+    for c, r in sorted(p for p in pts if p[0] > 0):
+        lg = math.log2(c)
+        if out and lg - out[-1][2] < RATE_PRIOR_MERGE_LOG2:
+            g = out[-1]
+            n = g[3] + 1
+            g[0] = (g[0] * (n - 1) + c) / n
+            g[1] = (g[1] * (n - 1) + r) / n
+            g[2] = lg
+            g[3] = n
+        else:
+            out.append([c, r, lg, 1])
+    return [(g[0], g[1]) for g in out]
+
+
+def _tail_slope(pts: list[tuple[float, float]]) -> float:
+    """末段外推斜率（log2 轴）：从曲线尾往前取到跨度 ≥RATE_PRIOR_FIT_SPAN
+    为止，再做最小二乘拟合。只用末两点时，斜率的分母是两个 x 之差——近重复
+    点（或同档多轮）会让分母趋零、斜率爆炸；退而求其次只有一组时（跨度为 0）
+    斜率取 0，即平推最近速率。"""
+    xs = [math.log2(c) for c, _ in pts]
+    ys = [r for _, r in pts]
+    j = max(0, len(xs) - 2)
+    while j > 0 and xs[-1] - xs[j] < RATE_PRIOR_FIT_SPAN:
+        j -= 1
+    win = list(zip(xs[j:], ys[j:]))
+    n = len(win)
+    mx = sum(x for x, _ in win) / n
+    my = sum(y for _, y in win) / n
+    den = sum((x - mx) ** 2 for x, _ in win)
+    if den <= 0:
+        return 0.0
+    return sum((x - mx) * (y - my) for x, y in win) / den
+
+
 def rate_prior(pts: list[tuple[float, float]], ctx: float) -> float | None:
     """ctx 处的 prefill 速率先验：按实测速率曲线 [(ctx, rate), …]（ctx 升序）
-    在 log2(ctx) 轴上做分段线性——区间内相邻点插值；超出上端沿末段斜率
-    外推，并钳制在最近速率的 [0.35×, 1.3×] 内。
+    在 log2(ctx) 轴上做分段线性——近重复点先合并成组，区间内相邻组插值；
+    超出上端沿末段斜率外推（拟合窗口见 _tail_slope），钳制在最近速率的
+    [0.35×, 1.3×] 内。
     prefill 速率随上下文长度先增后减（短档 GPU 利用不足、长档注意力平方
     成本主导），平推最近一个速率不能反映曲线形态；末段斜率外推让估值
     跟随已观测到的上升/下降趋势，钳制兜住噪声与拐点误判。"""
-    pts = [p for p in pts if p[0] > 0]   # log 轴不接纳 0K（固定开销主导，非 ctx 标度）
+    pts = _rate_groups(pts)   # log 轴不接纳 0K（固定开销主导），合并时已滤
     if not pts:
         return None
     if ctx <= pts[0][0]:
@@ -1912,11 +2123,8 @@ def rate_prior(pts: list[tuple[float, float]], ctx: float) -> float | None:
             return r1 + (r2 - r1) * t
     if len(pts) < 2:
         return pts[-1][1]
-    (c1, r1), (c2, r2) = pts[-2], pts[-1]
-    if c2 == c1:
-        return r2
-    slope = (r2 - r1) / (math.log2(c2) - math.log2(c1))
-    est = r2 + slope * (math.log2(ctx) - math.log2(c2))
+    r2 = pts[-1][1]
+    est = r2 + _tail_slope(pts) * (math.log2(ctx) - math.log2(pts[-1][0]))
     return min(max(est, 0.35 * r2), 1.3 * r2)
 
 
@@ -2192,6 +2400,10 @@ def _aggregate_reps(reps: list[dict]) -> dict:
         point["flush_s"] = round(sum(p.get("flush_s") or 0
                                      for p in flush_reps)
                                  / len(flush_reps), 2)
+    # 超窗删减重试留痕跨 rep 取最差档（与 flush/stall 的"取最差/均值"不同：
+    # 这一刀是定性事件，任一轮被裁都须让聚合行可见，不能取均值洗掉）
+    trims = [p.get("ovf_trim") for p in reps if p.get("ovf_trim")]
+    point["ovf_trim"] = max(trims) if trims else None
     # 突发交付多数决（与 all_ok 同口径）；dict(rep_point) 可能带入居中次样本的
     # True，需显式覆写
     point["decode_burst"] = (sum(bool(p.get("decode_burst")) for p in reps) * 2
@@ -2678,6 +2890,14 @@ class BenchRun:
         # 先验经 rate_prior() 曲线插值/外推——速率随上下文先增后减，平推
         # 单一速率不能反映形态（用户实测 16K 峰值 vs 192K 减半）
         self.prefill_curve: dict[tuple[str, str], list[tuple[float, float]]] = {}
+        # 速率先验台账（**跳运行**，`results/prefill-ledger.v1`）：run 开头装载并
+        # 播种 prefill_curve、收口时把本次合格点并进去。没有它，复测单档时曲线
+        # 只剩探测点一个锚点（2026-10-17 真机：复测 256K 等待期显示 1100+、实
+        # 际 3700，因为先验就是探测档那 ~1000 tok/s），见 ADR-0134
+        self.prefill_ledger: dict[str, dict[str, list]] = {}
+        self._prefill_ledger_dirty = False
+        self._prefill_path = (os.path.join(results_dir, PREFILL_LEDGER_FILE)
+                              if results_dir else None)
         # (model, scenario) → 实测输出 chars/token（usage completion_tokens 反推），
         # 实时 tick 与兜底 est_out 按此估算——固定系数与实际输出内容不符时
         # （如按中文 1.5 估、实际输出 ≈4 字符/token）实时读数会数倍虚高（ADR-0005）
@@ -2836,6 +3056,52 @@ class BenchRun:
             return
         _ledger_save(self._density_path, self.density)
 
+    def _seed_prefill_curves(self) -> list[str]:
+        """用台账锚点播种本次运行的先验曲线（在第一个点登记之前调用）。
+
+        历史锚点只在「这一档本轮还没测出来」时起作用：本轮实测点经
+        `_note_prefill_rate` 同 ctx 覆盖、近重复点在 `rate_prior` 读取侧并组，所以
+        本轮数据永远压过历史。返回逐 (模型, 场景) 的播种播报（无台账则空）。"""
+        msgs: list[str] = []
+        want_models = set(self.cfg.get("models") or [])
+        want_scens = set(self.cfg.get("scenarios") or [])
+        for key, subs in (self.prefill_ledger or {}).items():
+            model = key.split("|", 1)[0]
+            if want_models and model not in want_models:
+                continue   # 台账里可能有别的模型：不播种也不播报，免得报鬼账
+            for scenario, pts in subs.items():
+                if want_scens and scenario not in want_scens:
+                    continue
+                seed = _prefill_ledger_seed(pts)
+                if not seed:
+                    continue
+                cur = self.prefill_curve.get((model, scenario)) or []
+                if cur:   # 本轮已登记过（不经探测的路径先登了）：不回头污染
+                    continue
+                for ctx, rate in seed:
+                    self._note_prefill_rate((model, scenario), ctx, rate)
+                msgs.append(
+                    f"{model} / {SCENARIOS.get(scenario, {}).get('label', scenario)} "
+                    f"prefill 先验：已从历史台账播种 {len(seed)} 档（"
+                    f"{int(seed[0][0])}→{int(seed[-1][0])} tokens，最新锚点 "
+                    f"{int(seed[-1][0])}）；本轮实测同档点会盖过它")
+        return msgs
+
+    def _prefill_note(self, model: str, scenario: str, sample: tuple[float, float]):
+        """一个实测 prefill 速率点归户入台账（内存，收口时落盘）。mock 运行不写：
+        假网关的 usage 是编的，写一次就污染真表（与密度台账同口径）。"""
+        if self.mock_seen:
+            return
+        if _prefill_ledger_note(self.prefill_ledger, _prefill_fingerprint(model, self.cfg),
+                                scenario, float(sample[0]), float(sample[1])):
+            self._prefill_ledger_dirty = True
+
+    def _save_prefill_ledger(self):
+        if (self.mock_seen or not self._prefill_path
+                or not self._prefill_ledger_dirty or not self.prefill_ledger):
+            return
+        _ledger_save(self._prefill_path, self.prefill_ledger)
+
     def _save(self):
         if self.mock_seen:   # 模拟数据不进历史记录
             return
@@ -2894,6 +3160,11 @@ class BenchRun:
             # usage 是编的，读一次就污染真表（写侧由 mock_seen 在收口处拦住）
             if not self.mock_seen:
                 self.density = _ledger_load(self._density_path)
+                self.prefill_ledger = _prefill_ledger_load(self._prefill_path)
+                # 播种先验：单档复测/单点测速时等待期读数从此有真跳锚点可依，
+                # 不再只靠探测点（≈2K）平推（ADR-0134）
+                for msg in self._seed_prefill_curves():
+                    await self.emit({"type": "status", "msg": msg})
             uc = cfg.get("url_choice")
             if uc:   # 多地址 provider：服务端已按顺序取首个可达地址，播报本次生效地址
                 lat = f"{uc['latency_ms']}ms" if uc.get("latency_ms") is not None else "全部不可达，回退首选"
@@ -3283,6 +3554,10 @@ class BenchRun:
                 await asyncio.to_thread(self._save_density)
             except Exception as e:   # noqa: BLE001  优化项落盘失败不影响测速结果
                 log.warning("密度台账落盘失败（不影响测速结果）: %s", e)
+            try:
+                await asyncio.to_thread(self._save_prefill_ledger)
+            except Exception as e:   # noqa: BLE001  同上：先验台账是优化项
+                log.warning("速率先验台账落盘失败（不影响测速结果）: %s", e)
             try:
                 # 存档移出事件循环：多 MB json.dump 是同步阻塞，跑在同一循环上
                 # 会卡住正在测量的 TTFT/decode tick；to_thread 只把落盘 I/O 挪走
@@ -3776,6 +4051,10 @@ class BenchRun:
         # 命中回传时用 req 级未命中速率、登记前过 _prior_suspect 防污染闸——
         # 否则 cache=stable 的重复运行里高命中档会把「全量口径 ÷ ctx」的虚高
         # 速率写进曲线，抬高 10× 物理闸与 live est_tick 估值整轮失真
+        # 长度偏短检测（点级留痕 + 播报；先验入表**不**受它影响，理由见入表处注释）
+        trunc = _ctx_short(ctx, ok,
+                           trimmed=any(r.get("ovf_trim") for r in ok)) \
+            if (media_msgs is None and not tl_mode and scenario != "agent") else None
         if media_msgs is None and not tl_mode and conc == 1 and ctx > 0:
             for r in ok:
                 sample = _prefill_prior_sample(
@@ -3787,6 +4066,16 @@ class BenchRun:
                     self.prefill_curve.get((model, scenario)) or [])
                 if sample:
                     self._note_prefill_rate((model, scenario), *sample)
+                    # 同时归户入台账（跳运行复用）：只收「这个档真的被完整喂进去
+                    # 且有 usage 真值」的点——超窗删减（实发长度不是本档）与异常
+                    # 输出的点入表就是给下次的先验埋假锚点
+                    # 不因 trunc 排除：台账横轴 x 取的是实测 prompt_tokens（不是档位
+                    # 标签），"喂进去的比标签短"的点在台账里恰是那个真实长度的锚点
+                    # ——排除它反而把高档锚点全丢掉，256K 先验从 +0.9% 退化成外推
+                    # +9.4%（2026-10-17 实测）
+                    if (sample[0] >= ctx * 0.5 and r.get("usage_real")
+                            and not r.get("ovf_trim") and not r.get("anomaly")):
+                        self._prefill_note(model, scenario, sample)
         point = {
             "model": model, "scenario": scenario,
             "kind": sc_kind,   # 场景类型：llm/asr/ocr/tts，前端按此分叉（ADR-0020）
@@ -3811,11 +4100,27 @@ class BenchRun:
             "decode_peak_tok_s": None,
             "flush_tok": None, "flush_count": None, "flush_s": None,
             "ctx_retry": ctx_retry,   # 构建偏离校正重测的首次实测 prompt_tokens 留痕
+            # 超窗删减重试留痕（取本批最差档）：实发长度小于构造量时，读数
+            # 对应的是裁后长度——逐请求 ovf_trim 上到点级，聚合行与重复轮子行
+            # 才标得出来（reps 之间可能一轮未裁、一轮被裁，长度不可比）
+            "ovf_trim": max((r["ovf_trim"] for r in reqs if r.get("ovf_trim")),
+                            default=None),
             # 首测构造字符量（与 ctx_retry 成对：字节量 ↔ 实测 token 数）
             "ctx_retry_chars": ctx_retry_chars,
         }
         if len(ok) != conc:   # 失败原因落档（repeats>1 时聚合层按失败轮拼接覆写）
             point["err"] = _first_err(reqs)
+        if trunc:
+            # 不判该点失败：短的原因分不开（服务端截断 vs 我们构造短了），误判
+            # 代价是把可用读数打成红线；此处只让档位标签不再说谎（点级留痕 +
+            # 角标 + 不入速率先验），是否升级为失败等真机数据说话（ADR-0136）
+            point["ctx_short"] = trunc
+            msg = (f"{model} / {SCENARIOS[scenario]['label']} {ctx // 1024}K 档："
+                   f"实测只有 {trunc['reported']} tokens（档位 {trunc['ctx']}，少 "
+                   f"{trunc['dropped']}）——服务端截断或构造偏短，本档读数与"
+                   f"标签长度、与其他轮次不可比")
+            log.warning(msg)
+            await self.emit({"type": "status", "msg": msg})
         if ok:
             # 批级并发口径先算好（守卫见 _conc_batch_stats）：批级 prefill
             # 点口径与 6 指标产出都消费
@@ -5352,8 +5657,13 @@ class BenchRun:
             # 并发摊薄口径（保守）：速率曲线只登记 conc=1 实测点，conc>1 的
             # 等待期平台按 rate/conc 显示——服务端串行化时各流实际速率可摊薄
             # 2~8×；并行后端会显示偏低，但比沿用单流速率的虚高诚实
-            rate = rate_prior(self.prefill_curve.get((model, scenario)) or [], ctx)
+            curve_pts = self.prefill_curve.get((model, scenario)) or []
+            rate = rate_prior(curve_pts, ctx)
             plat = rate / conc if rate else None
+            # 先验覆盖度：曲线最高档比目标 ctx 低 ≥1 个倍频程（含“只有探测点”的
+            # 冷启动处境）→ 平台值是平推/外推出来的、系统性偏低，带 weak 让前端
+            # 如实说明（无台账可播的冷启动轮就是这种处境）
+            covered = _prefill_prior_covered(curve_pts, ctx)
             if plat:
                 # 曲线先验封顶：等待期内估值 ≈ 该 ctx 的曲线速率（tick_est ÷
                 # 预期耗时），超出预期耗时才随等待衰减收敛——速率随上下文
@@ -5368,7 +5678,8 @@ class BenchRun:
                              "scenario": scenario, "ctx": ctx, "conc": conc,
                              "req": req_i, "phase": "prefill",
                              "speed": round(min(tick_est / net, cap), 1),
-                             "elapsed": round(now0 - t0, 2)})
+                             "elapsed": round(now0 - t0, 2),
+                             **({} if covered else {"weak": True})})
             last_est = now0
 
         async def enter_stream(ctx_mgr):
@@ -5553,15 +5864,17 @@ class BenchRun:
                             first = now
                             last_emit = now   # 首个 token 后才开始计时，避免速度读数爆炸
                             if not tick_off:
-                                # 首 token 到达 = 本请求 prefill 完成：TTFT 实测、
-                                # prompt 取校准构造值，读数即刻刷新，不等整点
-                                # 完成（请求级，ADR-0007）
+                                # 首 token 到达：TTFT 实测，但**分子仍是估算**（此时
+                                # usage 未到，prompt 只能按字符÷系数估）——标 est 让
+                                # 前端按估值帧处理（不上「实测」牌子、不冻结估值），
+                                # 真·实测等流末 usage 到手那一帧（ADR-0007）
                                 ttft0 = now - t0
                                 net0 = _net_elapsed(ttft0, self.rtt_s)
                                 await emit_tick({"type": "tick", "tag": tag, "model": model,
                                                  "scenario": scenario, "ctx": ctx, "conc": conc,
                                                  "req": req_i, "phase": "prefill",
                                                  "speed": round(tick_est / net0, 1),
+                                                 "est": True,
                                                  "ttft": round(ttft0, 3),
                                                  "elapsed": round(ttft0, 2)})
                         elif now - last > max_gap:
@@ -5891,6 +6204,32 @@ class BenchRun:
         # 流末补发权威读数帧：token 数采信服务端 usage、速度为最终窗口均值。
         # 此前 tick 是滑窗估算快照（ADR-0007），与最终值口径不同（ADR-0007，口径收敛），
         # 收尾帧让实时 KPI/实时表停在准确值上
+        # prefill 的权威帧同在此处：首 token 那一帧的分子是估算（字符÷全局平均
+        # 系数），构造偏离时被带着虚高（2026-10-17 真机：实发 19.7 万 token、
+        # 估成 22~26 万，KPI 挂 4200~5000 而真值 3722，且一挂到整点跑完才回写）——
+        # usage 已到手，此处用真实 prompt_tokens ÷ 净 TTFT 补一帧不带 est 的真·实测
+        if not tick_off and (ttft_net or ttft):
+            # agent 矩阵（inst 非 None）点级是增量口径：命中回传时按未命中真值；
+            # 未回传时分子仍只能沿用增量估算（标 est，与等待期帧同源），不拿
+            # 全量 prompt 冒充增量实测。分母净口径优先（RTT 基线缺失时退回毛 TTFT，
+            # 与 req 级 prefill_tok_s 同口径），不因无基线就丢帧
+            _pf_t = ttft_net or ttft
+            _pf_ptok: float | None = None
+            _pf_est = False
+            if inst is not None:
+                _pf_ptok = (prompt_tokens - cache_hit) if cache_hit else est_tokens
+                _pf_est = not cache_hit
+            elif prompt_tokens:
+                _pf_ptok = prompt_tokens
+            if _pf_ptok and _pf_ptok > 0:
+                _pf = {"type": "tick", "tag": tag, "model": model,
+                       "scenario": scenario, "ctx": ctx, "conc": conc,
+                       "req": req_i, "phase": "prefill",
+                       "speed": round(_pf_ptok / _pf_t, 1),
+                       "ttft": round(ttft, 3), "elapsed": round(t_end - t0, 2)}
+                if _pf_est:
+                    _pf["est"] = True
+                await emit_tick(_pf)
         if not tick_off and decode_time and out_tokens:
             await emit_tick({"type": "tick", "tag": tag, "model": model,
                              "scenario": scenario, "ctx": ctx, "conc": conc, "req": req_i,
@@ -5953,6 +6292,13 @@ class BenchRun:
             # 无回传按链内差分估算未命中量）
             "cache_reported": cache_rep,
             "sent_chars": sent_chars,   # 实际发送字符数（超窗删减重试后 < 构造量）
+            # 超窗删减重试留痕（1=只发 0.75×、2=0.5×、3=0.3× 首次构造量）：以前
+            # 这一刀只有当时滚过的一句 status，存档里 err=null、sent_chars 不対
+            # 比就看不出——reps 之间就混着几种长度（2026-10-17 真机 256K 档：
+            # rep0 实发 260408 token、rep1/2 被裁到 197237，聚合行看不出），
+            # 而删减成功的点按设计豁免构建偏离校正（`sent_chars < 构造量`），
+            # 不留痕就等于偏离只在表格徒标里隐没
+            "ovf_trim": ovf_attempt or None,
             "finish": finished,
             "text_chars": text_len, "reason_chars": reason_len,   # 存档诊断用
             # 输出开头 ≤200 字符采样（存档复盘：前端徽标悬浮/异常日志均消费）：

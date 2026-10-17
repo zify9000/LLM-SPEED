@@ -330,17 +330,13 @@ const equivPts = universe.filter((_, i) => i % 3 === 0).slice(0, 72);
 console.log("");
 console.log(`equivalence: fixed set = ${equivPts.length} points（every 3rd of universe，含 creative/code/agent）`);
 
-/* 断言 0：bumpProgress 与 KPI 回写仍在 addPoint 内**同步**生效（不参与合帧） */
+/* 断言 0：KPI 回写仍在 addPoint 内**同步**生效（不参与合帧；「测速点」格已随 ADR-0127 删除，
+   同步性只剩 Prefill 一个监控点） */
 resetState("run", []);
 api.state.totalPoints = 10;
 api.state.donePoints = 0;
-const kpiPointsEl = H.sel("#kpiPoints");
-const progFillEl = H.sel("#progFill");
 const kpiPreEl = H.sel("#kpiPrefill");
 api.addPoint(universe[0]);
-check("addPoint 同步刷新「已完成测点」KPI（bumpProgress 未被合帧吞掉）",
-  kpiPointsEl.innerHTML === "1 <small>/ 10</small>", kpiPointsEl.innerHTML);
-check("addPoint 同步推进进度条宽度", progFillEl.style.width === "10%", String(progFillEl.style.width));
 check("addPoint 同步回写 Prefill KPI", /tok\/s<\/small>/.test(kpiPreEl.innerHTML), kpiPreEl.innerHTML);
 H.drainRaf();   // 清掉上面 addPoint 排的帧，保证后续断言从干净队列开始
 

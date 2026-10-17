@@ -111,8 +111,11 @@ class TestArchiveIo(ServerDirCase):
         self.assertEqual(len(first), 1)
         self.assertEqual(first[0]["run_id"], "r1")
         self.assertEqual(first[0]["n_points"], 1)
-        # 命中缓存（同 mtime/size）后内容仍正确
-        self.assertEqual(self.client.get("/api/bench/history").json(), {"history": first})
+        # 命中缓存（同 mtime/size）后内容仍正确；ADR-0126 的披露字段一并钉住
+        again = self.client.get("/api/bench/history").json()
+        self.assertEqual(again["history"], first)
+        self.assertEqual((again["total"], again["matched"], again["truncated"]),
+                         (1, 1, False))
         # 存档被改写 → mtime/size 变化 → 摘要刷新
         d = read_archive("r1")
         d["results"].append(_point(ctx_target=8192))

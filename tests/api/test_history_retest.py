@@ -235,6 +235,53 @@ class TestMergeRetest(unittest.IsolatedAsyncioTestCase):
             os.path.join(server.RESULTS_DIR, "rt-run.json")),
             "合并成功后复测独立存档应删除")
 
+    async def test_merge_matches_clamped_point_via_ctx_edge(self):
+        """声明 max_ctx 之前测的旧档（点 ctx_target=262144、无 ctx_edge）复测时，
+        引擎按当前上限钳制产出 ctx_target=260608 + ctx_edge=262144 的点：逐字比
+        五元组会判"identity 漂移"、结果永远合不回原存档（2026-10-17 真机）。
+        按 ctx_edge 归一后应正常合并，并在 retests 审计里留下合入前后的构造长度。"""
+        old = _archive_point(ctx_target=262144, prompt_tokens=218294,
+                             all_ok=False, err="HTTP 500")
+        other = _archive_point(ctx_target=131072)
+        _write_archive(os.path.join(server.RESULTS_DIR, "arch1.json"),
+                       [old, other], ctx_list=[131072, 262144])
+        new = _archive_point(ctx_target=260608, ctx_edge=262144,
+                             prompt_tokens=260619, all_ok=True)
+        self._fake_run([new])
+        _write_archive(os.path.join(server.RESULTS_DIR, "rt-run.json"), [new])
+        await server._merge_retest("arch1", "rt-run", ("m1", "code", 262144, None, 1))
+        with open(os.path.join(server.RESULTS_DIR, "arch1.json"),
+                  encoding="utf-8") as f:
+            d = json.load(f)
+        self.assertTrue(d["results"][0]["all_ok"], "钳制后的新点应合回原档位行")
+        self.assertEqual(d["results"][0]["ctx_edge"], 262144,
+                         "合入点保留 ctx_edge，前端按裁前原档位显示")
+        self.assertEqual(d["results"][1]["ctx_target"], 131072, "其余点不动")
+        aud = d["retests"]
+        self.assertEqual(len(aud), 1)
+        self.assertEqual(aud[0]["ctx_target"], 262144, "审计仍按逻辑档位记账")
+        self.assertEqual(aud[0]["prev_built_ctx"], 262144)
+        self.assertEqual(aud[0]["new_built_ctx"], 260608)
+        self.assertFalse(os.path.exists(
+            os.path.join(server.RESULTS_DIR, "rt-run.json")))
+
+    async def test_merge_ctx_edge_normalization_does_not_cross_rungs(self):
+        """归一只认"同一档位的钳制前后"：新点的 ctx_edge 与目标档位不同 → 仍不合并
+        （否则邻档读数会被塞进别的档位行）。"""
+        _write_archive(os.path.join(server.RESULTS_DIR, "arch1.json"),
+                       [_archive_point(ctx_target=131072)])
+        stray = _archive_point(ctx_target=260608, ctx_edge=262144)
+        self._fake_run([stray])
+        _write_archive(os.path.join(server.RESULTS_DIR, "rt-run.json"), [stray])
+        await server._merge_retest("arch1", "rt-run", ("m1", "code", 131072, None, 1))
+        with open(os.path.join(server.RESULTS_DIR, "arch1.json"),
+                  encoding="utf-8") as f:
+            d = json.load(f)
+        self.assertEqual(d["results"][0]["ctx_target"], 131072, "原存档不动")
+        self.assertNotIn("retests", d)
+        self.assertTrue(os.path.exists(
+            os.path.join(server.RESULTS_DIR, "rt-run.json")), "复测存档保留为记录")
+
     async def test_merge_skipped_when_no_matching_point(self):
         """未产出可合并点（停止/跳档/identity 漂移）：原存档不动，复测运行
         的独立存档保留为记录。"""
