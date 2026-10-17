@@ -2558,7 +2558,7 @@ def _classify_http_error(status: int, body: str) -> str:
                 f"192K 档在低配硬件上可能超过 10 分钟）")
     if _is_ctx_overflow(status, body):
         return (f"HTTP {status} 超出模型上下文窗口：{body[:160]} "
-                f"（删减上下文重试后仍超限；在 config.json deployments 配 max_ctx "
+                f"（删减上下文重试后仍超限；在「模型类型及上下文」声明该模型上限 "
                 f"可自动跳过超限档位）")
     return f"HTTP {status}: {body[:300]}"
 
@@ -2982,7 +2982,7 @@ class BenchRun:
                                         await self.emit({"type": "status", "msg":
                                             f"跳过 {model} / {sc['label']}{rung}{sc['unit']}："
                                             f"估算 {est_tok} tokens 超出部署上限 "
-                                            f"{max_ctx // 1024}K（config.json deployments.max_ctx）"})
+                                            f"{max_ctx // 1024}K（「模型类型及上下文」声明的上限）"})
                                         await self.emit({"type": "point_skipped",
                                             "model": model, "scenario": scenario, "ctx": rung,
                                             "count": len(cfg["concurrencies"]),
@@ -3002,7 +3002,7 @@ class BenchRun:
                                             await self.emit({"type": "status", "msg":
                                                 f"跳过 {model} / {sc['label']}{rung}{sc['unit']}："
                                                 f"估算 {est_tok} tokens 超出部署上限 "
-                                                f"{max_ctx // 1024}K（config.json deployments.max_ctx）"})
+                                                f"{max_ctx // 1024}K（「模型类型及上下文」声明的上限）"})
                                             await self.emit({"type": "point_skipped",
                                                 "model": model, "scenario": scenario, "ctx": rung,
                                                 "count": len(cfg["concurrencies"]),
@@ -3117,7 +3117,7 @@ class BenchRun:
                                         await self.emit({"type": "status", "msg":
                                             f"跳过 {model} / {sc['label']}{rung}{sc['unit']}："
                                             f"估算 {est_in + rung_budget} tokens 超出部署上限 "
-                                            f"{max_ctx // 1024}K（config.json deployments.max_ctx）"})
+                                            f"{max_ctx // 1024}K（「模型类型及上下文」声明的上限）"})
                                         await self.emit({"type": "point_skipped",
                                             "model": model, "scenario": scenario, "ctx": rung,
                                             "count": len(cfg["concurrencies"]),
@@ -3133,7 +3133,7 @@ class BenchRun:
                                             await self.emit({"type": "status", "msg":
                                                 f"跳过 {model} / {sc['label']}{rung}{sc['unit']}："
                                                 f"估算 {est_in + rung_budget} tokens 超出部署上限 "
-                                                f"{max_ctx // 1024}K（config.json deployments.max_ctx）"})
+                                                f"{max_ctx // 1024}K（「模型类型及上下文」声明的上限）"})
                                             await self.emit({"type": "point_skipped",
                                                 "model": model, "scenario": scenario, "ctx": rung,
                                                 "count": len(cfg["concurrencies"]),
@@ -3199,7 +3199,7 @@ class BenchRun:
                                     # 裁减档位不在此列，见下方 edge 分支）
                                     await self.emit({"type": "status", "msg":
                                         f"跳过 {model} / 上下文{_fmt_ctx(ctx)}：连同输出预算超出部署上限 "
-                                        f"{max_ctx // 1024}K（config.json deployments.max_ctx）"})
+                                        f"{max_ctx // 1024}K（「模型类型及上下文」声明的上限）"})
                                     await self.emit({"type": "point_skipped",
                                         "model": model, "scenario": scenario, "ctx": ctx,
                                         "count": len(cfg["concurrencies"]),
@@ -3207,7 +3207,7 @@ class BenchRun:
                                         # 跳过原因只说一次会被后续状态冲掉）
                                         "msg": f"跳过 {model} / 上下文{_fmt_ctx(ctx)}："
                                                f"连同输出预算超出部署上限 {max_ctx // 1024}K"
-                                               f"（config.json deployments.max_ctx）"})
+                                               f"（「模型类型及上下文」声明的上限）"})
                                     continue
                                 if mode == "edge":
                                     # 超窗量在阈值内：把上下文裁减到能放下（贴边）
@@ -4386,7 +4386,7 @@ class BenchRun:
                 msg = (f"{model} / Agent 调用 / 缓存 {fmt(c)}：指令档 "
                        + "/".join(fmt(i) for i in ils)
                        + " 连同输出预算超出部署上限，整档跳过"
-                         "（config.json deployments.max_ctx）")
+                         "（「模型类型及上下文」声明的上限）")
                 await self.emit({"type": "status", "msg": msg})
                 await self.emit({"type": "point_skipped", "model": model,
                                  "scenario": scenario, "ctx": c,
@@ -4491,7 +4491,7 @@ class BenchRun:
                     if any(r.get("ctx_ovf") for r in preqs):
                         msg = (f"{model} / Agent 调用 / 缓存 {fmt(c)} "
                                "预热即超出服务端上下文上限，矩阵提前收口"
-                               "（config.json deployments 配 max_ctx 可自动跳档）")
+                               "（在「模型类型及上下文」声明 max_ctx 可自动跳档）")
                         await self.emit({"type": "status", "msg": msg})
                         await _abort(msg)
                         return
@@ -5018,7 +5018,7 @@ class BenchRun:
                     if any(r.get("ctx_ovf") for r in reqs):
                         msg = (f"{model} / Agent 调用 / 缓存 {fmt(c)} / "
                                f"指令 {fmt(inst)} 超出服务端上下文上限，矩阵"
-                               "提前收口（config.json deployments 配 max_ctx "
+                               "提前收口（在「模型类型及上下文」声明 max_ctx "
                                "可自动跳档）")
                         await self.emit({"type": "status", "msg": msg})
                         await _abort(msg)
@@ -5704,7 +5704,7 @@ class BenchRun:
         if _is_soft_ctx_overflow(head_text, text_len + reason_len, reason_head):
             msg = (f"服务端将超长 prompt 替换为占位回复（prompt too long），该点数据无效："
                    f"{model} 在 {_fmt_scenario_ctx(scenario, ctx)} 超出服务端上下文上限"
-                   f"（config.json deployments 配 max_ctx 可自动跳过超限档位）")
+                   f"（在「模型类型及上下文」声明 max_ctx 可自动跳过超限档位）")
             if not tick_off:
                 await emit_tick({"type": "tick", "tag": tag, "model": model, "scenario": scenario,
                                  "ctx": ctx, "conc": conc, "req": req_i, "phase": "error", "msg": msg})

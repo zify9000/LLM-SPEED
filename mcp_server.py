@@ -7,9 +7,10 @@ REST API（provider 解析 / API Key 注入 / cfg 白名单钳制都在服务端
 
 环境变量：
   LLM_SPEED_BASE   测速台服务地址，缺省 http://127.0.0.1:8501
+                   （到该地址的请求**一律直连**，不吃 HTTP_PROXY/ALL_PROXY，原因见 _KW）
 
 工具一览：
-  list_providers   已配置的 provider 与部署环境（硬件/框架/量化/max_ctx）
+  list_providers   已配置的 provider：部署环境（硬件/框架/量化）+ 模型声明（上下文上限/类型）
   list_models      某 provider 网关后的模型列表
   list_scenarios   场景白名单与默认阶梯（上下文档位/并发/agent 矩阵/媒体档位）
   bench_start      发起测速（异步，立即返回 run_id）
@@ -33,6 +34,14 @@ from mcp.server.fastmcp import FastMCP
 
 BASE = os.environ.get("LLM_SPEED_BASE", "http://127.0.0.1:8501").rstrip("/")
 
+# 两个 HTTP 客户端共用的构造参数。**trust_env=False 是必需的**：MCP 客户端把本进程
+# 当子进程拉起，宿主环境里常挂着代理变量（HTTP_PROXY/ALL_PROXY）；httpx 默认
+# trust_env=True 就会把对 127.0.0.1 的请求交给代理，代理要么回 502（表现为「服务端
+# 拒绝」——服务明明活着），要么连不上代理（表现为「无法连接」）。靠 NO_PROXY 躲不掉：
+# 常见写法是 CIDR（127.0.0.0/8），httpx 不认。测速台就是本机服务（要够远程的人自然
+# 会自己搭隧道），不需要代理；真需要代理的人拿 LLM_SPEED_BASE 指向自己的入口。
+_KW = {"trust_env": False}
+
 mcp = FastMCP(
     "llm-speed",
     instructions=(
@@ -52,7 +61,7 @@ mcp = FastMCP(
 
 async def _api(method: str, path: str, *, timeout: float = 15.0, **kw):
     try:
-        async with httpx.AsyncClient(base_url=BASE, timeout=timeout) as c:
+        async with httpx.AsyncClient(base_url=BASE, timeout=timeout, **_KW) as c:
             r = await c.request(method, path, **kw)
     except httpx.HTTPError as e:
         raise RuntimeError(
@@ -77,7 +86,7 @@ async def _sse_snapshot(run_id: str, budget_s: float = 3.0,
     t0 = time.monotonic()
     try:
         to = httpx.Timeout(5.0, read=min(2.0, budget_s))
-        async with httpx.AsyncClient(base_url=BASE, timeout=to) as c:
+        async with httpx.AsyncClient(base_url=BASE, timeout=to, **_KW) as c:
             async with c.stream("GET", f"/api/bench/events/{run_id}") as r:
                 if r.status_code != 200:
                     return events
@@ -376,7 +385,7 @@ def _scen_meta(cfg_resp: dict) -> dict:
 @mcp.tool()
 async def list_providers() -> str:
     """列出测速台已配置的 provider：名称、标签、本地/云端、API Key 是否已配置、
-    部署环境映射（模型 → 硬件/框架/参数/量化/max_ctx/模型类型）。"""
+    部署环境映射（模型 → 硬件/框架/参数/量化）与模型声明（上下文上限/模型类型）。"""
     d = await _api("GET", "/api/config")
     out = []
     for p in d.get("providers") or []:
@@ -389,15 +398,23 @@ async def list_providers() -> str:
         for u in urls:
             out.append(f"- 网关：{u}")
         for dep in p.get("deployments") or []:
-            kinds = "/".join(dep.get("kinds") or ["llm"])
             out.append(
                 f"- 部署「{dep.get('label') or ''}」："
                 f"{', '.join(dep.get('models') or [])} · "
                 f"{dep.get('hardware') or ''} · {dep.get('framework') or ''} · "
                 f"{dep.get('params') or ''} · 量化 {','.join(dep.get('quants') or [])}"
                 f" · KV {','.join(dep.get('kv_quants') or [])}"
-                f" · max_ctx {dep.get('max_ctx') or '?'} · 类型 {kinds}"
                 f"{'（激活）' if dep.get('active') else ''}")
+        # 上限与类型的唯一事实源是 `model_profiles`（ADR-0118/0122）：`deployments` 里的
+        # 同名字段已废弃且不再落盘，读它只会得到 "?"（服务端 GET 已把旧值折算进声明）
+        for f in p.get("model_profiles") or []:
+            if not isinstance(f, dict):
+                continue
+            out.append(f"- 声明「{f.get('model') or ''}」："
+                       f"max_ctx {f.get('max_ctx') or '不限'} · "
+                       f"类型 {'/'.join(f.get('kinds') or ['llm'])}")
+        if not p.get("model_profiles"):
+            out.append("- 声明：无（未声明 = 不设上下文上限、类型按 llm）")
         out.append("")
     if not out:
         return ("尚未配置任何 provider——在页面「Provider 管理」抽屉添加，"

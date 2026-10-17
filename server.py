@@ -107,8 +107,11 @@ def _origin_matches_host(origin: str, host: str) -> bool:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    """启动周期清理任务：RUNS 与事件 history 驻留内存，只在下次 bench_start
-    清理会漏掉"起一轮就不再动"的场景（ADR-0009/0081）。"""
+    """启动周期：先把旧版配置字段自动转成新形态并落盘，再跑清理任务。
+
+    RUNS 与事件 history 驻留内存，只在下次 bench_start 清理会漏掉"起一轮就不再
+    动"的场景（ADR-0009/0081）。"""
+    _startup_profile_migration()
     task = asyncio.create_task(_purge_loop())
     try:
         yield
@@ -213,7 +216,9 @@ def load_providers() -> list[dict]:
             # 模型级「上限 + 类型」声明（ADR-0117）：上限与类型的**唯一**计算来源
             "model_profiles": p.get("model_profiles") or [],
         }
-        # 旧配置的上限/类型只写在部署环境里：读取时物化成声明（ADR-0118，不写盘）
+        # 旧配置的上限/类型只写在部署环境里：读取时物化成声明（ADR-0118 的内存兼容
+        # 通道）。ADR-0122 起启动时会把这份折算结果写回磁盘，但**本函数不得有 IO 副作用**：
+        # 转换失败/文件只读/刚手改过旧字段，钳制保护都得靠这里继续兜着
         prov["model_profiles"] = _migrate_profiles(prov)
         providers.append(prov)
     return providers
@@ -275,8 +280,11 @@ def _migrate_profiles(provider: dict) -> list[dict]:
     避免同一模型挂多套时把两套的说法混着搬。
 
     两条边界：
-    - 部署里的原值**保留不动**，从此只作历史/报告用——两份数据允许分叉（ADR-0118）；
-    - 只在内存生效：`config.json` 不会在启动/读取时被改写，用户点「保存配置」才落盘。
+    - 本函数**只改内存、不碰磁盘**：它既是读取侧的兼容通道（`load_providers()` 每次都
+      跑），也是写入侧的折算器（`_validate_providers()` 保存时跑）；落盘由
+      `migrate_legacy_profiles()`（启动时自动）与 `scripts/migrate_model_profiles.py`
+      （离线手动）负责（ADR-0122）；
+    - 转换落盘时部署里的旧字段会被丢弃（已折算进声明）；未落盘前原值保留。
     """
     deps = [d for d in (provider.get("deployments") or []) if isinstance(d, dict)]
     out = [dict(f) for f in (provider.get("model_profiles") or []) if isinstance(f, dict)]
@@ -293,7 +301,9 @@ def _migrate_profiles(provider: dict) -> list[dict]:
                 continue      # 多套命中同一模型：只有生效那套的说法被搬走
             entry: dict = {"model": m}
             kinds = [k for k in _dep_kinds(dep) if k in _KINDS]
-            if (dep.get("kinds") or dep.get("kind")) and kinds:
+            # 缺省 [llm] 不写（与校验侧同口径）：否则旧文件里每套只写了 `kinds: ["llm"]`
+            # 的部署都会折出一条“只有模型名、什么也没说”的空声明
+            if kinds and kinds != ["llm"]:
                 entry["kinds"] = kinds
             try:
                 mc = int(dep.get("max_ctx") or 0)
@@ -305,6 +315,116 @@ def _migrate_profiles(provider: dict) -> list[dict]:
                 out.append(entry)
                 known.add(m)
     return out
+
+
+# 已废弃的旧版字段（ADR-0122）：上限与类型归 `model_profiles`（ADR-0118）。写在部署
+# 环境里的这两个同名字段：解析不读、保存不写，检测到就自动折算成新形态并落盘
+_LEGACY_DEP_FIELDS = ("max_ctx", "kinds", "kind")
+
+
+def _legacy_profile_hits(providers: list[dict]) -> list[str]:
+    """哪些 provider 的部署环境里还写着旧字段（看**原始文件**，不看折算后的视图）。
+
+    返回去重保序的 provider 名列表。非对象条目直接跳过：手改坏的条目交给读取侧
+    各处兜底，本函数不许为了“检测”而抛异常。"""
+    out: list[str] = []
+    for p in providers or []:
+        if not isinstance(p, dict):
+            continue
+        for dep in p.get("deployments") or []:
+            if isinstance(dep, dict) and any(k in dep for k in _LEGACY_DEP_FIELDS):
+                nm = str(p.get("name") or "(未命名)")
+                if nm not in out:
+                    out.append(nm)
+                break
+    return out
+
+
+def _norm_ctx(v) -> int | None:
+    """上限的“比较值”：非正/非数值按未配置算（与校验侧同口径），免的因
+    “旧文件里写的是字符串 8192”与转换后的 int 比不等而误拒一次干净迁移。"""
+    if isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return int(f) if (math.isfinite(f) and int(f) > 0) else None
+
+
+def _profile_view(providers: list[dict]) -> dict:
+    """{provider: {模型: (上限, 类型元组)}}：转换前后的等价性就比这张表。"""
+    out: dict = {}
+    for p in providers or []:
+        if not isinstance(p, dict):
+            continue
+        out[str(p.get("name") or "(未命名)")] = {
+            str(f.get("model")): (_norm_ctx(f.get("max_ctx")), tuple(_profile_kinds(f)))
+            for f in (p.get("model_profiles") or []) if isinstance(f, dict)}
+    return out
+
+
+def migrate_legacy_profiles(dry_run: bool = False) -> dict:
+    """把 config.json 里旧版 `deployments[].max_ctx/kinds/kind` 折算进声明并**写盘**。
+
+    ADR-0122：旧字段废弃 = 解析不读 + 保存不写，并在**启动时**自动转换一次（不在
+    每次读取时写：`load_providers()` 是高频纯读函数）。动手前三条规矩：
+
+    - 文件解析失败一律不动（与 `PUT /api/config` 同口径：在坏文件上覆盖写会丢数据）；
+    - 转换后 provider **条数必须不变**（校验侧会丢缺网关地址的条目，宁可不迁也不静默丢）；
+    - 转换前后**每个模型的上限与类型逐项相同**、且结果里不再含旧字段，否则抛异常
+      一个字都不写（迁移只改文件形态，不许改测速口径）。
+
+    写盘前把原文备份成 `config.json.<时间戳>.bak`。返回 `{"changed": [provider名],
+    "backup": 路径或None, "text": 新内容或None}`；没有旧字段就什么都不做（幂等）。
+    异常一律上浮，由调用方决定（启动路径只记 warning）。
+    """
+    d, err = load_config_file()
+    if err:
+        raise ValueError(err)
+    raw_providers = d.get("providers") or []
+    hits = _legacy_profile_hits(raw_providers)
+    if not hits:
+        return {"changed": [], "backup": None, "text": None}
+
+    before = _profile_view(load_providers())            # 含读取侧折算 = 当前生效口径
+    converted = _validate_providers(load_providers())   # 旧字段在保存路径里被折算掉
+    if len(converted) != len(raw_providers):
+        raise ValueError("转换后的 provider 条数与原文件不一致，拒写")
+    if _legacy_profile_hits(converted):
+        raise ValueError("转换结果里仍有 deployments 的旧字段，拒写")
+    if _profile_view(converted) != before:
+        raise ValueError("转换改变了某些模型的上限/类型，拒写")
+
+    d2 = dict(d)
+    d2["providers"] = converted
+    text = json.dumps(d2, ensure_ascii=False, indent=2) + "\n"
+    if dry_run:
+        return {"changed": hits, "backup": None, "text": text}
+
+    with open(CONFIG_PATH, encoding="utf-8") as f:
+        original = f.read()
+    bak = f"{CONFIG_PATH}.{time.strftime('%Y%m%d-%H%M%S')}.bak"
+    _atomic_write(bak, original)
+    _atomic_write(CONFIG_PATH, text)
+    return {"changed": hits, "backup": bak, "text": text}
+
+
+def _startup_profile_migration() -> None:
+    """启动时自动转换旧字段：成功给一条 warning，失败也只给 warning（ADR-0122）。
+
+    失败不阻断启动的理由：`load_providers()` 里那道内存折算仍在，上限与类型的计算
+    口径不依赖文件是否已转换；写不进去只是文件继续堆着旧字段。"""
+    try:
+        r = migrate_legacy_profiles()
+    except Exception as e:      # noqa: BLE001 - 启动路径绝不因“美化配置”而炸
+        log.warning("旧版 deployments.max_ctx/kinds 自动转换未完成（不影响测速，上限仍按旧"
+                    "字段读取；可手动跑 scripts/migrate_model_profiles.py）：%s", e)
+        return
+    if r["changed"]:
+        log.warning("已把 %s 的旧版 deployments.max_ctx/kinds 折算进 model_profiles 并写盘"
+                    "（原文件备份：%s）", "、".join(r["changed"]),
+                    os.path.basename(str(r["backup"])))
 
 
 def _dep_quants(dep: dict) -> list[str]:
@@ -647,9 +767,9 @@ def _validate_providers(providers) -> list[dict]:
         for d in p.get("deployments") or []:
             if not isinstance(d, dict):
                 raise HTTPException(400, f"{name} 的部署条目必须是对象")
-            # 部署环境仍接受 max_ctx/kinds（旧配置与手改的 config.json 要能读能存），
-            # 但**解析层不再读它们**（ADR-0118）：新增按模型的字段请写到 model_profiles
-            max_ctx = d.get("max_ctx")
+            # 旧版字段 deployments[].max_ctx / kinds / kind **已废弃**（ADR-0122）：不报错、
+            # 也不再原样落盘——这里不取用它们，统一在下方折算进 model_profiles。保留
+            # 兼容读取是因为别人机器上的老文件还在写它们，但写侧从此只有一个入口
             dep = {
                 "label": str(d.get("label") or "").strip()[:64],
                 "models": [str(m).strip() for m in (d.get("models") or []) if str(m).strip()],
@@ -707,30 +827,8 @@ def _validate_providers(providers) -> list[dict]:
                                          f"kv_quants 最多 8 项")
             if kv_quants:
                 dep["kv_quants"] = kv_quants
-            # 非有限值（NaN/Infinity，json.loads 会接受）同非正数口径：视为未配置
-            if isinstance(max_ctx, (int, float)) and not isinstance(max_ctx, bool) \
-                    and math.isfinite(max_ctx) and int(max_ctx) > 0:
-                dep["max_ctx"] = int(max_ctx)   # 超窗钳制来源（ADR-0005）
             if d.get("active"):
                 dep["active"] = True   # 激活标记仅在置位时落盘，旧配置保持零字段
-            # 模型能力集（多选：文本模型支持视觉输入时同时挂 ocr）：kinds 数组
-            # 优先，兼容旧单值 kind 字段；缺省 [llm] 不落盘，旧配置保持零字段
-            kinds_in = d.get("kinds")
-            if kinds_in is None:
-                kinds_in = [d["kind"]] if d.get("kind") else ["llm"]
-            if not isinstance(kinds_in, list) or not kinds_in:
-                raise HTTPException(400, f"{name} 的部署 {dep['label'] or '未命名部署'} "
-                                         f"kinds 须为非空数组（{'/'.join(_KINDS)} 多选）")
-            kinds = []
-            for k in kinds_in:
-                k = str(k).strip().lower()
-                if k not in _KINDS:
-                    raise HTTPException(400, f"{name} 的部署 {dep['label'] or '未命名部署'} "
-                                             f"kinds 元素须取自 {'/'.join(_KINDS)}: {k!r}")
-                if k not in kinds:
-                    kinds.append(k)
-            if kinds != ["llm"]:
-                dep["kinds"] = kinds
             deps.append(dep)
         # 一个模型允许映射多套部署，但激活只能有一套：重叠激活拒绝写入，
         # 否则生效口径（_resolve_deployment）出现二义
@@ -745,11 +843,18 @@ def _validate_providers(providers) -> list[dict]:
                              f"（{active_by_model[m]}、{dep['label'] or '未命名部署'}），"
                              f"同一模型只能激活一套")
                 active_by_model[m] = dep["label"] or "未命名部署"
-        # 模型级「上限 + 类型」声明（ADR-0117）：云端只声明要测的模型，不必填部署卡
-        profiles = []
-        for f in p.get("model_profiles") or []:
+        # 模型级「上限 + 类型」声明（ADR-0117）：云端只声明要测的模型，不必填部署卡。
+        # 写入前先过一遍 `_migrate_profiles`：旧形态写在部署环境里的上限/类型**当场折算
+        # 进声明**（ADR-0122）。不折算就会造出“保存把 kinds 弄丢了、声明却没补上”的配置
+        # ——模型类型静默退回 text、上限钳制消失，比报错糟得多。已有声明的模型不动，
+        # 用户在抽屉里排的顺序照搬
+        raw_profiles = p.get("model_profiles") or []
+        for f in raw_profiles:
             if not isinstance(f, dict):
                 raise HTTPException(400, f"{name} 的模型声明条目必须是对象")
+        profiles = []
+        for f in _migrate_profiles({"deployments": p.get("deployments") or [],
+                                    "model_profiles": raw_profiles}):
             m = str(f.get("model") or "").strip()
             if not m:
                 raise HTTPException(400, f"{name} 的模型声明缺少模型名")
@@ -1115,8 +1220,8 @@ async def bench_start(cfg: dict):
             raise HTTPException(400, f"模型类型与场景不匹配：{hint}"
                                      f"{' 等' if len(bad) > 3 else ''}"
                                      "——模型选择器只列出同类型场景")
-        # 部署的实际上下文上限（deployments[].max_ctx）：超限档位由测速引擎跳过，
-        # 避免构造出必然 400 的超窗 prompt（ADR-0005）。同一模型多套部署时
+        # 声明的上下文上限（`model_profiles[].max_ctx`，界面「模型类型及上下文」）：超限档位由
+        # 测速引擎跳过，避免构造出必然 400 的超窗 prompt（ADR-0005）。同一模型多套部署时
         # 取激活的那套（与 match_deployments 同口径）
         # 从 model_info 派生（match_deployments 里已合并过模型声明与部署环境），不再
         # 自己解析一遍 deployments——两处各算一份，口径迟早分叉（ADR-0117）
@@ -1132,7 +1237,7 @@ async def bench_start(cfg: dict):
                 if not _resolve_deployment(p, m) and not _resolve_model_profile(p, m):
                     warnings.append(
                         f"⚠ {m}：模型未映射部署环境，max_ctx 钳制不可用"
-                        "（在「部署环境」补映射，或在「模型上限与类型」声明该模型）")
+                        "（在「部署环境」补映射，或在「模型类型及上下文」声明该模型）")
         # agent 矩阵最大组合校验（不阻断）：最大缓存档 + 最大指令档超出部署
         # 预算（max_ctx − max_tokens − 余量）时引擎会整档跳过（point_skipped），
         # 预先告知用户会有组合被跳过

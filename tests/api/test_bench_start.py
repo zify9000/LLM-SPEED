@@ -236,20 +236,24 @@ class TestBenchStartAssembly(unittest.TestCase):
         self.assertEqual(cfg["temperature_locked"], ["m1"])
 
     def test_deployments_kinds_single_and_multi_select(self):
-        """ADR-0020/多选扩展：部署的 kinds 随 model_info/model_kinds 下发；未映射
-        部署的模型按 [llm]。媒体测速场景按 kind 分发。旧单值 kind 字段兼容读取。
+        """ADR-0020/多选扩展 + ADR-0122：部署里的 kinds（含旧单值 kind）**已废弃**——
+        保存时折算进 `model_profiles`（那才是活字段），能力集仍随 model_info/model_kinds
+        下发；未映射部署的模型按 [llm]，媒体测速场景按 kind 分发。
 
-        kinds 多选（文本模型支持视觉输入 = llm+ocr）：校验白名单、去重、
-        缺省 [llm] 不落盘；空数组/非法元素/非数组一律 400。"""
-        with self.subTest(case="旧单值 kind 兼容与 kind 分发"):
+        写侧口径随之变了：旧字段不再落盘也不再校验（空数组/非法元素不再 400，折算时按
+        白名单丢弃），而 `model_profiles` 里的 kinds 写错仍 400——**严只严活字段**。"""
+        with self.subTest(case="旧单值 kind：折算进声明，能力集仍下发"):
             dep = {"label": "whisper", "models": ["m1"], "hardware": "RTX 4090",
                    "framework": "faster-whisper", "kind": "asr"}   # 旧单值字段：兼容入口
             self.client.put("/api/config",
                             json={"providers": [_prov(local=True, deployments=[dep])]})
-            # 旧单值 kind 在写盘时已归一为 kinds 数组
+            # 旧字段不再落盘，值折算进了声明
             on_disk = json.load(open(server.CONFIG_PATH, encoding="utf-8"))
-            self.assertEqual(on_disk["providers"][0]["deployments"][0]["kinds"], ["asr"])
-            self.assertNotIn("kind", on_disk["providers"][0]["deployments"][0])
+            dep_disk = on_disk["providers"][0]["deployments"][0]
+            self.assertNotIn("kind", dep_disk)
+            self.assertNotIn("kinds", dep_disk)
+            self.assertEqual(on_disk["providers"][0]["model_profiles"],
+                             [{"model": "m1", "kinds": ["asr"]}])
             # 映射到 asr 部署的模型：能力集随 model_info/model_kinds 下发
             r = self._start(models=["m1"], scenarios=["asr"], ctx_list=[])
             self.assertEqual(r.status_code, 200, r.text)
@@ -261,35 +265,45 @@ class TestBenchStartAssembly(unittest.TestCase):
             self.assertEqual(r.status_code, 200, r.text)
             cfg = _FakeBenchRun.captured[-1].cfg
             self.assertEqual(cfg["model_kinds"], {"m2": ["llm"]})
-        with self.subTest(case="kinds 多选：写盘归一与非法输入拒绝"):
+        with self.subTest(case="kinds 多选：折算进声明并按白名单归序"):
             dep = {"label": "vlm", "models": ["m1"], "kinds": ["ocr", "llm", "ocr"]}
             r = self.client.put("/api/config",
                                 json={"providers": [_prov(local=True, deployments=[dep])]})
             self.assertEqual(r.status_code, 200, r.text)
             on_disk = json.load(open(server.CONFIG_PATH, encoding="utf-8"))
-            self.assertEqual(on_disk["providers"][0]["deployments"][0]["kinds"],
-                             ["ocr", "llm"])   # 去重、保序
+            self.assertNotIn("kinds", on_disk["providers"][0]["deployments"][0])
+            self.assertEqual(on_disk["providers"][0]["model_profiles"],
+                             [{"model": "m1", "kinds": ["llm", "ocr"]}])   # 归序、去重
             # 多能力模型：两种 kind 的场景各自可启动（一次运行仍限一种）
             r = self._start(models=["m1"], scenarios=["ocr"], ctx_list=[])
             self.assertEqual(r.status_code, 200, r.text)
             self.assertEqual(_FakeBenchRun.captured[-1].cfg["model_kinds"],
-                             {"m1": ["ocr", "llm"]})
+                             {"m1": ["llm", "ocr"]})   # 声明侧按白名单归序后下发
             r = self._start(models=["m1"], scenarios=["creative"])
             self.assertEqual(r.status_code, 200, r.text)
-            # 显式 [llm] 与缺省同口径：不落盘
+            # 显式 [llm] 与缺省同口径：不造声明条目
             dep = {"label": "plain", "models": ["m2"], "kinds": ["llm"]}
             r = self.client.put("/api/config",
                                 json={"providers": [_prov(local=True, deployments=[dep])]})
             self.assertEqual(r.status_code, 200, r.text)
             on_disk = json.load(open(server.CONFIG_PATH, encoding="utf-8"))
             self.assertNotIn("kinds", on_disk["providers"][0]["deployments"][0])
-            # 非法输入
-            for bad in ({"kinds": []}, {"kinds": ["vlm"]}, {"kinds": "ocr"}):
+            self.assertEqual(on_disk["providers"][0]["model_profiles"], [])
+            # 旧字段里的非法值：字段已废弃就**不再报错**——退回 text；没东西可说就
+            # 不造条目（缺省 [llm] 同口径，不会折出“只有模型名”的空声明）
+            for bad in ({"kinds": []}, {"kinds": "ocr"}, {"kinds": ["vlm"]}):
                 dep = {"label": "x", "models": ["m3"], **bad}
                 r = self.client.put(
                     "/api/config",
                     json={"providers": [_prov(local=True, deployments=[dep])]})
-                self.assertEqual(r.status_code, 400, bad)
+                self.assertEqual(r.status_code, 200, bad)
+                on_disk = json.load(open(server.CONFIG_PATH, encoding="utf-8"))
+                self.assertNotIn("kinds", on_disk["providers"][0]["deployments"][0], bad)
+                self.assertEqual(on_disk["providers"][0]["model_profiles"], [], bad)
+        with self.subTest(case="活字段 model_profiles 写错 kinds 仍 400"):
+            r = self.client.put("/api/config", json={"providers": [_prov(
+                local=True, model_profiles=[{"model": "m1", "kinds": ["vlm"]}])]})
+            self.assertEqual(r.status_code, 400)
 
     def test_mixed_scenario_kinds_400(self):
         """一次运行一种 kind 的边界不因多能力模型打破：混选文本+图像识别场景

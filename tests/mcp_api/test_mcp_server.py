@@ -322,12 +322,17 @@ class TestToolsEndToEnd(_ServerPair, unittest.IsolatedAsyncioTestCase):
     指向临时目录，不碰工作区真实配置与存档。"""
 
     async def test_list_providers(self):
+        """上限/类型必须读 `model_profiles`（ADR-0118/0122）。播种的配置是**旧形态**
+        （max_ctx 写在 deployments 里），服务端 GET 已把它折算成声明；若本工具还去读
+        `deployments[].max_ctx`（已废弃且不再落盘）就会报 `max_ctx ?`。"""
         text = await mcp_server.list_providers()
         self.assertIn("mockp", text)
         self.assertIn("Mock Provider", text)
         self.assertIn("测试部署", text)
         self.assertIn("mock-llm-7b", text)
         self.assertIn("max_ctx 8192", text)
+        self.assertIn("类型 llm", text)
+        self.assertNotIn("max_ctx ?", text)
 
     async def test_list_models(self):
         text = await mcp_server.list_models("mockp")
@@ -348,6 +353,31 @@ class TestToolsEndToEnd(_ServerPair, unittest.IsolatedAsyncioTestCase):
                 await mcp_server.list_providers()
         finally:
             mcp_server.BASE = old
+
+    async def test_proxy_env_does_not_hijack_the_local_call(self):
+        """代理变量不得拐走对 BASE 的请求（ADR-0122 同轮修）。MCP 客户端常在注了
+        代理的子进程里拉起本进程，httpx 默认 `trust_env=True` 会把对 127.0.0.1 的
+        请求也交给代理：服务明明活着，工具却报「服务端拒绝（HTTP 502）」或「无法
+        连接」。`NO_PROXY` 写成 CIDR（127.0.0.0/8）httpx 不认，指望不上。
+
+        本例把代理指向一个没人监听的端口：修前必挂（连不上代理），修后必过（直连）。"""
+        dead = f"http://127.0.0.1:{_free_port()}"
+        keys = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy",
+                "https_proxy", "all_proxy", "NO_PROXY", "no_proxy")
+        saved = {k: os.environ.get(k) for k in keys}
+        for k in keys:
+            os.environ.pop(k, None)
+        os.environ.update({"HTTP_PROXY": dead, "HTTPS_PROXY": dead,
+                           "ALL_PROXY": dead, "NO_PROXY": "127.0.0.0/8"})
+        try:
+            text = await mcp_server.list_providers()
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        self.assertIn("mockp", text)
 
     async def test_api_error_mapping(self):
         """_api 错误面：未知 provider 的模型列表 / 未知 run 的 404 / 活跃或不

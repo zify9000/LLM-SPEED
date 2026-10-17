@@ -37,7 +37,11 @@ class TestConfigApi(ServerDirCase):
         r = self.client.put("/api/config", json={"providers": [_prov(local=True, deployments=[dep])]})
         self.assertEqual(r.status_code, 200)
         on_disk = json.load(open(server.CONFIG_PATH, encoding="utf-8"))
-        self.assertEqual(on_disk["providers"][0]["deployments"][0]["max_ctx"], 4096)
+        # 上限写在部署里是旧形态（ADR-0122 已废弃）：保存不再把它写回，而是折算进声明
+        self.assertNotIn("max_ctx", on_disk["providers"][0]["deployments"][0])
+        self.assertEqual(on_disk["providers"][0]["model_profiles"],
+                         [{"model": "m1", "max_ctx": 4096},
+                          {"model": "m2", "max_ctx": 4096}])
         self.assertEqual(on_disk["providers"][0]["deployments"][0]["quants"], ["Q8_0"])
         self.assertEqual(on_disk["providers"][0]["deployments"][0]["kv_quants"], ["Q8_0"])
         self.assertNotIn("quant", on_disk["providers"][0]["deployments"][0])
@@ -136,14 +140,18 @@ class TestConfigApi(ServerDirCase):
         self.assertEqual(json.load(open(server.CONFIG_PATH, encoding="utf-8"))["providers"], [])
 
     def test_max_ctx_sanitize(self):
+        """上限旧写法的净化口径（ADR-0122）：3.7 取整、0 当未配置。字段本身已废弃，
+        因此不再落回 `deployments`，而是折算进 `model_profiles`。"""
         r = self.client.put("/api/config", json={"providers": [
             _prov(deployments=[{"label": "x", "models": ["m"], "max_ctx": 3.7}]),
             _prov(name="p2", deployments=[{"label": "y", "models": ["m"], "max_ctx": 0}]),
         ]})
         self.assertEqual(r.status_code, 200)
         deps = json.load(open(server.CONFIG_PATH, encoding="utf-8"))["providers"]
-        self.assertEqual(deps[0]["deployments"][0]["max_ctx"], 3)       # 3.7 → int
-        self.assertNotIn("max_ctx", deps[1]["deployments"][0])          # 0 视为未配置
+        self.assertEqual(deps[0]["model_profiles"], [{"model": "m", "max_ctx": 3}])
+        self.assertEqual(deps[1]["model_profiles"], [])               # 0 视为未配置
+        for p in deps:
+            self.assertNotIn("max_ctx", p["deployments"][0])          # 旧字段不再落盘
 
     def test_gateway_urls_normalize_and_reject(self):
         """多地址：gateway_urls 规范化（去重、首选同步 gateway_url）；旧单地址

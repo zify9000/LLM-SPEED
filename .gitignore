@@ -11,6 +11,8 @@ __pycache__/
 !.env.example
 config.json
 config.json.tmp
+# 一次性迁移脚本（scripts/migrate_model_profiles.py）写盘前的备份，含内网地址，不入库
+config.json.*.bak
 results/
 # 原子写的临时残渣（_atomic_write 用 <名字>.<随机>.tmp；进程被 SIGKILL 时会残留）
 .*.tmp

@@ -582,17 +582,7 @@ test("depOfModel：模型未映射到任何部署 / provider 不存在 → null�
     provider:"local", providerLocal:true, model:"Qwen3.8-27B"})), "alt");
 });
 
-/* ── 模型声明的上限单位（ADR-0117）──────────────────────────────────── */
-test("fmtCtx：整 K/整 M 走单位，其他原样", () => {
-  assert.equal(fmtCtx(262144), "256K");
-  assert.equal(fmtCtx(1048576), "1M");
-  assert.equal(fmtCtx(131072), "128K");
-  assert.equal(fmtCtx(1500), "1500");
-  assert.equal(fmtCtx(null), "");
-  assert.equal(fmtCtx(0), "");
-  assert.equal(fmtCtx(-5), "");
-});
-
+/* ── 模型声明的上下文口径（ADR-0117 展示简写 / ADR-0123 输入用裸 tokens）──── */
 test("parseCtx：K/M/裸数字/大小写与空格，留空为 null", () => {
   assert.equal(parseCtx("128K"), 131072);
   assert.equal(parseCtx(" 256k "), 262144);
@@ -609,6 +599,21 @@ test("parseCtx：非法一律 NaN（不得当成留空悄悄写盘）", () => {
     assert.ok(Number.isNaN(parseCtx(bad)), `应判非法: ${bad}`);
 });
 
-test("fmtCtx ↔ parseCtx 往返幂等（预设档位都要能读回原值）", () => {
-  for(const n of MP_PRESETS) assert.equal(parseCtx(fmtCtx(n)), n);
+/* 上下文输入（ADR-0123）：只认裸 tokens 正整数。预设档位下拉与 K/M 换算都撤了——
+   预设全是 1024 整倍数而真实服务窗常不是（132072），换算与候选都在造"界面上的数
+   与 config.json 里的数对不上"。所以 "128K" 在这里必须是非法，不是"聪明地"折成 131072 */
+test("parseTok：裸 tokens 正整数；留空为 null", () => {
+  assert.equal(parseTok("132072"), 132072);
+  assert.equal(parseTok(" 262144 "), 262144);
+  assert.equal(parseTok("1,048,576"), 1048576);   // 粘贴带千分位也认
+  assert.equal(parseTok("8_192"), 8192);
+  assert.equal(parseTok(""), null);
+  assert.equal(parseTok("   "), null);
+  assert.equal(parseTok(null), null);
+  assert.equal(parseTok(undefined), null);
+});
+
+test("parseTok：单位后缀/非整数/非正数一律 NaN（不得当留空悄悄写盘）", () => {
+  for(const bad of ["128K", "1M", "abc", "132072.5", "-8", "0", "0K", "1e5", "8K tokens"])
+    assert.ok(Number.isNaN(parseTok(bad)), `应判非法: ${bad}`);
 });
