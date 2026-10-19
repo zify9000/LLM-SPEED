@@ -295,6 +295,12 @@ try:
                    " return e ? [e.querySelector('.hg-n').innerText, e.querySelector('.hg-c').innerText] : null;}")
         check("左栏出现该组且条数是 0", gitem == [GNAME, "0"], str(gitem))
         check("组是实体（有自己的 id，不是只按名字当键）", bool(gid), str(gid))
+        # ADR-0138：展示序的唯一事实源是 histLedgerBuckets——左栏读作 根节点 → 未分组 → 各组
+        order = pg.eval_on_selector_all(
+            "#hdGroups .hd-gitem",
+            "els => els.map(e => e.dataset.all === '1' ? 'ALL' : e.dataset.bkt)")
+        check("左栏序：全部记录 → 未分组置顶 → 各组（ADR-0138）",
+              order[:2] == ["ALL", ""] and gid in order[2:], str(order))
         click(f'.hd-gitem[data-bkt="{gid}"] [data-gop]')
         wait("() => !document.getElementById('hdMenu').hidden")
         glabels = pg.eval_on_selector_all("#hdMenu .hd-mitem", "els => els.map(e => e.textContent.trim())")

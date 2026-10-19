@@ -713,7 +713,8 @@ test("组级动作的报数来自桶行，目标名单排除自身（确认框�
   const items = [sum("a1", {group_id:"g-1", group:"A"}), sum("a2", {group_id:"g-1", group:"A"}),
                  sum("a3", {group_id:"g-2", group:"B"}), sum("a4")];
   const rows = histLedgerBuckets([{id:"g-1", name:"A"}, {id:"g-2", name:"B"}], items);
-  assert.deepEqual(rows.map(r => `${r.name}:${r.count}`), ["A:2", "B:1", HIST_UNGROUPED + ":1"]);
+  assert.deepEqual(rows.map(r => `${r.name}:${r.count}`),
+    [HIST_UNGROUPED + ":1", "A:2", "B:1"], "未分组置顶，报数不能因换序而少一个桶");
   assert.deepEqual(histGroupNamesOf([{id:"g-1", name:"A"}, {id:"g-2", name:"B"}], items, "g-1"), ["B"],
     "并入/改名的候选名单不含自己");
 });
@@ -760,26 +761,27 @@ test("分桶：没有 group_id 的摘要（老数据/未搜索的旧响应）退
   assert.deepEqual(g.map(x => `${x.key}:${x.count}`), ["只有名字:2"]);
 });
 
-test("台账左栏 = 组（含空组）按存储序 + 未分组垫底（空组必须看得见，否则「新建组」等于没建）", () => {
+test("台账左栏 = 未分组置顶 + 组（含空组）按存储序（空组必须看得见，否则「新建组」等于没建）", () => {
   const rows = histLedgerBuckets(
     [{id:"g-1", name:"A 模型", note:"本地", count:2},
      {id:"g-2", name:"先占个位", note:"", count:0}],          // 空组
     [sum("20261014-010000-a1", {group_id:"g-1", group:"A 模型"}),
      sum("20261013-010000-a2", {group_id:"g-1", group:"A 模型"}),
      sum("20261012-010000-a3", {})]);
-  assert.deepEqual(rows.map(r => r.name), ["A 模型", "先占个位", HIST_UNGROUPED],
-    "组的顺序由数据决定，不按活跃度重排；未分组永远最后");
-  assert.deepEqual(rows.map(r => r.count), [2, 0, 1]);
-  assert.equal(rows[2].key, "", "未分组的桶键是空串（与后端 move 到空组 id 同口径）");
-  assert.deepEqual(IDS(rows[2]), ["20261012-010000-a3"]);
+  assert.deepEqual(rows.map(r => r.name), [HIST_UNGROUPED, "A 模型", "先占个位"],
+    "未分组永远最前（它是兜底桶、也是进抽屉用得最多的一档）；组的顺序由数据决定，不按活跃度重排");
+  assert.deepEqual(rows.map(r => r.count), [1, 2, 0]);
+  assert.equal(rows[0].key, "", "未分组的桶键是空串（与后端 move 到空组 id 同口径）");
+  assert.deepEqual(IDS(rows[0]), ["20261012-010000-a3"]);
 });
 
 test("台账左栏：assign 里指向失踪组的记录落进未分组，不报错也不变幽灵行", () => {
   const rows = histLedgerBuckets([{id:"g-1", name:"还在", count:1}],
     [sum("20261014-010000-a1", {group_id:"g-9", group:"已被解散的组"}),
      sum("20261013-010000-a2", {group_id:"g-1", group:"还在"})]);
-  assert.deepEqual(rows.map(r => r.count), [1, 1], "失踪组不占一行，其记录进未分组");
-  assert.deepEqual(rows[1].items.map(h => h.run_id), ["20261014-010000-a1"]);
+  assert.deepEqual(rows.map(r => `${r.name}:${r.count}`), [HIST_UNGROUPED + ":1", "还在:1"],
+    "失踪组不占一行，其记录进未分组（未分组置顶）");
+  assert.deepEqual(rows[0].items.map(h => h.run_id), ["20261014-010000-a1"]);
 });
 
 test("policy 是唯一一处「确认按钮何时能点」：载入 1 条、对比 ≥2 条、拼接恰好 1 条", () => {

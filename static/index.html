@@ -5220,8 +5220,9 @@ function histModelKey(h){
   return ms.length ? ms.join(" + ") : "（无模型信息）";
 }
 /* 分桶：按 group_id。返回 [{key, name, count, latest, items[]}]，key = 组 id（未分组 = ""）。
-   未分组永远垫底（它是“还没归组”，不是一个组），其余按组内最新一条降序
-   （= 刚跑过的那组永远在头几行）。无 id 的老摘要退回按组名归桶，同一条不会被拆进两桶 */
+   本函数只负责**归桶 + 按组内最新一条降序**，**不决定展示序**（展示序在
+   `histLedgerBuckets` 定）；未分组排末尾只是把真组排在前面。
+   无 id 的老摘要退回按组名归桶，同一条不会被拆进两桶 */
 function histGroups(items){
   const map = new Map();
   for(const h of (items || [])){
@@ -5240,7 +5241,10 @@ function histGroups(items){
     : String(b.latest).localeCompare(String(a.latest))));
   return out;
 }
-/* 台账左栏的桶清单：组按**存储序**（包括 count=0 的空组）+ 「未分组」永远垫底。
+/* 台账左栏的桶清单 = **展示序唯一事实源**：「未分组」置顶，其后是组按**存储序**
+   （包括 count=0 的空组）。未分组置顶的理由：它是「还没归组」的兜底桶（不是一个组），
+   也是进抽屉用得最多的一档——放在最底等于每次要归组先滚一段；左栏与
+   「全部记录」目录态的分节共用这个序（不在渲染处再排一次，两处各排一次必腐）。
    空组必须能出现在这里——「新建组」这个动作的全部意义就是先有个组、再往里放记录；
    旧形状（组名即主键）里没人引用的名字根本不存在，所以那个动作当时做不出来 */
 function histLedgerBuckets(groups, items){
@@ -5263,7 +5267,7 @@ function histLedgerBuckets(groups, items){
   }
   none.sort((x, y) => String(y.started_at || y.run_id || "")
     .localeCompare(String(x.started_at || x.run_id || "")));
-  rows.push({key:"", name:HIST_UNGROUPED, note:"", count:none.length, items:none});
+  rows.unshift({key:"", name:HIST_UNGROUPED, note:"", count:none.length, items:none});
   return rows;
 }
 /* 「移动分组」下拉的选项（纯函数）：占位项充当标签，其后是全部组（按左栏同序、
@@ -8163,8 +8167,9 @@ function hdVisibleItems(){
 function hdRenderAll(){
   hdRenderGroups(); hdRenderList(); hdSync();
 }
-/* 左栏：全部 / 各组（含空组）/ 未分组垫底。空组必须能出现——「新建组」的全部意义
-   就是先有个组、再往里放记录（ADR-0129） */
+/* 左栏：未分组 / 全部 / 各组（含空组）。未分组走 `histLedgerBuckets` 的置顶（与目录态
+   分节同序）；「全部记录」是根节点不入桶表、在本函数自己前插。空组必须能出现——
+   「新建组」的全部意义就是先有个组、再往里放记录（ADR-0129） */
 function hdRenderGroups(){
   const rows = [{key:null, name:"全部记录", note:"", count:histCache.length}, ...hdBuckets()];
   $("#hdGroups").innerHTML = rows.map(r => {
