@@ -5,6 +5,7 @@
 #   ③ §pure 纯函数区域存在且非空门禁（tests/run_frontend_pure.sh 依赖它提取用例）
 #   ④ HTML 注释收尾形式门禁（注释体里写 */ 会让 DOM 结构静默错位）
 #   ⑤ CSS 令牌存在性门禁（引用未定义的 var(--x) 会静默失效，底变透明）
+#   ⑥ 裸函数调用必须有声明（重构删了函数却漏掉调用点 → 跑到那一行才 ReferenceError）
 # 提取前提：假定 static/index.html 只有一个内联 <script> 块（标签独占一行）。
 # 运行：bash tests/check_frontend_js.sh
 set -euo pipefail
@@ -148,4 +149,85 @@ else
   exit 1
 fi
 
-echo "frontend JS syntax OK · 注入门禁通过 · 无外部资源 · HTML 注释收尾形式 OK · CSS 令牌存在性 OK"
+# 门禁：页面里每一个**裸函数调用**（前面不带点的 `foo(`）都要能在本文件里找到声明，
+# 或列在浏览器/第三方库全局白名单里。防的是重构删了函数却漏掉调用点：内联脚本零构建，
+# `node --check` 只判语法，未定义标识符要等**执行到那一行**才抛 ReferenceError，而躲在
+# if 分支里的调用点冒烟与单测都不走——启动表单「分组」的 histStampGroup 残留就是这么混过
+# 前五条门禁的（后果：服务端已开跑、界面却停在配置页不切「测速中」，见 ADR-0137 / 坑位
+# pitfalls/crosscut/18）。判据先剥注释与字符串（注释里提到已删的函数名是说明不是调用），
+# 声明取「文件里任何位置的 function/const/let/var/形参/箭头参数/解构」——宁可漏报不误报。
+if dangling=$(python3 - static/index.html <<'PYEOF'
+import re, sys
+raw = open(sys.argv[1], encoding='utf-8').read()
+off = raw.find('<script>\n')
+seg = raw[off:]
+js = seg[:seg.find('\n</script>')][8:]
+out = list(js); i, n = 0, len(js)
+def blank(a, b):
+    for k in range(a, b):
+        if out[k] != '\n':
+            out[k] = ' '
+while i < n:
+    if js.startswith('//', i):
+        j = js.find('\n', i); j = n if j < 0 else j; blank(i, j); i = j; continue
+    if js.startswith('/*', i):
+        j = js.find('*/', i + 2); j = n if j < 0 else j + 2; blank(i, j); i = j; continue
+    c = js[i]
+    if c in '"\'':
+        j = i + 1
+        while j < n and js[j] != c and js[j] != '\n':
+            j += 2 if js[j] == '\\' else 1
+        blank(i, min(j + 1, n)); i = j + 1; continue
+    if c == '`':
+        j, d = i + 1, 0
+        while j < n:
+            if js[j] == '\\': j += 2; continue
+            if js.startswith('${', j): d += 1; j += 2; continue
+            if js[j] == '}' and d: d -= 1; j += 1; continue
+            if js[j] == '`' and not d: break
+            j += 1
+        blank(i, min(j + 1, n)); i = j + 1; continue
+    i += 1
+s = ''.join(out)
+decl = set(re.findall(r'\bfunction\s+([A-Za-z_$][\w$]*)', s))
+decl |= set(re.findall(r'\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)', s))
+decl |= set(re.findall(r'\bclass\s+([A-Za-z_$][\w$]*)', s))
+decl |= set(re.findall(r'[(,]\s*([A-Za-z_$][\w$]*)\s*[,)=]', s))   # 形参（含带默认值的）
+decl |= set(re.findall(r'([A-Za-z_$][\w$]*)\s*=>', s))             # 箭头参数
+decl |= set(re.findall(r'[,{]\s*([A-Za-z_$][\w$]*)\s*[,}]', s))    # 解构
+kw = set('if for while switch catch return function typeof new await yield do else try throw '
+         'delete void case instanceof in of super this null true false async from get set static '
+         'extends class'.split())
+ok = set('''Array Object String Number Boolean JSON Math Date RegExp Promise Error Symbol BigInt Proxy
+Reflect Map Set WeakMap WeakSet ArrayBuffer DataView Float32Array Uint8Array Uint16Array
+Uint32Array Int8Array Int32Array TextEncoder TextDecoder Blob File FileList FileReader FormData
+URL URLSearchParams Headers Request Response AbortController AbortSignal Event CustomEvent
+KeyboardEvent MouseEvent DragEvent ClipboardEvent EventSource WebSocket Worker SharedWorker
+Image Audio Option Node NodeList DOMParser XMLSerializer CSS ResizeObserver
+IntersectionObserver MutationObserver Intl Crypto CryptoKey SubtleCrypto navigator screen history
+location document window self top localStorage sessionStorage console performance
+fetch alert confirm open btoa atob setTimeout clearTimeout setInterval clearInterval
+requestAnimationFrame cancelAnimationFrame queueMicrotask matchMedia getComputedStyle
+addEventListener removeEventListener dispatchEvent structuredClone isFinite isNaN
+encodeURIComponent decodeURIComponent encodeURI decodeURI parseInt parseFloat escape unescape
+html2canvas echarts'''.split())   # 末尾两个是 static/vendor 的库全局
+bad = [(js[:m.start()].count('\n') + 1, m.group(1))
+       for m in re.finditer(r'(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(', s)
+       if m.group(1) not in decl and m.group(1) not in kw and m.group(1) not in ok]
+if bad:
+    ln0 = raw[:off].count('\n') + 2
+    print('static/index.html 调用了未声明的函数（重构删了函数却漏掉调用点？跑到那一行才 '
+          'ReferenceError，node --check / 单测 / §pure 都拦不住）：')
+    for ln, name in bad:
+        print('  第 %d 行: %s()' % (ln0 + ln, name))
+    print('若它是浏览器或第三方库的全局，把名字加进本门禁的白名单')
+    sys.exit(1)
+PYEOF
+); then
+  :
+else
+  echo "ERROR: $dangling" >&2
+  exit 1
+fi
+
+echo "frontend JS syntax OK · 注入门禁通过 · 无外部资源 · HTML 注释收尾形式 OK · CSS 令牌存在性 OK · 裸调用有声明 OK"
