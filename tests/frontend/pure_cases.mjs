@@ -801,9 +801,15 @@ test("黄色警示只给「超出曲线配色数」，勾多条归组不算错",
   assert.equal(histDrawWarn(5, null), null, "没配 max 就不该有黄条");
 });
 
-test("histBrief：触发按钮用短串（时间 + 备注或模型），长串只留给悬浮提示", () => {
-  assert.equal(histBrief(sum("20261014-020300-a1", {note:"跑批"})), "10-14 02:03 · 跑批");
-  assert.equal(histBrief(sum("20261014-020300-a1", {models:["Qwen"]})),"10-14 02:03 · Qwen");
+test("histBrief：短串是「时间 + 模型名 +（备注）」——备注不许顶掉模型名", () => {
+  // 气泡/芯片位置窄，长串 historyLabel() 只给悬浮 title；但短串里模型名必须在场，
+  // 否则同一天几条记录只剩备注，认不出各自是哪台部署
+  assert.equal(histBrief(sum("20261014-020300-a1", {note:"跑批"})), "10-14 02:03 · M ·（跑批）");
+  assert.equal(histBrief(sum("20261014-020300-a1", {models:["Qwen"]})), "10-14 02:03 · Qwen");
+  assert.equal(histBrief(sum("20261014-020300-a1", {models:["Qwen","Kimi"]})),
+               "10-14 02:03 · Qwen, Kimi");
+  assert.equal(histBrief(sum("20261014-020300-a1", {models:[], note:"只有备注"})),
+               "10-14 02:03 · 20261014-020300-a1 ·（只有备注）", "没模型名退回 run_id，不许留空");
   assert.equal(histBrief(null), "");
 });
 

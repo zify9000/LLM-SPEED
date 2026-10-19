@@ -852,7 +852,11 @@ input[type=checkbox]:disabled,input[type=radio]:disabled{opacity:.45; cursor:not
 .hist-panel-grid{display:grid; grid-template-columns:minmax(0,1fr) auto; gap:6px 14px;
   align-items:center}
 .hist-panel-grid.no-quick{grid-template-columns:auto}   /* 无气泡时按钮回左，不留空轨道 */
-.hist-panel-grid .hist-pick{width:auto; max-width:320px}  /* 右侧动作位，不再吃整行 */
+.hist-panel-grid .hist-pick{width:auto; max-width:320px; min-width:0;   /* 右侧动作位，不再吃整行 */
+  display:inline-flex; align-items:center; gap:6px}
+/* 当前记录那串变长了（时间 + 模型名 +（备注））：超宽只截尾——模型名在前，被截掉的
+   只会是备注尾巴；完整串挂在 title 上 */
+.pp-t{min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 @media (max-width:560px){
   .hist-panel-grid{grid-template-columns:1fr}
   .hist-panel-grid .hist-pick{width:100%; max-width:none}
@@ -5367,12 +5371,15 @@ function histDrawWarn(n, max){
   if(max == null || count <= max) return null;
   return `已选 ${count} 条：对比曲线只有 ${max} 种颜色，超过就分不清谁是谁了`;
 }
-/* 短标题（触发按钮与台账行用）：时间 + 备注或模型。长串 historyLabel() 自 ADR-0130
-   起只给悬浮 title / aria，不再是任何可见文本的主体——否则上一轮“拆列”只完成了一半 */
+/* 短标题（触发按钮、快捷气泡、选集芯片、台账行共用）：时间 + 模型名 +（备注）。
+   **备注是补充不是替代**——只剩"时间 + 备注"时认不出这是哪台部署（同一天往往好几条），
+   而模型名才是要一眼看见的那一个。长串 historyLabel() 自 ADR-0130 起只给悬浮
+   title / aria，不再是任何可见文本的主体——否则上一轮“拆列”只完成了一半 */
 function histBrief(h){
   if(!h) return "";
   const t = String(h.started_at || h.run_id || "").replace(/^\d{4}-/, "").slice(0, 11);
-  return `${t} · ${h.note || (h.models || []).join(", ") || h.run_id}`;
+  const m = (h.models || []).join(", ") || h.run_id;   // 老存档没模型名时退回 run_id，不留空
+  return h.note ? `${t} · ${m} ·（${h.note}）` : `${t} · ${m}`;
 }
 /* 组名校验（确认框的 validate 用）：空、超长、撞保留名都当场说，不发请求。
    超长是报错不是截断：截断后的名字与用户心里那个不是同一个，以后按旧名并并就合不上 */
@@ -8156,6 +8163,7 @@ function histSetCurrent(id){
   const txt = h ? histBrief(h)
     : (histCache.length ? `全部记录（${histCache.length}）` : "暂无历史记录");
   t.textContent = txt;
+  t.title = txt;                       // 截尾后完整串的去向
   t.classList.toggle("is-empty", !h);
   btn.title = h ? `当前记录：${historyLabel(h)}` : "打开历史浏览器：单击选中一条，双击载入；勾多条可对比 / 归组 / 删除";
   hdSyncCurMark();
