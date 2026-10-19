@@ -168,12 +168,19 @@ class ServerDirCase(unittest.TestCase):
         self._srv_key = server.GLOBAL_API_KEY
         server.GLOBAL_API_KEY = ""
         server._HIST_CACHE.clear()
+        # 运行注册表也一并隔离：用例常往里塞**假 run**（"有测速在跑"这类断言），
+        # 残留会让后面任意一个起测速的用例撞上那个假对象（真机踩过：跨文件残留的
+        # SimpleNamespace 让 mcp 全链路用例拿到 500，排查时根本想不到源头在别的文件）
+        self._srv_runs = dict(server.RUNS)
+        server.RUNS.clear()
         self.client = TestClient(server.app)
 
     def tearDown(self):
         server.BASE, server.CONFIG_PATH, server.RESULTS_DIR = self._srv_paths
         server.GLOBAL_API_KEY = self._srv_key
         server._HIST_CACHE.clear()
+        server.RUNS.clear()
+        server.RUNS.update(self._srv_runs)
 
     def save_env(self, *names):
         """保存环境变量原值，用例结束时自动还原（含还原「原本未设置」）。"""
