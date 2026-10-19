@@ -861,9 +861,13 @@ class TestPrefillRateLedger(unittest.TestCase):
         now = time.time()
         with tempfile.TemporaryDirectory() as td:
             path = os.path.join(td, bench.PREFILL_LEDGER_FILE)
-            table = {"m|x": {"code": [[64915.0, 3478.0, now],
-                                      [131168.0, 3751.0, now]]}}
-            bench._ledger_save(path, table)
+            # 盘上故意写旧格式（三位，没来源位）：装载要补成四位（来源 = 空串）而
+            # 不是整条拒收（ADR-0141）——补不成四位旧台账就整本作废，下一轮没先验
+            legacy = {"m|x": {"code": [[64915.0, 3478.0, now],
+                                        [131168.0, 3751.0, now]]}}
+            table = {"m|x": {"code": [[64915.0, 3478.0, now, ""],
+                                      [131168.0, 3751.0, now, ""]]}}
+            bench._ledger_save(path, legacy)
             self.assertEqual(bench._prefill_ledger_load(path), table)
             with open(path, "w", encoding="utf-8") as f:
                 f.write("{trunc")

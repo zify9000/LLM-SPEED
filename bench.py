@@ -1454,7 +1454,7 @@ def _prefill_bucket_groups(rows: list) -> list[list]:
     份迟早分叉（同档边界不一致会出现“看得见的销点删不掉”）。"""
     groups: list[list] = []
     for e in sorted((e for e in (rows or [])
-                     if isinstance(e, (list, tuple)) and len(e) == 3
+                     if isinstance(e, (list, tuple)) and len(e) >= 3
                      and float(e[0]) > 0 and float(e[1]) > 0),
                     key=lambda e: float(e[0])):
         if groups and (math.log2(float(e[0])) - math.log2(float(groups[-1][0][0]))
@@ -1476,9 +1476,10 @@ def _prefill_bucket_trim(rows: list, per_bucket: int = PREFILL_LEDGER_PER_BUCKET
 
 def _prefill_ledger_load(path: str | None, now: float | None = None) -> dict:
     """读速率先验台账：不存在/损坏/结构不合一律当空表（台账是优化项，坏了当
-    没有，不能拖死测速）。磁盘结构：`键 → {场景: [[ctx, rate, ts], …]}`；丢掉非数、
-    非正的 ctx/rate、过期条目（换硬件旧表）与超出上限的尾部。`now` 可注入（体检
-    视图要与装载同源，测试也要能造过期条目）。"""
+    没有，不能拖死测速）。磁盘结构：`键 → {场景: [[ctx, rate, ts, run_id], …]}`
+    （第四位是**来源存档**，ADR-0141；旧文件只有三位，装载时补成空串 = 来源未知）；
+    丢掉非数、非正的 ctx/rate、过期条目（换硬件旧表）与超出上限的尾部。`now` 可注入
+    （体检视图要与装载同源，测试也要能造过期条目）。"""
     if not path or not os.path.exists(path):
         return {}
     try:
@@ -1497,15 +1498,16 @@ def _prefill_ledger_load(path: str | None, now: float | None = None) -> dict:
                     continue
                 rows = []
                 for p in pts:
-                    if not isinstance(p, (list, tuple)) or len(p) != 3:
+                    if not isinstance(p, (list, tuple)) or len(p) < 3:
                         continue
-                    c, r, ts = p
+                    c, r, ts = p[0], p[1], p[2]
                     if any(isinstance(x, bool) or not isinstance(x, (int, float))
-                           for x in p):
+                           for x in (c, r, ts)):
                         continue
                     if c <= 0 or r <= 0 or ts < horizon:   # 旧部署的表不拿来估新机器
                         continue
-                    rows.append([float(c), float(r), float(ts)])
+                    src = p[3] if len(p) > 3 and isinstance(p[3], str) else ""
+                    rows.append([float(c), float(r), float(ts), src])
                 rows.sort(key=lambda e: e[2])
                 if rows:
                     kept[scen] = rows[-PREFILL_LEDGER_MAX_POINTS:]
@@ -1532,10 +1534,15 @@ def _prefill_ledger_seed(pts: list) -> list[tuple[float, float]]:
 
 
 def _prefill_ledger_note(table: dict, key: str, scenario: str, ctx: float,
-                         rate: float, now: float | None = None) -> bool:
+                         rate: float, now: float | None = None,
+                         src: str = "") -> bool:
     """一个实测锚点归户入表（内存中，收口时落盘）。同档最多留最近
     `PREFILL_LEDGER_PER_BUCKET` 条（播种取中位数），全表超上限逐出最旧。不写磁盘：
-    逐点落盘会把 I/O 插在测量路径上。"""
+    逐点落盘会把 I/O 插在测量路径上。
+
+    `src` = 写它的那次测速（run_id，ADR-0141）。事后改存档的环境信息或改名时，要靠
+    这一位把读数从旧身份搬到新身份——没它，「这条存档改了」与「台账里哪些读数是它
+    写的」之间没有任何连接，改完环境基线就永久漂在旧身份上。"""
     if ctx <= 0 or rate <= 0:
         return False
     now = now or time.time()
@@ -1545,7 +1552,7 @@ def _prefill_ledger_note(table: dict, key: str, scenario: str, ctx: float,
             < PREFILL_LEDGER_BUCKET_LOG2]
     if len(same) >= PREFILL_LEDGER_PER_BUCKET:
         lst.remove(min(same, key=lambda e: e[2]))   # 逐出本档最旧一条
-    lst.append([float(ctx), float(rate), float(now)])
+    lst.append([float(ctx), float(rate), float(now), str(src or "")])
     if len(lst) > PREFILL_LEDGER_MAX_POINTS:
         lst.sort(key=lambda e: e[2])
         del lst[:len(lst) - PREFILL_LEDGER_MAX_POINTS]
@@ -1577,6 +1584,7 @@ def prefill_ledger_view(path: str | None, now: float | None = None) -> dict:
     for key, subs in (_prefill_ledger_load(path, now) or {}).items():
         model, dep = _prefill_ledger_heads(key)
         scens, newest = [], 0.0
+        rows_all = [e for rows in subs.values() for e in rows]
         for scen, rows in subs.items():
             anchors = []
             for g in _prefill_bucket_groups(rows):
@@ -1593,6 +1601,10 @@ def prefill_ledger_view(path: str | None, now: float | None = None) -> dict:
                               "anchors": anchors})
         out.append({"key": key, "model": model, "deployment": dep,
                     "age_d": (round((now - newest) / 86400, 1) if newest else None),
+                    # 来源统计（ADR-0141）：legacy > 0 = 还有旧格式读数没标来源，
+                    # 改了存档环境信息时它们搬不动，得让人看得见去面板自己处理
+                    "runs": len({e[3] for e in rows_all if len(e) > 3 and e[3]}),
+                    "legacy": sum(1 for e in rows_all if not (len(e) > 3 and e[3])),
                     "scenarios": scens})
     # 新鲜度升序：最近记的排在最前（管理界面里"最相关的那张"要先看见），
     # 时间未知的排最后（它多半是整表过期的边角料，不是要对着改的那张）
@@ -1647,36 +1659,135 @@ def prefill_ledger_prune(path: str | None, key: str, scenario: str = "",
     if not table.get(key):
         table.pop(key, None)
     # 备份原件（不是删后的表）：删错了还能整张表拿回去
+    backup = _prefill_ledger_backup(path, now)
+    _ledger_save(path, table)
+    remaining = sum(len(v) for subs in table.values() for v in subs.values())
+    _prefill_ledger_audit(path, {
+        "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+        "op": "prune", "key": key, "scenario": scenario or None, "ctx": ctx,
+        "removed": removed, "remaining": remaining,
+        "backup": os.path.basename(backup)})
+    return {"removed": removed, "remaining": remaining,
+            "backup": os.path.basename(backup)}
+
+
+def _prefill_ledger_backup(path: str, now: float | None = None) -> str:
+    """把台账原件备份成 `<台账>.bak-时间戳`（留最近 `PREFILL_LEDGER_BACKUPS` 份）。
+    备份的是**改之前的原件**：改错了还能整张表拿回去。"""
+    now = now or time.time()
     with open(path, "rb") as f:
         raw = f.read()
     backup = f"{path}.bak-{time.strftime('%Y%m%d-%H%M%S', time.localtime(now))}"
-    if os.path.exists(backup):     # 同一秒里连删两次：备份名不撞车，否则前一份被覆盖
+    if os.path.exists(backup):     # 同一秒里连改两次：备份名不撞车，否则前一份被覆盖
         n = 2
         while os.path.exists(f"{backup}-{n}") and n < 99:
             n += 1
         backup = f"{backup}-{n}"
     with open(backup, "wb") as f:
         f.write(raw)
-    old = sorted(glob.glob(f"{path}.bak-*"))
-    for stale in old[:-PREFILL_LEDGER_BACKUPS]:
+    for stale in sorted(glob.glob(f"{path}.bak-*"))[:-PREFILL_LEDGER_BACKUPS]:
         try:
             os.remove(stale)
         except OSError:
             pass
-    _ledger_save(path, table)
-    remaining = sum(len(v) for subs in table.values() for v in subs.values())
+    return backup
+
+
+def _prefill_ledger_audit(path: str, rec: dict) -> None:
+    """台账的改动往同目录 audit.jsonl 追加一行。写不进去不报错：数据已备份，
+    事实还在，不该因为审计失败让用户的操作失败。"""
     try:
         with open(os.path.join(os.path.dirname(path) or ".",
                                PREFILL_LEDGER_AUDIT), "a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
-                "key": key, "scenario": scenario or None, "ctx": ctx,
-                "removed": removed, "remaining": remaining,
-                "backup": os.path.basename(backup)}, ensure_ascii=False) + "\n")
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except OSError:
-        pass   # 审计写不进去不该让删除失败（数据已备份，事实还在）
-    return {"removed": removed, "remaining": remaining,
-            "backup": os.path.basename(backup)}
+        pass
+
+
+def _prefill_ledger_raw(path: str) -> dict:
+    """台账**原样**读成 `归一键 → {场景: [[ctx, rate, ts, src], …]}`（不过期清理、
+    不限流）。搬户要用它：改一次环境信息不该顺手把别处的过期条目 GC 掉。
+    坏文件当空表（与装载同口径）。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, list]] = {}
+    for k, subs in raw.items():
+        if not isinstance(k, str) or not isinstance(subs, dict):
+            continue
+        nk = _prefill_key_no_gateway(k)      # 旧键归一（ADR-0139）：与装载同一套
+        dst = out.setdefault(nk, {})
+        for scen, rows in subs.items():
+            if not isinstance(scen, str) or not isinstance(rows, list):
+                continue
+            keep = []
+            for r in rows:
+                if not isinstance(r, (list, tuple)) or len(r) < 3:
+                    continue
+                src = r[3] if len(r) > 3 and isinstance(r[3], str) else ""
+                keep.append([r[0], r[1], r[2], src])
+            dst.setdefault(scen, []).extend(keep)
+    return out
+
+
+def prefill_ledger_rehome(path: str | None, run_id: str, old_key: str,
+                          new_key: str, now: float | None = None) -> dict:
+    """把某次测速写进台账的读数**从旧身份搬到新身份**（ADR-0141）。
+
+    触发：事后改了存档的部署环境信息（切换/编辑环境）或改了模型名。存档那侧的身份
+    变了，台账那侧不会自己变——先验就永久漂在旧键上：下次按新登记跑测查不到这张表
+    （白攒），而那张「这次不会用上」的旧表还可能被当成垃圾删掉。
+
+    只搬**来源标记等于 `run_id`** 的读数（`_prefill_ledger_note` 的 `src`）。旧数据
+    没有来源位，搬不动——如实报 `unknown` 数让界面提示人去面板处理，绝不猜哪些是
+    它写的（猜错就是把别的部署的读数搬进这台机器）。返回 {moved, unknown, dropped,
+    from, to, backup}；一点没搬动就不写盘。"""
+    now = now or time.time()
+    empty = {"moved": 0, "unknown": 0, "dropped": 0, "from": old_key, "to": new_key,
+             "backup": None}
+    if not path or not os.path.exists(path) or not run_id:
+        return empty
+    if old_key == new_key:
+        return empty                        # 环境字段没变到换身份（例如只改了 params）
+    table = _prefill_ledger_raw(path)
+    subs = table.get(old_key)
+    if not subs:
+        return empty
+    moved = unknown = 0
+    for scen, rows in list(subs.items()):
+        mine = [r for r in rows if r[3] == run_id]
+        if mine:
+            subs[scen] = [r for r in rows if r[3] != run_id]
+            dst = table.setdefault(new_key, {}).setdefault(scen, [])
+            dst.extend(mine)
+            dst.sort(key=lambda e: float(e[2]))
+            moved += len(mine)
+        unknown += sum(1 for r in subs[scen] if not r[3])
+    if not moved:
+        return {**empty, "unknown": unknown}
+    # 旧表被搬空就摘掉（留一张空表会在界面上挂着"这次不会用上"的幽灵）
+    if not any(table.get(old_key, {}).values()):
+        table.pop(old_key, None)
+    # 目标表按装载同一套限流收敛；被逐出的必须是**搬来的那几条**才算丢数据，如实报
+    survived = 0
+    for scen, rows in table[new_key].items():
+        trimmed = _prefill_bucket_trim(rows)
+        survived += sum(1 for r in trimmed if r[3] == run_id)
+        table[new_key][scen] = trimmed
+    backup = _prefill_ledger_backup(path, now)
+    _ledger_save(path, table)
+    dropped = moved - survived
+    _prefill_ledger_audit(path, {
+        "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+        "op": "rehome", "run": run_id, "from": old_key, "to": new_key,
+        "moved": moved, "dropped": dropped, "unknown": unknown,
+        "backup": os.path.basename(backup)})
+    return {"moved": moved, "unknown": unknown, "dropped": dropped,
+            "from": old_key, "to": new_key, "backup": os.path.basename(backup)}
 
 
 def _prefill_prior_covered(pts: list[tuple[float, float]], ctx: float) -> bool:
@@ -3289,7 +3400,8 @@ class BenchRun:
         if self.mock_seen:
             return
         if _prefill_ledger_note(self.prefill_ledger, _prefill_fingerprint(model, self.cfg),
-                                scenario, float(sample[0]), float(sample[1])):
+                                scenario, float(sample[0]), float(sample[1]),
+                                src=self.run_id):
             self._prefill_ledger_dirty = True
 
     def _save_prefill_ledger(self):

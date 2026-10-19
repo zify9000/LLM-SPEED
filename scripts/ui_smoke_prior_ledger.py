@@ -91,12 +91,14 @@ try:
     live_key = next(iter(cur), "Qwen.SMOKE|dep-a|ctx262144")
     bogus = "Qwen.SMOKE-OLD|dep-z|ctx8192"
     path = os.path.join(RDIR, bench.PREFILL_LEDGER_FILE)
+    # 第四位是来源（ADR-0141）：活表两条来自两轮测速，陈旧表那条刻意不带来源，
+    # 用来验「旧数据 N 条未标来源」徽标（改存档环境时这类读数搬不动）
     bench._ledger_save(path, {
         f"{live_key}|http://legacy-entry:13080": {
-            "code": [[4103.0, 1200.0, NOW - 3600],
-                     [65000.0, 900.0, NOW - 7200],
-                     [65100.0, 880.0, NOW - 7200]]},
-        bogus: {"code": [[4100.0, 500.0, NOW - 86400 * 40]]}})
+            "code": [[4103.0, 1200.0, NOW - 3600, "run-a"],
+                     [65000.0, 900.0, NOW - 7200, "run-a"],
+                     [65100.0, 880.0, NOW - 7200, "run-b"]]},
+        bogus: {"code": [[4100.0, 500.0, NOW - 86400 * 40, ""]]}})
 
     with sync_playwright() as p:
         b = p.chromium.launch()
@@ -128,10 +130,18 @@ try:
               pg.locator("#hdPrior .pl-tbl").first.locator(".pl-chip").count() == 2)
         check("与当前登记一致的那张标「这次会用上」",
               pg.locator("#hdPrior .pl-badge.on").count() == 1)
-        check("另一张标「这次不会用上」", pg.locator("#hdPrior .pl-badge.off").count() == 1)
+        check("另一张标「这次不会用上」",
+              js("() => [...document.querySelectorAll('#hdPrior .pl-badge.off')]"
+                 ".some(e => /这次不会用上/.test(e.textContent))"))
         check("陈旧表报出天数（新鲜度升序，它在最后一张）",
               js("() => [...document.querySelectorAll('#hdPrior .pl-when')]"
                  ".some(e => /40 天前/.test(e.textContent))"))
+        check("来源轮数说出来（活表来自 2 轮）",
+              js("() => [...document.querySelectorAll('#hdPrior .pl-tbl')]"
+                 ".some(e => /来自 2 轮测速/.test(e.textContent))"))
+        check("没标来源的旧数据单独挂牌（它们搬不动，得让人看见）",
+              js("() => [...document.querySelectorAll('#hdPrior .pl-badge.off')]"
+                 ".some(e => /旧数据 1 条未标来源/.test(e.textContent))"))
 
         print("\n[3] 删一档：确认框 → 盘上少一整桶 → 备份 + 审计")
         js("() => { const c = document.querySelectorAll('#hdPrior .pl-tbl')[0]"

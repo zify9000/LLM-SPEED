@@ -7502,8 +7502,18 @@ async function saveModelEnv(model, info){
   // 否则这里抛错会让 POST 已成功的卡片永不刷新
   (state.cfg.model_info ||= {})[model] = d.model_info;   // 以服务端归一化后的条目覆盖本地快照
   refreshCard(model);   // 只重渲当前卡片（与图例勾选同口径，不整页重渲防滚动跳动）
-  setPill("已更新该记录的存档环境信息", "");
+  setPill("已更新该记录的存档环境信息" + priorMoveNote(d.prior), "");
   return true;
+}
+/* 改环境/改名后先验台账的搬家结果（ADR-0141）一句话塞进 pill，不另开弹窗：
+   搬了几条、有没有因同档上限被逐出、有没有搬不动的旧数据、有没被在跑的测速盖掉的风险 */
+function priorMoveNote(p){
+  if(!p) return "";
+  let t = p.moved ? `，速率先验基线已跟着搬 ${p.moved} 条`
+        + (p.dropped ? `（${p.dropped} 条撞同档上限被逐出）` : "")
+    : (p.unknown ? `（台账里 ${p.unknown} 条旧读数没标来源、搬不动，可在基线面板里删）` : "");
+  if(p.risk) t += "；注意：" + p.risk;
+  return t;
 }
 /* 对比卡片：运行色签条（仪表盘式横排卡片）——颜色点=叠加图系列颜色，兼作
    图例键；主行 #N+时间+备注，副行模型+Provider+测点数，第三行部署信息
@@ -8947,6 +8957,11 @@ function plHTML(d){
       : `<span class="pl-badge off" title="当前配置里没有与它完全一致的部署登记：播种不会读它
          （新部署，或部署字段改过/没填全）">这次不会用上</span>`;
     const when = t.age_d === null ? "" : `<span class="pl-when">最近记录 ${plAge(t.age_d)}</span>`;
+    // 旧数据没标来源（ADR-0141 之前写的）：改存档环境时它们搬不动，得让人看得见
+    const legacy = t.legacy
+      ? `<span class="pl-badge off" title="这些读数写在「记来源」之前，事后改存档环境信息时
+          它们没法跟着搬家（不知道是哪次测速写的）：确认是旧身份就整张删掉重跑">旧数据 ${t.legacy} 条未标来源</span>`
+      : (t.runs > 1 ? `<span class="pl-when">来自 ${t.runs} 轮测速</span>` : "");
     const scens = (t.scenarios || []).map(s =>
       `<div class="pl-scen">${esc(s.label)}（同档取中位数；条数与天数在悬停里）</div>
        <div class="pl-chips">${(s.anchors || []).map(a =>
@@ -8956,7 +8971,7 @@ function plHTML(d){
                  data-ctx="${a.ctx}" title="删这一档" aria-label="删 ${fmtK(a.ctx)} 这一档">✕</button></span>`
        ).join("")}</div>`).join("");
     return `<div class="pl-tbl"><div class="pl-head"><b>${esc(t.model)}</b>${use}
-      <span class="pl-dep">${esc(t.deployment)}</span>${when}
+      <span class="pl-dep">${esc(t.deployment)}</span>${when}${legacy}
       <button type="button" class="btn-ghost nav-btn" data-pl-del data-key="${esc(t.key)}"
               title="删掉这张表的全部锚点（换后端后重置用）">删整张表</button></div>${scens}</div>`;
   }).join("");
@@ -9135,7 +9150,8 @@ async function renameConfirm(){
   }catch(e){ setPill("改名请求失败：" + e.message, "err"); return; }
   finally{ $("#btnRenConfirm").disabled = false; }
   closeRenameModal();
-  setPill(`已将存档模型「${old}」改名为「${name}」（${d.points ?? 0} 个测速点）`, "");
+  setPill(`已将存档模型「${old}」改名为「${name}」（${d.points ?? 0} 个测速点）`
+    + priorMoveNote(d.prior), "");
   await loadHistoryList();
   if(state.runId === id && state.phase === "done" && !state.running) loadHistory();
 }

@@ -31,7 +31,7 @@ from bench import (AGENT_CACHE_RANGE, AGENT_INST_RANGE, AGENT_LADDER_MAX,
                    DEFAULT_CONCURRENCIES, DEFAULT_CTX_LIST,
                    MEDIA_LADDER_MAX, OCR_LADDER_RANGE, PREFILL_LEDGER_FILE, SCENARIOS,
                    TIMEOUT_S_MAX, TTS_LADDER_RANGE, iter_in_text_holders,
-                   prefill_ledger_prune, prefill_ledger_view,
+                   prefill_ledger_prune, prefill_ledger_rehome, prefill_ledger_view,
                    _prefill_fingerprint)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -1880,6 +1880,28 @@ async def bench_groups_apply(body: dict):
             "created": created, "dissolved": dissolved}
 
 
+def _prefill_rehome(run_id: str, before: str, after: str) -> dict | None:
+    """存档的环境信息/模型名一改，那次测速写进先验台账的读数要跟着换身份（ADR-0141）。
+
+    不搬的后果：先验永久漂在旧键上——按新登记跑测查不到这张表（几轮基线白攒），而
+    那张「这次不会用上」的旧表还会被当成垃圾删掉。只在身份真的变了时才动手；旧数据
+    没有来源位、搬不动的如实回报（`unknown`），由面板提示人去处理，不猜哪些是它写的。
+    台账是缓存不是真相，这里搬失败不该让用户的编辑失败，故只报不抛。
+    """
+    if not before or before == after:
+        return None
+    try:
+        r = prefill_ledger_rehome(_prefill_ledger_path(), run_id, before, after)
+    except OSError:
+        return None
+    if not r.get("moved") and not r.get("unknown"):
+        return None
+    if r.get("moved") and _prefill_busy():
+        r["risk"] = ("有测速正在运行：它收口时会用内存里的台账盖掉这次搬家，"
+                     "跑完请刷新基线面板确认")
+    return r
+
+
 @app.post("/api/bench/history/{run_id}/rename")
 async def bench_history_rename(run_id: str, body: dict):
     """存档模型改名适配：本地部署模型改名后，把历史存档里的旧模型名改写为新名。
@@ -1924,6 +1946,8 @@ async def bench_history_rename(run_id: str, body: dict):
                 400, f"存档的 {key} 中已存在模型 {new!r}，改名会覆盖其快照，"
                      f"请先清理或改用其他名字")
     cfg["models"] = [new if m == old else m for m in models]
+    # 先验台账的旧身份要在改名前算：改名后 model_info 的键已经换了，拼不出原来的键
+    prior_before = _prefill_fingerprint(old, cfg)
     for key in ("model_info", "model_kind", "model_kinds", "model_max_ctx"):
         mp = cfg.get(key)
         if isinstance(mp, dict) and old in mp:
@@ -1954,7 +1978,9 @@ async def bench_history_rename(run_id: str, body: dict):
         {"from": old, "to": new, "at": time.strftime("%Y-%m-%d %H:%M:%S"),
          "points": n, "audit_entries": renamed_audit})
     await _write_json(path, d)
-    return {"ok": True, "old": old, "new": new, "points": n}
+    prior = await asyncio.to_thread(_prefill_rehome, run_id, prior_before,
+                                    _prefill_fingerprint(new, cfg))
+    return {"ok": True, "old": old, "new": new, "points": n, "prior": prior}
 
 
 @app.post("/api/bench/history/{run_id}/env")
@@ -2011,6 +2037,7 @@ async def bench_history_env(run_id: str, body: dict):
         entry = {}
     elif not isinstance(entry, dict):
         raise HTTPException(400, f"模型 {model!r} 的 model_info 条目结构异常，无法修改环境")
+    prior_before = _prefill_fingerprint(model, cfg)   # 改之前的身份，台账搬家要用
     entry.update({
         "deploy_label": _s("deploy_label", 64),
         "quant": _q("quant"),
@@ -2034,7 +2061,9 @@ async def bench_history_env(run_id: str, body: dict):
     entry.pop("quants", None)   # 旧数组键不再写出（镜像 kinds/kind 先例）
     # 原子替换写回：与 note 端点同口径
     await _write_json(path, d)
-    return {"ok": True, "model_info": entry}
+    prior = await asyncio.to_thread(_prefill_rehome, run_id, prior_before,
+                                    _prefill_fingerprint(model, cfg))
+    return {"ok": True, "model_info": entry, "prior": prior}
 
 
 def _point_identity(p: dict) -> tuple:
