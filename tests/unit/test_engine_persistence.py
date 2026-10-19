@@ -751,8 +751,11 @@ class TestPrefillRateLedger(unittest.TestCase):
         self.assertTrue(bench._prefill_prior_covered(seed, 260608))
 
     def test_fingerprint_ignores_gateway_but_keeps_deployment_split(self):
-        """换网关不换表（同一部署两个入口，ADR-0139）；换量化/换模型/换上限必须换表。"""
-        base = {"model_info": {"m": {"deploy_label": "d1", "quant": "nvfp4"}},
+        """换网关**地址**不换表（同一部署两个入口，ADR-0139）；换**网关名**、换量化、
+        换模型、换上限都必须换表（ADR-0143）；拿不到 provider 就回空串（身份不明，
+        调用方不播种不入表）。"""
+        base = {"provider": "local",
+                "model_info": {"m": {"deploy_label": "d1", "quant": "nvfp4"}},
                 "model_max_ctx": {"m": 262144}, "gateway_url": "http://h:1"}
         k0 = bench._prefill_fingerprint("m", base)
         k1 = bench._prefill_fingerprint(
@@ -760,45 +763,61 @@ class TestPrefillRateLedger(unittest.TestCase):
                                               "quant": "iq3_xxs"}}})
         k2 = bench._prefill_fingerprint("m", {**base, "gateway_url": "http://other:1"})
         k3 = bench._prefill_fingerprint("m2", base)
+        k4 = bench._prefill_fingerprint("m", {**base, "provider": "cloud2"})
         self.assertEqual(k0, k2, "网关地址不进键：LAN/wg0 两个入口是一张表")
-        self.assertEqual(len({k0, k1, k3}), 3, "量化/模型变化必须换表")
+        self.assertTrue(k0.startswith("gw:local|m|"), "网关名是首段（ADR-0143）")
+        self.assertNotEqual(k0, k4, "同名模型挂在另一条网关下必须是另一张表")
+        self.assertEqual(len({k0, k1, k3, k4}), 4, "量化/模型/网关变化都不得合表")
         self.assertNotIn("://", k0, "键里不得残留地址")
         self.assertEqual(k0, bench._prefill_fingerprint("m", dict(base)))
+        self.assertEqual(bench._prefill_fingerprint("m", {k: v for k, v in base.items()
+                                                         if k != "provider"}),
+                         "", "没有网关身份 = 身份不明（回空串）")
+        self.assertEqual(bench._prefill_ledger_heads(k0), ("local", "m", "d1 · nvfp4 · ctx262144"))
 
-    def test_load_merges_legacy_gateway_keys(self):
-        """旧台账（键带网关尾缀，ADR-0134）装载即归一：同一部署的两个入口合一张表，
-        同档受写侧上限约束（留最近几条，播种取中位数）。"""
+    def test_legacy_keys_without_gateway_are_not_adopted(self):
+        """旧口径键（模型名打头、没有 `gw:` 段，含 ADR-0134 那种带网关尾缀的）：
+        装载一律**不采纳**——缺网关身份，采纳就是猜归属（合错表比没表更坏）。
+        但不能闷着：视图要列进 `stale_keys`，且 prune 要能整表删掉它。"""
         now = time.time()
         with tempfile.TemporaryDirectory() as td:
             path = os.path.join(td, bench.PREFILL_LEDGER_FILE)
             dep = "m|d1|nvfp4|ctx262144"
+            k1, k2 = f"{dep}|http://10.0.0.3:13080", f"{dep}|http://192.168.124.18:13080"
             bench._ledger_save(path, {
-                f"{dep}|http://10.0.0.3:13080": {"code": [[65000.0, 1200.0, now - 5]]},
-                f"{dep}|http://192.168.124.18:13080": {
-                    "code": [[65050.0, 900.0, now - 3], [131000.0, 800.0, now - 2]]}})
+                k1: {"code": [[65000.0, 1200.0, now - 5]]},
+                k2: {"code": [[65050.0, 900.0, now - 3], [131000.0, 800.0, now - 2]]},
+                f"gw:local|{dep}": {"code": [[65000.0, 3400.0, now - 1, "r-9"]]}})
             led = bench._prefill_ledger_load(path)
-            self.assertEqual(list(led), [dep], "尾缀剥掉、两张入口表合成一张")
-            self.assertEqual(len(led[dep]["code"]), 3)
-            seed = bench._prefill_ledger_seed(led[dep]["code"])
-            self.assertEqual(len(seed), 2, "65000/65050 同档并成一档")
-            self.assertAlmostEqual(seed[0][1], 1050.0, msg="同档取中位数")
+            self.assertEqual(list(led), [f"gw:local|{dep}"], "只采纳带网关段的键")
+            v = bench.prefill_ledger_view(path)
+            self.assertEqual(v["stale_keys"], [dep],
+                             "盘上有、引擎不用的表要报出来（按装载同一套键归一后报，"
+                             "prune 要用能删掉它的键）")
+            gw_key = f"gw:local|{dep}"
+            r = bench.prefill_ledger_prune(path, dep)
+            self.assertEqual(r["removed"], 3, "两个入口归一后本就是一张表，一起删")
+            left = json.load(open(path, encoding="utf-8"))
+            self.assertEqual(list(left), [gw_key], "删遗留表不得动到已采纳的表")
+            with self.assertRaises(ValueError):
+                bench.prefill_ledger_prune(path, dep, scenario="code")
 
     def test_seed_borrows_no_other_deployment_table(self):
         """读侧只查本轮完整指纹那一张表：同名别的别的部署不得被借来当先验（本次
         256K 显示 2523 / 实测 701 的病根），但要说一句“为什么没用先验”。"""
         with tempfile.TemporaryDirectory() as td:
-            cfg = {"models": ["m"], "scenarios": ["code"],
+            cfg = {"models": ["m"], "scenarios": ["code"], "provider": "gw1",
                    "model_info": {"m": {"deploy_label": "mine"}},
                    "model_max_ctx": {"m": 262144}}
             run = BenchRun(cfg, results_dir=td)
-            run.prefill_ledger = {"m|other|ctx262144": {
+            run.prefill_ledger = {"gw:gw1|m|other|ctx262144": {
                 "code": [[65000.0, 9000.0, time.time()]]}}
             msgs = run._seed_prefill_curves()
             self.assertEqual(run.prefill_curve, {}, "别的部署的表不得播种")
             self.assertTrue(any("本部署登记" in x for x in msgs),
                             "有同名别的表却没用上，得告诉用户为什么")
             same = BenchRun(cfg, results_dir=td)
-            same.prefill_ledger = {"m|mine|ctx262144": {
+            same.prefill_ledger = {"gw:gw1|m|mine|ctx262144": {
                 "code": [[65000.0, 900.0, time.time()]]}}
             msgs2 = same._seed_prefill_curves()
             self.assertEqual(len(same.prefill_curve[("m", "code")]), 1, "本部署的表照常用")
@@ -808,11 +827,11 @@ class TestPrefillRateLedger(unittest.TestCase):
         """本轮实测必须盖过同档历史（旧口径只 ctx 完全相等才盖，130302 与 132525
         并存取均值 → 本轮 701 被旧点抬成 790）。"""
         with tempfile.TemporaryDirectory() as td:
-            cfg = {"models": ["m"], "scenarios": ["code"],
+            cfg = {"models": ["m"], "scenarios": ["code"], "provider": "gw1",
                    "model_info": {"m": {"deploy_label": "mine"}},
                    "model_max_ctx": {"m": 262144}}
             run = BenchRun(cfg, results_dir=td)
-            run.prefill_ledger = {"m|mine|ctx262144": {"code": [
+            run.prefill_ledger = {"gw:gw1|m|mine|ctx262144": {"code": [
                 [62707.0, 1200.0, time.time()], [132525.0, 900.0, time.time()]]}}
             run._seed_prefill_curves()
             run._note_prefill_rate(("m", "code"), 130302.0, 701.0)   # 本轮实测
@@ -847,14 +866,14 @@ class TestPrefillRateLedger(unittest.TestCase):
         now = 1_800_000_000.0
         t: dict = {}
         for i in range(bench.PREFILL_LEDGER_PER_BUCKET + 3):
-            bench._prefill_ledger_note(t, "m|x", "code", 60000 + i, 3000.0 + i, now + i)
-        lst = t["m|x"]["code"]
+            bench._prefill_ledger_note(t, "gw:gw1|m|x", "code", 60000 + i, 3000.0 + i, now + i)
+        lst = t["gw:gw1|m|x"]["code"]
         self.assertLessEqual(len(lst), bench.PREFILL_LEDGER_PER_BUCKET)
         self.assertGreaterEqual(min(e[2] for e in lst), now + 3, "同档逐出最旧、留最近")
         for i in range(bench.PREFILL_LEDGER_MAX_POINTS + 20):
-            bench._prefill_ledger_note(t, "m|x", "code", 7168 * (i + 1), 2000.0,
+            bench._prefill_ledger_note(t, "gw:gw1|m|x", "code", 7168 * (i + 1), 2000.0,
                                        now + 10000 + i)
-        self.assertLessEqual(len(t["m|x"]["code"]), bench.PREFILL_LEDGER_MAX_POINTS,
+        self.assertLessEqual(len(t["gw:gw1|m|x"]["code"]), bench.PREFILL_LEDGER_MAX_POINTS,
                              "每 (指纹, 场景) 有条数上限，超出逐出最旧")
 
     def test_load_roundtrip_and_drops_bad_or_stale(self):
@@ -863,9 +882,9 @@ class TestPrefillRateLedger(unittest.TestCase):
             path = os.path.join(td, bench.PREFILL_LEDGER_FILE)
             # 盘上故意写旧格式（三位，没来源位）：装载要补成四位（来源 = 空串）而
             # 不是整条拒收（ADR-0141）——补不成四位旧台账就整本作废，下一轮没先验
-            legacy = {"m|x": {"code": [[64915.0, 3478.0, now],
+            legacy = {"gw:gw1|m|x": {"code": [[64915.0, 3478.0, now],
                                         [131168.0, 3751.0, now]]}}
-            table = {"m|x": {"code": [[64915.0, 3478.0, now, ""],
+            table = {"gw:gw1|m|x": {"code": [[64915.0, 3478.0, now, ""],
                                       [131168.0, 3751.0, now, ""]]}}
             bench._ledger_save(path, legacy)
             self.assertEqual(bench._prefill_ledger_load(path), table)
@@ -873,7 +892,7 @@ class TestPrefillRateLedger(unittest.TestCase):
                 f.write("{trunc")
             self.assertEqual(bench._prefill_ledger_load(path), {}, "损坏当空表")
             with open(path, "w", encoding="utf-8") as f:
-                json.dump({"m|x": {"code": [[64915.0, -1.0, now],
+                json.dump({"gw:gw1|m|x": {"code": [[64915.0, -1.0, now],
                                             [0.0, 3000.0, now],
                                             [70000.0, 3000.0, now - 400 * 86400],
                                             [80000.0, 3000.0, "x"]]}}, f)
@@ -883,7 +902,7 @@ class TestPrefillRateLedger(unittest.TestCase):
     def test_write_guards_and_seeding(self):
         with tempfile.TemporaryDirectory() as td:
             path = os.path.join(td, bench.PREFILL_LEDGER_FILE)
-            cfg = {"models": ["m"], "scenarios": ["code"]}
+            cfg = {"models": ["m"], "scenarios": ["code"], "provider": "gw1"}
             run = BenchRun(cfg, results_dir=td)
             run.mock_seen = True
             run._prefill_note("m", "code", (65000.0, 3400.0))
@@ -903,12 +922,13 @@ class TestPrefillRateLedger(unittest.TestCase):
             self.assertTrue(msgs, "播种要播报（先验来源必须可见）")
             self.assertGreater(bench.rate_prior(curve, 262144), 0.8 * 3661)
             # 别的模型/场景不播种不报鬼账
-            other = BenchRun({"models": ["zz"], "scenarios": ["code"]}, results_dir=td)
+            other = BenchRun({"models": ["zz"], "scenarios": ["code"],
+                              "provider": "gw1"}, results_dir=td)
             other.prefill_ledger = nxt.prefill_ledger
             self.assertEqual(other._seed_prefill_curves(), [])
             self.assertNotIn(("m", "code"), other.prefill_curve)
             # 无 results_dir（内嵌调用）：不写不炸
             bare = BenchRun(cfg)
-            bare.prefill_ledger = {"m": {"code": [[65000.0, 3400.0, time.time()]]}}
+            bare.prefill_ledger = {"gw:gw1|m": {"code": [[65000.0, 3400.0, time.time()]]}}
             self.assertEqual(len(bare._seed_prefill_curves()), 1)
             bare._save_prefill_ledger()

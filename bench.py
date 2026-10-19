@@ -1425,9 +1425,19 @@ def _prefill_fingerprint(model: str, cfg: dict) -> str:
 
     prefill 速率是**部署属性**（量化、KV 量化、推理框架、硬件、窗口大小都改变它），
     模型名相同不代表速率相同。字段缺失就不进键——宁可多建一张表也不与旧部署合表：
-    合错表比没表更坏（拿另一台机器的曲线去估本机就是“看着很懂地猜错”）。"""
+    合错表比没表更坏（拿另一台机器的曲线去估本机就是“看着很懂地猜错”）。
+
+    **首段是 `gw:<网关名>`**（ADR-0143）：摘掉地址之后身份位全靠手填，而跨 provider
+    的同名模型可以一个字段都不差（本机 `k3-256k|Kimi K3|ctx262144` 只有三段——云端那几
+    个格子用户本来就不填），这时唯一有区分度的就是它挂在哪条网关下。进键的是 provider
+    的**内部名**而不是显示标签：标签是随手改的，进键等于“改个中文名就劈表”。
+    取不到 provider 回空串＝身份不明：调用方既不播种也不入表（运行路径缺 provider 早在
+    `/api/bench/start` 400 掉了，这里只兜手工塞进来的 cfg）。"""
+    gw = cfg.get("provider")
+    if not isinstance(gw, str) or not gw.strip():
+        return ""
     info = (cfg.get("model_info") or {}).get(model) or {}
-    parts = [model]
+    parts = [f"gw:{gw.strip()[:48]}", model]
     for k in ("deploy_label", "framework", "quant", "kv_quant", "hardware"):
         v = info.get(k)
         if isinstance(v, str) and v.strip():
@@ -1512,6 +1522,8 @@ def _prefill_ledger_load(path: str | None, now: float | None = None) -> dict:
                 if rows:
                     kept[scen] = rows[-PREFILL_LEDGER_MAX_POINTS:]
             nk = _prefill_key_no_gateway(k)     # 旧键归一（ADR-0139）：多入口合一张
+            if _prefill_key_is_legacy(nk):      # 没有网关段＝身份不全，不猜、不播种
+                continue
             if kept:
                 dst = out.setdefault(nk, {})
                 for scen, rows in kept.items():
@@ -1567,10 +1579,28 @@ PREFILL_LEDGER_BACKUPS = 5           # 删之前留几份备份，多余的自�
 PREFILL_LEDGER_AUDIT = "prefill-ledger-audit.jsonl"
 
 
-def _prefill_ledger_heads(key: str) -> tuple[str, str]:
-    """台账键 → (模型名, 部署摘要)：首段是模型名，剩下的字段拼成人读的一串。"""
+def _prefill_ledger_heads(key: str) -> tuple[str, str, str]:
+    """台账键 → (网关名, 模型名, 部署摘要)。网关名直接给内部名（`gw:local` → `local`）：
+    排查“这张表到底是谁家的”要看的是真名，不是用户起的中文标签（ADR-0143 决策 3）。
+    没有 `gw:` 段 = 旧口径遗留表（键形是「模型名打头」），回空串由调用方如实标注。"""
     parts = [p for p in (key or "").split("|") if p]
-    return (parts[0] if parts else "", " · ".join(parts[1:]) or "（未登记部署字段）")
+    if parts and parts[0].startswith("gw:"):
+        return parts[0][3:], (parts[1] if len(parts) > 1 else ""), \
+            " · ".join(parts[2:]) or "（未登记部署字段）"
+    return "", (parts[0] if parts else ""), " · ".join(parts[1:]) or "（未登记部署字段）"
+
+
+def _prefill_key_model(key: str) -> str:
+    """台账键 → 模型名（新键第二段；旧键首段）。按首段猜会把 `gw:local` 当模型名。"""
+    return _prefill_ledger_heads(key)[1]
+
+
+def _prefill_key_is_legacy(key: str) -> bool:
+    """旧口径遗留表：不带 `gw:` 段，又不是「带网关尾缀、装载时能归一」那种（ADR-0139
+    的 `://` 尾缀剥完仍缺网关段，同样算遗留）。遗留表**不采纳**（缺网关身份，采纳就是
+    猜归属），但也不能让它在别处写回时被不声不响删掉——界面上列成 `stale_keys`，
+    并由 `prefill_ledger_prune` 支持整表删。"""
+    return bool(key) and not _prefill_key_no_gateway(key).startswith("gw:")
 
 
 def prefill_ledger_view(path: str | None, now: float | None = None) -> dict:
@@ -1582,7 +1612,7 @@ def prefill_ledger_view(path: str | None, now: float | None = None) -> dict:
     now = now or time.time()
     out = []
     for key, subs in (_prefill_ledger_load(path, now) or {}).items():
-        model, dep = _prefill_ledger_heads(key)
+        gw, model, dep = _prefill_ledger_heads(key)
         scens, newest = [], 0.0
         rows_all = [e for rows in subs.values() for e in rows]
         for scen, rows in subs.items():
@@ -1599,7 +1629,7 @@ def prefill_ledger_view(path: str | None, now: float | None = None) -> dict:
                 scens.append({"scenario": scen,
                               "label": SCENARIOS.get(scen, {}).get("label", scen),
                               "anchors": anchors})
-        out.append({"key": key, "model": model, "deployment": dep,
+        out.append({"key": key, "gateway": gw, "model": model, "deployment": dep,
                     "age_d": (round((now - newest) / 86400, 1) if newest else None),
                     # 来源统计（ADR-0141）：legacy > 0 = 还有旧格式读数没标来源，
                     # 改了存档环境信息时它们搬不动，得让人看得见去面板自己处理
@@ -1609,9 +1639,13 @@ def prefill_ledger_view(path: str | None, now: float | None = None) -> dict:
     # 新鲜度升序：最近记的排在最前（管理界面里"最相关的那张"要先看见），
     # 时间未知的排最后（它多半是整表过期的边角料，不是要对着改的那张）
     out.sort(key=lambda t: (t["age_d"] is None, t["age_d"] or 0.0))
+    # 盘上有、引擎不用的表要说出来：旧口径遗留的键（无网关段）装载时被跳过，闷着不报
+    # 就等于“我明明存了东西，界面却说没有”（面板据此提示，用户自己决定删不删）
+    stale = sorted(k for k in _prefill_ledger_raw(path) if _prefill_key_is_legacy(k))
     return {"max_age_days": round(PREFILL_LEDGER_MAX_AGE_S / 86400),
             "max_points": PREFILL_LEDGER_MAX_POINTS,
             "per_bucket": PREFILL_LEDGER_PER_BUCKET,
+            "stale_keys": stale,
             "empty": not out, "tables": out}
 
 
@@ -1629,6 +1663,22 @@ def prefill_ledger_prune(path: str | None, key: str, scenario: str = "",
         raise ValueError("还没有先验台账（本轮之前没跑过这台部署）")
     now = now or time.time()
     table = _prefill_ledger_load(path)
+    # 旧口径遗留表：装载时被跳过（不在 `table` 里），但仍要删得掉——否则它在盘上既
+    # 不被采纳、又没人能清理。只允许整表删（缺网关段，按场景/单档删都算“猜归属”）。
+    legacy = {k: v for k, v in _prefill_ledger_raw(path).items() if _prefill_key_is_legacy(k)}
+    if key in legacy and key not in table:
+        if scenario or ctx is not None:
+            raise ValueError("旧口径遗留表（键里没有网关段）只能整表删，"
+                             "按场景/单档删要先认领归属")
+        removed = sum(len(v or []) for v in legacy[key].values()
+                      if isinstance(v, list))
+        backup = _prefill_ledger_backup(path, now)
+        rest = {k: v for k, v in legacy.items() if k != key}
+        _ledger_save(path, {**table, **rest})
+        _prefill_ledger_audit(path, {"op": "prune-legacy", "key": key,
+                                     "removed": removed, "now": now})
+        return {"removed": removed, "remaining": 0, "backup": backup,
+                "msg": f"已删除旧口径遗留表（{removed} 条读数）"}
     subs = table.get(key)
     if not subs:
         raise ValueError(f"台账里没有这张表：{key}")
@@ -1660,7 +1710,9 @@ def prefill_ledger_prune(path: str | None, key: str, scenario: str = "",
         table.pop(key, None)
     # 备份原件（不是删后的表）：删错了还能整张表拿回去
     backup = _prefill_ledger_backup(path, now)
-    _ledger_save(path, table)
+    # 遗留表原样写回：它们只是“不被采纳”，不是“该被删”——不合并进来就会在删别的表时
+    # 被不声不响抹掉（静默删数据是这条链上最贵的错）
+    _ledger_save(path, {**table, **legacy})
     remaining = sum(len(v) for subs in table.values() for v in subs.values())
     _prefill_ledger_audit(path, {
         "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
@@ -1788,6 +1840,58 @@ def prefill_ledger_rehome(path: str | None, run_id: str, old_key: str,
         "backup": os.path.basename(backup)})
     return {"moved": moved, "unknown": unknown, "dropped": dropped,
             "from": old_key, "to": new_key, "backup": os.path.basename(backup)}
+
+
+def prefill_ledger_rekey_gw(path: str | None, old_gw: str, new_gw: str,
+                            now: float | None = None) -> dict:
+    """网关（provider）**改名**→ 台账里那批表整张改户（ADR-0143）。
+
+    与 `prefill_ledger_rehome` 不同粒度：那条按「哪次测速写的」搬（一个存档改了环境
+    信息），本条按**网关段前缀**搬（整张表本来就属于那条网关，与是哪轮跑的无关）。
+    正因为键里带了网关段，前缀替换不会误伤同名模型在另一条网关下的表。
+
+    目标键已存在（旧表早已存在另一台同身份）→ 同档并桶后按上限收敛，被逐出的如实报
+    `dropped`。没改到东西就不写盘。调用方负责判定“这真的是改名”而不是
+    “删了一条又新建一条”（见 server 侧 `_gw_renames`）——那一步不能猜。"""
+    empty = {"moved": 0, "rows": 0, "dropped": 0, "from": old_gw, "to": new_gw,
+             "backup": None}
+    if not path or not os.path.exists(path) or not old_gw or not new_gw or old_gw == new_gw:
+        return empty
+    now = now or time.time()
+    table = _prefill_ledger_raw(path)
+    prefix, new_prefix = f"gw:{old_gw}|", f"gw:{new_gw}|"
+    moved = rows = 0
+    for key in [k for k in table if isinstance(k, str) and k.startswith(prefix)]:
+        nk = new_prefix + key[len(prefix):]
+        if nk == key:
+            continue
+        src = table.pop(key)
+        dst = table.setdefault(nk, {})
+        for scen, pts in (src or {}).items():
+            dst.setdefault(scen, []).extend(pts if isinstance(pts, list) else [])
+            moved += 1
+            rows += len(dst[scen])
+        if not any(dst.get(s) for s in dst):
+            table.pop(nk, None)
+    if not moved:
+        return empty
+    dropped = 0
+    for key, subs in table.items():
+        if not key.startswith(new_prefix):
+            continue
+        for scen, rows_ in list(subs.items()):
+            trimmed = _prefill_bucket_trim(rows_)
+            dropped += max(0, len(rows_) - len(trimmed))
+            subs[scen] = trimmed
+    backup = _prefill_ledger_backup(path, now)
+    _ledger_save(path, table)
+    _prefill_ledger_audit(path, {
+        "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+        "op": "rekey-gw", "from": old_gw, "to": new_gw,
+        "moved": moved, "rows": rows, "dropped": dropped,
+        "backup": os.path.basename(backup)})
+    return {"moved": moved, "rows": rows, "dropped": dropped,
+            "from": old_gw, "to": new_gw, "backup": os.path.basename(backup)}
 
 
 def _prefill_prior_covered(pts: list[tuple[float, float]], ctx: float) -> bool:
@@ -3362,9 +3466,14 @@ class BenchRun:
         want_models = set(self.cfg.get("models") or [])
         want_scens = set(self.cfg.get("scenarios") or [])
         ledger = self.prefill_ledger or {}
-        models = sorted(want_models) or sorted({k.split("|", 1)[0] for k in ledger})
+        models = sorted(want_models) or sorted({_prefill_key_model(k) for k in ledger})
         for model in models:
-            subs = ledger.get(_prefill_fingerprint(model, self.cfg)) or {}
+            fp = _prefill_fingerprint(model, self.cfg)
+            if not fp:
+                msgs.append(f"{model} prefill 先验：本轮 cfg 里没有网关身份（provider 缺失），"
+                            f"不采纳任何历史表，只用本轮实测")
+                continue
+            subs = ledger.get(fp) or {}
             for scenario, pts in subs.items():
                 if want_scens and scenario not in want_scens:
                     continue
@@ -3385,7 +3494,7 @@ class BenchRun:
                     f"prefill 先验：已按本部署登记播种 {len(seed)} 档（"
                     f"{int(seed[0][0])}→{int(seed[-1][0])} tokens，最新锚点 "
                     f"{int(seed[-1][0])}{age}）；本轮实测同档点会盖过它")
-            if not subs and any(k.split("|", 1)[0] == model for k in ledger):
+            if not subs and any(_prefill_key_model(k) == model for k in ledger):
                 # 有同名别的表、但没有一张与本部署当前登记一致：不拦测，但得说一句
                 # “为什么没用先验”，否则用户只看到数字不准（ADR-0139）
                 msgs.append(
@@ -3399,7 +3508,10 @@ class BenchRun:
         假网关的 usage 是编的，写一次就污染真表（与密度台账同口径）。"""
         if self.mock_seen:
             return
-        if _prefill_ledger_note(self.prefill_ledger, _prefill_fingerprint(model, self.cfg),
+        key = _prefill_fingerprint(model, self.cfg)
+        if not key:      # 身份不明（没有网关段）：不写台账，宁可下一轮没先验
+            return
+        if _prefill_ledger_note(self.prefill_ledger, key,
                                 scenario, float(sample[0]), float(sample[1]),
                                 src=self.run_id):
             self._prefill_ledger_dirty = True

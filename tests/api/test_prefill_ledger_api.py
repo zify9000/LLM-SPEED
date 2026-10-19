@@ -20,7 +20,7 @@ import server
 from tests._shared import ServerDirCase
 
 _NOW = 1_800_000_000.0
-_KEY = "Qwen3.8-27B|fastllm-nvfp4|nvfp4|fp8|ctx262144"
+_KEY = "gw:local|Qwen3.8-27B|fastllm-nvfp4|nvfp4|fp8|ctx262144"   # 网关名是首段（ADR-0143）
 
 
 class TestPrefillLedgerApi(unittest.TestCase):
@@ -116,8 +116,8 @@ class TestPrefillLedgerView(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             p = os.path.join(td, bench.PREFILL_LEDGER_FILE)
             old = _NOW - (bench.PREFILL_LEDGER_MAX_AGE_S + 86400)
-            bench._ledger_save(p, {"m|d": {"code": [[4103.0, 1200.0, old],
-                                                    [8103.0, 1100.0, _NOW]]}})
+            bench._ledger_save(p, {"gw:p1|m|d": {"code": [[4103.0, 1200.0, old],
+                                                          [8103.0, 1100.0, _NOW]]}})
             view = bench.prefill_ledger_view(p, now=_NOW)
             self.assertEqual(view["max_age_days"], 90)
             anchors = view["tables"][0]["scenarios"][0]["anchors"]
@@ -202,7 +202,7 @@ class TestPrefillRehome(ServerDirCase):
         p = r.json()["prior"]
         self.assertEqual(p["moved"], 2)
         raw = self._raw()
-        new_key = next(k for k in raw if k.startswith("m1-vllm|"))
+        new_key = next(k for k in raw if k.startswith("gw:p1|m1-vllm|"))
         self.assertEqual(len([x for x in raw[new_key]["code"] if x[3] == self.rid]), 2)
         self.assertEqual([x[3] for x in raw[self.old_key]["code"]], [""],
                          "搬不走的只有来源未知那条：它得留在旧表，界面按 legacy 报出来")
@@ -234,17 +234,17 @@ class TestPrefillLedgerProvenance(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             p = os.path.join(td, bench.PREFILL_LEDGER_FILE)
             t = {}
-            self.assertTrue(bench._prefill_ledger_note(t, "m|d", "code", 4103.0, 1200.0,
+            self.assertTrue(bench._prefill_ledger_note(t, "gw:p1|m|d", "code", 4103.0, 1200.0,
                                                        now=_NOW, src="run-9"))
             bench._ledger_save(p, t)
-            rows = bench._prefill_ledger_load(p, now=_NOW)["m|d"]["code"]
+            rows = bench._prefill_ledger_load(p, now=_NOW)["gw:p1|m|d"]["code"]
             self.assertEqual(rows[0][3], "run-9", "来源得能活过一轮读写")
 
     def test_load_accepts_legacy_three_field_rows(self):
         with tempfile.TemporaryDirectory() as td:
             p = os.path.join(td, bench.PREFILL_LEDGER_FILE)
-            bench._ledger_save(p, {"m|d": {"code": [[4103.0, 1200.0, _NOW]]}})
-            rows = bench._prefill_ledger_load(p, now=_NOW)["m|d"]["code"]
+            bench._ledger_save(p, {"gw:p1|m|d": {"code": [[4103.0, 1200.0, _NOW]]}})
+            rows = bench._prefill_ledger_load(p, now=_NOW)["gw:p1|m|d"]["code"]
             self.assertEqual(rows[0], [4103.0, 1200.0, _NOW, ""],
                              "旧格式补空串 = 来源未知，不能整条丢（丢了下轮就没先验）")
 
@@ -263,6 +263,59 @@ class TestPrefillLedgerProvenance(unittest.TestCase):
             self.assertEqual((r["moved"], r["unknown"], r["dropped"]), (1, 0, 0))
             self.assertEqual(list(json.load(open(p, encoding="utf-8"))), ["b"],
                              "旧表被搬空就摘掉，不在界面上留一张幽灵表")
+
+
+class TestGatewayRename(ServerDirCase):
+    """网关名是基线指纹首段（ADR-0143）→ 改网关名要给台账整张换户，但**只在能确定
+    是改名时动**：config 里没有稳定 id，"删了一条又新建一条"形状上一样，搬错就是把
+    旧网关的基线挂到新网关名下（合错表比没表更坏）。"""
+
+    def _prov(self, name, **kw):
+        p = {"name": name, "label": "本地网关", "gateway_urls": ["http://x:1", "http://y:1"],
+             "local": True, "deployments": [{"label": "d1", "models": ["m1"],
+                                            "quants": ["fp8"], "active": True}]}
+        p.update(kw)
+        return p
+
+    def _ledger(self):
+        return os.path.join(server.RESULTS_DIR, bench.PREFILL_LEDGER_FILE)
+
+    def test_rekey_gw_moves_whole_table_and_spares_other_gateway(self):
+        p = self._ledger()
+        bench._ledger_save(p, {
+            "gw:old|m1|d1": {"code": [[4103.0, 1200.0, _NOW, "r1"]]},
+            "gw:other|m1|d1": {"code": [[8103.0, 900.0, _NOW, "r2"]]}})
+        r = bench.prefill_ledger_rekey_gw(p, "old", "new", now=_NOW)
+        self.assertEqual((r["moved"], r["rows"]), (1, 1))
+        left = json.load(open(p, encoding="utf-8"))
+        self.assertEqual(sorted(left), ["gw:new|m1|d1", "gw:other|m1|d1"],
+                         "同名模型挂在另一条网关下的表不得被前缀替换误伤")
+        self.assertEqual(bench.prefill_ledger_rekey_gw(p, "old", "new", now=_NOW)["moved"],
+                         0, "没改到东西不写盘（幂等）")
+
+    def test_put_config_rekeys_only_on_real_rename(self):
+        p = self._ledger()
+        # 先把 p1 写进 config：改名是「整表替换前后」的形状对比，文件里没得过旧侧为空
+        self.client.put("/api/config", json={"providers": [self._prov("p1")]}).json()
+        bench._ledger_save(p, {"gw:p1|m1|d1": {"code": [[4103.0, 1200.0, _NOW, "r1"]]}})
+        # ① 真改名：地址与部署声明一字没动，只有 name 变
+        r = self.client.put("/api/config", json={"providers": [self._prov("p1-new")]}).json()
+        self.assertIn("测速基线已跟着换户", r.get("prior_ledger", ""), str(r)[:120])
+        self.assertEqual(list(json.load(open(p, encoding="utf-8"))), ["gw:p1-new|m1|d1"])
+        # ② 假改名（删一条旧的又建一条新的，部署声明不同）：不得搬
+        bench._ledger_save(p, {"gw:p1|m1|d1": {"code": [[4103.0, 1200.0, _NOW, "r1"]]}})
+        r2 = self.client.put("/api/config", json={"providers": [
+            self._prov("p1-new", deployments=[{"label": "d2", "models": ["m9"],
+                                               "quants": ["nvfp4"], "active": True}])]}).json()
+        self.assertNotIn("prior_ledger", r2, "换了一套部署声明就不是改名")
+        self.assertEqual(list(json.load(open(p, encoding="utf-8"))), ["gw:p1|m1|d1"],
+                         "判不出改名就不动台账（旧表自灭，不猜归属）")
+        # ③ 换网关地址（同名消失又出现不算，这里名字没变）：只改地址不触发搬家
+        r3 = self.client.put("/api/config", json={"providers": [
+            self._prov("p1-new", gateway_urls=["http://zz:9"])]}).json()
+        self.assertNotIn("prior_ledger", r3, "只换地址不是改名")
+        self.assertEqual(list(json.load(open(p, encoding="utf-8"))), ["gw:p1|m1|d1"],
+                         "只换地址不动台账")
 
 
 if __name__ == "__main__":

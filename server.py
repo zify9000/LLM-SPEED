@@ -31,7 +31,8 @@ from bench import (AGENT_CACHE_RANGE, AGENT_INST_RANGE, AGENT_LADDER_MAX,
                    DEFAULT_CONCURRENCIES, DEFAULT_CTX_LIST,
                    MEDIA_LADDER_MAX, OCR_LADDER_RANGE, PREFILL_LEDGER_FILE, SCENARIOS,
                    TIMEOUT_S_MAX, TTS_LADDER_RANGE, iter_in_text_holders,
-                   prefill_ledger_prune, prefill_ledger_rehome, prefill_ledger_view,
+                   prefill_ledger_prune, prefill_ledger_rehome, prefill_ledger_rekey_gw,
+                   prefill_ledger_view,
                    _prefill_fingerprint)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -935,16 +936,60 @@ def _validate_providers(providers) -> list[dict]:
 
 @app.put("/api/config")
 async def put_config(body: dict):
-    """整表替换 config.json 的 providers（部署环境随 provider 内嵌）。"""
+    """整表替换 config.json 的 providers（部署环境随 provider 内嵌）。
+
+    网关名是基线指纹的首段（ADR-0143），改名等于换身份：这里顺手把台账里那批表
+    跟着换户，只在能**确定是改名**时动（见 `_gw_renames`）。"""
     providers = _validate_providers(body.get("providers"))
     d, err = load_config_file()
     if err:
         # 解析失败时 d={}：以空底整表覆盖会丢光其他顶层键，拒绝写入（ADR-0001）
         raise HTTPException(409, f"config.json 已损坏，拒绝覆盖写入（{err}），请先手工修复")
+    old_providers = d.get("providers") or []
     d["providers"] = providers
     await asyncio.to_thread(_atomic_write, CONFIG_PATH,
                             json.dumps(d, ensure_ascii=False, indent=2) + "\n")
-    return {"ok": True, "providers": len(providers)}
+    out: dict = {"ok": True, "providers": len(providers)}
+    notes = []
+    for old_gw, new_gw in _gw_renames(old_providers, providers):
+        r = await asyncio.to_thread(prefill_ledger_rekey_gw,
+                                    _prefill_ledger_path(), old_gw, new_gw)
+        if r.get("moved"):
+            notes.append(f"网关改名 {old_gw} → {new_gw}：测速基线已跟着换户（"
+                         f"{r['moved']} 张表 / {r['rows']} 条读数"
+                         + (f"，上限逐出 {r['dropped']} 条" if r.get("dropped") else "")
+                         + "）")
+    if notes:
+        out["prior_ledger"] = "；".join(notes)
+    return out
+
+
+def _gw_renames(old_providers: list, new_providers: list) -> list[tuple[str, str]]:
+    """从「整表替换前后」推出网关改名。config 里没有稳定 id，只能拿形状当凭据：
+    **恰好一条旧名消失 + 恰好一条新名出现，且两条的 `gateway_urls` 集合与
+    `deployments` 完全相同**才算。对不上就不搬——“删了一条又新建一条”被当成改名，
+    会把旧网关的基线挂到新网关名下（合错表比没表更坏）。"""
+    def shape(p):
+        if not isinstance(p, dict):
+            return None
+        n = p.get("name")
+        if not isinstance(n, str) or not n.strip():
+            return None
+        # 地址两种写法都要看（`gateway_urls` 列表 / 旧字段 `gateway_url` 单值）：
+        # 只看列表会让“换了一个网关地址”被当成改名（那其实是换了一台机器）
+        urls = [str(u) for u in (p.get("gateway_urls") or [])] \
+            or ([str(p["gateway_url"])] if p.get("gateway_url") else [])
+        return (n.strip(), sorted(urls),
+                json.dumps(p.get("deployments"), ensure_ascii=False, sort_keys=True))
+    olds = [x for x in (shape(p) for p in (old_providers or [])) if x]
+    news = [x for x in (shape(p) for p in (new_providers or [])) if x]
+    gone = sorted({o[0] for o in olds} - {n[0] for n in news})
+    added = sorted({n[0] for n in news} - {o[0] for o in olds})
+    if len(gone) != 1 or len(added) != 1:
+        return []
+    o = next(x for x in olds if x[0] == gone[0])
+    n = next(x for x in news if x[0] == added[0])
+    return [(o[0], n[0])] if (o[1], o[2]) == (n[1], n[2]) else []
 
 
 @app.put("/api/config/key")
@@ -2601,7 +2646,8 @@ def _prefill_current_keys() -> dict[str, str]:
         info = match_deployments(p, sorted(set(models)))
         max_ctx = {m: v["max_ctx"] for m, v in info.items() if v.get("max_ctx")}
         for m in info:
-            out[_prefill_fingerprint(m, {"model_info": info,
+            out[_prefill_fingerprint(m, {"provider": p.get("name"),
+                                         "model_info": info,
                                          "model_max_ctx": max_ctx})] = \
                 f"{p.get('label') or p.get('name') or '?'} / {m}"
     return out
