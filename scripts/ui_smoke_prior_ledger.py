@@ -1,12 +1,12 @@
-"""「速率先验基线」面板（ADR-0140）的浏览器目检替身（可选脚本，**不进回归套件**）。
+"""「测速基线」抽屉（ADR-0140 立功能，ADR-0142 改成顶栏入口 + 独立侧栏）的浏览器目检替身
+（可选脚本，**不进回归套件**）。
 
 为什么单独一个脚本、不塞进 `ui_smoke_history.py`：那个脚本 [6][7] 有**旧有**失败（拖拽
-段解散了要点的组，后面点空组名就崩），在它跑到 [10b] 之前就退出，我的断言永远轮不到执行
-——检查挂在跑不到的地方等于没有检查。本脚本只起一个空 results 的服务、只验一件事，
-十几秒跑完。
+段解散了要点的组，后面点空组名就崩），在它跑到后半段之前就退出——检查挂在跑不到的地方
+等于没有检查（`pitfalls/crosscut/21`）。本脚本只起一个空 results 的服务、只验一件事。
 
-为什么需要真浏览器：面板是抽屉里的**就地换模式**（列表隐掉、面板接管主栏、确认框、
-删完重渲），这些在 node 侧三条门禁与 §pure 里都只看得见"另一半"。
+为什么需要真浏览器：入口是「顶栏图标 → 下拉菜单 → 独立抽屉」三层，菜单落位、抽屉滑出、
+焦点圈定、确认框、删后重渲与底栏反馈都只在真浏览器里成立，node 侧三套门禁看不到。
 
 跑法（需要 playwright + httpx；没装就跳过并返回 0，不影响 tests/ 的任何门禁）：
 
@@ -111,41 +111,52 @@ try:
         def js(code):
             return pg.evaluate(code)
 
-        print("\n[1] 面板出现在历史抽屉里，且是就地换模式")
-        js("() => openHistDrawer()")
-        pg.wait_for_timeout(500)
-        check("左栏有入口", pg.locator("#hdPriorBtn").count() == 1)
-        js("() => hdPriorEnter()")
+        print("\n[1] 入口：顶栏设置图标 → 菜单「测速基线」→ 独立侧边栏")
+        check("历史抽屉里已不再有基线入口（ADR-0142 剥离）",
+              pg.locator("#hdPriorBtn").count() == 0)
+        pg.click("#btnTopSet")          # 真点一次：入口是顶栏图标按钮，不是内部函数
+        pg.wait_for_timeout(250)
+        check("下拉菜单出现且带 menu 语义",
+              pg.locator("#topSetMenu[role=menu]").count() == 1
+              and js("() => document.getElementById('btnTopSet').getAttribute('aria-expanded')") == "true")
+        check("菜单挂在按钮下方且在视口内",
+              js("() => { const m = document.getElementById('topSetMenu')"
+                 "  .getBoundingClientRect(); return m.top > 0 && m.right <= innerWidth; }"))
+        pg.click("#topMenuBaseline")
         pg.wait_for_timeout(700)
-        check("模式条出现、记录列表隐掉、面板接管主栏",
-              js("() => !document.getElementById('hdModeBar').hidden"
-                 " && document.getElementById('hdList').hidden"
-                 " && !document.getElementById('hdPrior').hidden"))
-        check("列出两张表", pg.locator("#hdPrior .pl-tbl").count() == 2)
+        check("独立抽屉滑出（自己一个 root，不在历史抽屉里）",
+              js("() => !document.getElementById('baseDrawerRoot').hidden"
+                 " && document.getElementById('baseDrawerRoot').classList.contains('open')"
+                 " && document.getElementById('histDrawerRoot').hidden"))
+        check("菜单已收起", pg.locator("#topSetMenu").count() == 0)
+        check("列出两张表", pg.locator("#blPanel .pl-tbl").count() == 2)
 
         print("\n[2] 口径与引擎同源：旧键归一、同档并档、会不会被用上")
-        dep = js("() => [...document.querySelectorAll('#hdPrior .pl-dep')].map(e => e.textContent)")
+        dep = js("() => [...document.querySelectorAll('#blPanel .pl-dep')].map(e => e.textContent)")
         check("地址尾缀已剥掉（界面上没有 http://）", all("http://" not in d for d in dep), str(dep))
-        check("同档两条原始读数并成一档（活表两枚锚点）",
-              pg.locator("#hdPrior .pl-tbl").first.locator(".pl-chip").count() == 2)
+        rows0 = js("() => [...document.querySelectorAll('#blPanel .pl-tbl')[0]"
+                   "  .querySelectorAll('tbody tr')].map(r => r.innerText)")
+        check("同档两条原始读数并成一档（活表两行：4K 与 64K）", len(rows0) == 2, str(rows0))
+        check("逐档是带表头的表格（数字列右对齐）",
+              pg.locator("#blPanel .pl-tbl").first.locator(".pl-grid thead th").count() == 5)
         check("与当前登记一致的那张标「这次会用上」",
-              pg.locator("#hdPrior .pl-badge.on").count() == 1)
+              pg.locator("#blPanel .pl-badge.on").count() == 1)
         check("另一张标「这次不会用上」",
-              js("() => [...document.querySelectorAll('#hdPrior .pl-badge.off')]"
+              js("() => [...document.querySelectorAll('#blPanel .pl-badge.off')]"
                  ".some(e => /这次不会用上/.test(e.textContent))"))
         check("陈旧表报出天数（新鲜度升序，它在最后一张）",
-              js("() => [...document.querySelectorAll('#hdPrior .pl-when')]"
+              js("() => [...document.querySelectorAll('#blPanel .pl-when')]"
                  ".some(e => /40 天前/.test(e.textContent))"))
         check("来源轮数说出来（活表来自 2 轮）",
-              js("() => [...document.querySelectorAll('#hdPrior .pl-tbl')]"
+              js("() => [...document.querySelectorAll('#blPanel .pl-tbl')]"
                  ".some(e => /来自 2 轮测速/.test(e.textContent))"))
         check("没标来源的旧数据单独挂牌（它们搬不动，得让人看见）",
-              js("() => [...document.querySelectorAll('#hdPrior .pl-badge.off')]"
+              js("() => [...document.querySelectorAll('#blPanel .pl-badge.off')]"
                  ".some(e => /旧数据 1 条未标来源/.test(e.textContent))"))
 
-        print("\n[3] 删一档：确认框 → 盘上少一整桶 → 备份 + 审计")
-        js("() => { const c = document.querySelectorAll('#hdPrior .pl-tbl')[0]"
-           "  .querySelectorAll('.pl-chip button'); c[c.length - 1].click(); }")
+        print("\n[3] 删一档：确认框 → 盘上少一整桶 → 备份 + 审计 + 抽屉内反馈")
+        js("() => { const t = document.querySelectorAll('#blPanel .pl-tbl')[0]"
+           "  .querySelectorAll('tbody tr'); t[t.length - 1].querySelector('.pl-del').click(); }")
         pg.wait_for_timeout(300)
         check("删除前有确认框（不是点一下就删）",
               js("() => !document.getElementById('uiDialogRoot').hidden"))
@@ -157,25 +168,30 @@ try:
               sorted(int(r[0]) for r in rows) == [4100, 4103], str(rows))
         check("删前自动备份已生成",
               any(f.startswith(bench.PREFILL_LEDGER_FILE + ".bak-") for f in os.listdir(RDIR)))
-        audit_p = os.path.join(RDIR, bench.PREFILL_LEDGER_AUDIT)
-        check("审计留痕一行已写", os.path.exists(audit_p))
-        check("面板已重渲（活表剩一枚锚点）",
-              pg.locator("#hdPrior .pl-tbl").first.locator(".pl-chip").count() == 1)
+        check("审计留痕一行已写", os.path.exists(os.path.join(RDIR, bench.PREFILL_LEDGER_AUDIT)))
+        check("面板已重渲（活表剩一行）",
+              pg.locator("#blPanel .pl-tbl").first.locator("tbody tr").count() == 1)
+        check("反馈写在抽屉自己的底栏（遮罩外的主面板状态灯用户看不见）",
+              "已删除" in js("() => document.getElementById('blMsg').textContent")
+              and "已删除" not in js("() => document.getElementById('statusText').textContent"))
 
-        print("\n[4] 删整张表 + 退出")
+        print("\n[4] 删整张表 + Escape 关抽屉")
         js("() => document.querySelector('[data-pl-del][data-key^=\"%s\"]').click()" % bogus)
         pg.wait_for_timeout(300)
         check("删整张表是危险确认（红字按钮）",
-              js("() => !document.getElementById('uiDialogRoot').hidden"))
+              js("() => !document.getElementById('uiDialogRoot').hidden"
+                 " && /删除/.test(document.getElementById('uiDialogOk').className"
+                 "  + document.getElementById('uiDialogOk').textContent)"))
         js("() => document.getElementById('uiDialogOk').click()")
         pg.wait_for_timeout(900)
         left = json.load(open(path, encoding="utf-8"))
         check("陈旧表整张消失", all(bogus not in k for k in left), str(list(left)))
-        js("() => document.getElementById('hdPriorExit2').click()")
-        pg.wait_for_timeout(300)
-        check("退出后面板收起、列表回来",
-              js("() => document.getElementById('hdPrior').hidden"
-                 " && !document.getElementById('hdList').hidden"))
+        js("() => document.getElementById('blReload').focus()")
+        pg.keyboard.press("Escape")
+        pg.wait_for_timeout(450)
+        check("Escape 关掉抽屉、焦点还给顶栏按钮",
+              js("() => document.getElementById('baseDrawerRoot').hidden"
+                 " && document.activeElement.id === 'btnTopSet'"))
 
         print("\n[5] 真实仓库 results/ 零污染 + 无 JS 错误")
         check("文件集合与 size 全等", snap(REAL) == BEFORE, f"{len(BEFORE)} 个存档")
