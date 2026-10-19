@@ -739,6 +739,8 @@ input[type=checkbox]:disabled,input[type=radio]:disabled{opacity:.45; cursor:not
   padding:10px 12px; display:flex; flex-direction:column; gap:8px}
 .pl-head{display:flex; align-items:center; gap:8px; flex-wrap:wrap}
 .pl-head b{font-size:var(--fs-md)}
+.pl-gw{color:var(--ink-4); font:600 var(--fs-micro)/1 var(--mono);
+  border:1px solid var(--border-2); border-radius:4px; padding:2px 5px; flex:none}
 .pl-dep{color:var(--ink-4); font-size:var(--fs-micro); min-width:0; overflow-wrap:anywhere}
 .pl-badge{flex:none; font-size:var(--fs-micro); padding:2px 8px;
   border-radius:var(--r-pill); border:1px solid var(--border)}
@@ -9050,7 +9052,16 @@ function plHTML(d){
   const cur = d.current || {};
   const busy = d.busy ? `<div class="pl-note">⚠ 有测速正在运行：它收口时会把内存里的表
     盖回来，此刻删不掉（要删请先停止或等它跑完）。</div>` : "";
-  return busy + (d.tables || []).map(t => {
+  /* 盘上有、引擎不用的表（旧口径键：没有网关段 = 身份不全）：装载时被跳过，
+     闷着不报就等于“我明明存了东西，界面却说没有”。只给整表删（按档/按场景
+     删都要先猜归属）。 */
+  const stale = (d.stale_keys || []).length ? `<div class="pl-note">有 ${d.stale_keys.length}
+    张**旧口径遗留表**没被采用（键里没有网关段，采纳就是猜它属于哪台部署）：
+    ${(d.stale_keys || []).map(k => `<div class="pl-stale"><span class="pl-dep">${esc(k)}</span>
+      <button type="button" class="btn-ghost nav-btn" data-pl-del data-stale="1"
+        data-key="${esc(k)}" title="这张表本来也不参与预估">删掉它</button></div>`).join("")}
+    </div>` : "";
+  return busy + stale + (d.tables || []).map(t => {
     const use = cur[t.key]
       ? `<span class="pl-badge on" title="本次测速会读这张表">这次会用上 · ${esc(cur[t.key])}</span>`
       : `<span class="pl-badge off" title="当前配置里没有与它完全一致的部署登记：播种不会读它
@@ -9075,7 +9086,9 @@ function plHTML(d){
                data-scen="${esc(s.scenario)}" data-ctx="${a.ctx}"
                title="删这一档" aria-label="删 ${fmtK(a.ctx)} 这一档">✕</button></td></tr>`).join("")}
         </tbody></table>`).join("");
-    return `<div class="pl-tbl"><div class="pl-head"><b>${esc(t.model)}</b>${use}${legacy}
+    return `<div class="pl-tbl"><div class="pl-head"><span class="pl-gw"
+        title="基线指纹的网关段（provider 内部名，ADR-0143）">${esc(t.gateway || "?")}</span>
+      <b>${esc(t.model)}</b>${use}${legacy}
       <button type="button" class="btn-ghost nav-btn" data-pl-del data-key="${esc(t.key)}"
               title="删掉这张表的全部锚点（换后端后重置用）">删整张表</button></div>
       <div class="pl-head"><span class="pl-dep">${esc(t.deployment)}</span>${when}${runs}</div>
@@ -9089,7 +9102,8 @@ async function plDel(ds){
     blMsg("有测速正在运行，先等它跑完再改基线", true); return;
   }
   const what = ctx ? `这一档（${fmtK(ctx)} tokens）的先验锚点`
-            : (scen ? `「${scen}」场景的先验` : "这张表的全部先验锚点");
+            : (ds.stale ? "这张旧口径遗留表"
+              : (scen ? `「${scen}」场景的先验` : "这张表的全部先验锚点"));
   if(!await uiDialog({title:`删除${what}？`, danger: !ctx, okText:"删除",
     body:"删除不可恢复（会自动留一份备份，最近 5 份）。少了锚点，下一轮这一档的先验"
        + "退回用别的档外推，等待期读数可能偏保守——这比留一条错读数骗人好。"})) return;
