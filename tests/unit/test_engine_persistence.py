@@ -750,8 +750,8 @@ class TestPrefillRateLedger(unittest.TestCase):
         self.assertFalse(bench._prefill_prior_covered([(2099.0, 980.0)], 260608))
         self.assertTrue(bench._prefill_prior_covered(seed, 260608))
 
-    def test_fingerprint_separates_deployments(self):
-        """速率是部署属性：换量化/换网关/换模型都必须换表（合错表比没表更坏）。"""
+    def test_fingerprint_ignores_gateway_but_keeps_deployment_split(self):
+        """换网关不换表（同一部署两个入口，ADR-0139）；换量化/换模型/换上限必须换表。"""
         base = {"model_info": {"m": {"deploy_label": "d1", "quant": "nvfp4"}},
                 "model_max_ctx": {"m": 262144}, "gateway_url": "http://h:1"}
         k0 = bench._prefill_fingerprint("m", base)
@@ -760,8 +760,88 @@ class TestPrefillRateLedger(unittest.TestCase):
                                               "quant": "iq3_xxs"}}})
         k2 = bench._prefill_fingerprint("m", {**base, "gateway_url": "http://other:1"})
         k3 = bench._prefill_fingerprint("m2", base)
-        self.assertEqual(len({k0, k1, k2, k3}), 4, "量化/网关/模型变化必须换表")
+        self.assertEqual(k0, k2, "网关地址不进键：LAN/wg0 两个入口是一张表")
+        self.assertEqual(len({k0, k1, k3}), 3, "量化/模型变化必须换表")
+        self.assertNotIn("://", k0, "键里不得残留地址")
         self.assertEqual(k0, bench._prefill_fingerprint("m", dict(base)))
+
+    def test_load_merges_legacy_gateway_keys(self):
+        """旧台账（键带网关尾缀，ADR-0134）装载即归一：同一部署的两个入口合一张表，
+        同档受写侧上限约束（留最近几条，播种取中位数）。"""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, bench.PREFILL_LEDGER_FILE)
+            dep = "m|d1|nvfp4|ctx262144"
+            bench._ledger_save(path, {
+                f"{dep}|http://10.0.0.3:13080": {"code": [[65000.0, 1200.0, now - 5]]},
+                f"{dep}|http://192.168.124.18:13080": {
+                    "code": [[65050.0, 900.0, now - 3], [131000.0, 800.0, now - 2]]}})
+            led = bench._prefill_ledger_load(path)
+            self.assertEqual(list(led), [dep], "尾缀剥掉、两张入口表合成一张")
+            self.assertEqual(len(led[dep]["code"]), 3)
+            seed = bench._prefill_ledger_seed(led[dep]["code"])
+            self.assertEqual(len(seed), 2, "65000/65050 同档并成一档")
+            self.assertAlmostEqual(seed[0][1], 1050.0, msg="同档取中位数")
+
+    def test_seed_borrows_no_other_deployment_table(self):
+        """读侧只查本轮完整指纹那一张表：同名别的别的部署不得被借来当先验（本次
+        256K 显示 2523 / 实测 701 的病根），但要说一句“为什么没用先验”。"""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = {"models": ["m"], "scenarios": ["code"],
+                   "model_info": {"m": {"deploy_label": "mine"}},
+                   "model_max_ctx": {"m": 262144}}
+            run = BenchRun(cfg, results_dir=td)
+            run.prefill_ledger = {"m|other|ctx262144": {
+                "code": [[65000.0, 9000.0, time.time()]]}}
+            msgs = run._seed_prefill_curves()
+            self.assertEqual(run.prefill_curve, {}, "别的部署的表不得播种")
+            self.assertTrue(any("本部署登记" in x for x in msgs),
+                            "有同名别的表却没用上，得告诉用户为什么")
+            same = BenchRun(cfg, results_dir=td)
+            same.prefill_ledger = {"m|mine|ctx262144": {
+                "code": [[65000.0, 900.0, time.time()]]}}
+            msgs2 = same._seed_prefill_curves()
+            self.assertEqual(len(same.prefill_curve[("m", "code")]), 1, "本部署的表照常用")
+            self.assertTrue(msgs2 and "本部署登记" in msgs2[0])
+
+    def test_measured_point_evicts_same_bucket_seed(self):
+        """本轮实测必须盖过同档历史（旧口径只 ctx 完全相等才盖，130302 与 132525
+        并存取均值 → 本轮 701 被旧点抬成 790）。"""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = {"models": ["m"], "scenarios": ["code"],
+                   "model_info": {"m": {"deploy_label": "mine"}},
+                   "model_max_ctx": {"m": 262144}}
+            run = BenchRun(cfg, results_dir=td)
+            run.prefill_ledger = {"m|mine|ctx262144": {"code": [
+                [62707.0, 1200.0, time.time()], [132525.0, 900.0, time.time()]]}}
+            run._seed_prefill_curves()
+            run._note_prefill_rate(("m", "code"), 130302.0, 701.0)   # 本轮实测
+            self.assertEqual(run.prefill_curve[("m", "code")],
+                             [(62707.0, 1200.0), (130302.0, 701.0)],
+                             "同档播种锚点被本轮点顶替，不同档的保留")
+            self.assertAlmostEqual(bench.rate_prior(
+                run.prefill_curve[("m", "code")], 131072), 701.0, delta=40)
+
+    def test_backfill_shape_gate_blocks_the_2026_10_10_spike(self):
+        """回填脚本的形状闸：同运行低档外推 1.5× 以上的孤峰不得入台账。
+        污染源就是 2026-10-10 那跑（网关静默 fallback）的 204528→2259.7（同部署
+        后测真值 490）；引擎的 `_prior_suspect` 拦不到它（那点的 `cache_hit=0`
+        且正常回传，c=0 按设计不判）。"""
+        import importlib.util
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        spec = importlib.util.spec_from_file_location(
+            "import_prefill_ledger",
+            os.path.join(root, "scripts", "import_prefill_ledger.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        low = [(4103.0, 1614.3), (8103.0, 1653.4), (16099.0, 1547.5),
+               (32622.0, 1376.3), (62707.0, 1172.0), (132525.0, 879.9)]
+        self.assertTrue(mod._shape_suspect(low, 204528.0, 2259.7),
+                        "256K 虚高 3.2× 必须拦（它就是本次 2500+ 的污染源）")
+        self.assertFalse(mod._shape_suspect(low, 204528.0, 700.0),
+                         "与低档外推同量级的高档点不得误伤")
+        self.assertFalse(mod._shape_suspect(low[:1], 204528.0, 9999.0),
+                         "低档不够两条不外推，不判")
 
     def test_note_caps_bucket_and_total(self):
         now = 1_800_000_000.0
@@ -825,6 +905,6 @@ class TestPrefillRateLedger(unittest.TestCase):
             self.assertNotIn(("m", "code"), other.prefill_curve)
             # 无 results_dir（内嵌调用）：不写不炸
             bare = BenchRun(cfg)
-            bare.prefill_ledger = {"m|x": {"code": [[65000.0, 3400.0, time.time()]]}}
+            bare.prefill_ledger = {"m": {"code": [[65000.0, 3400.0, time.time()]]}}
             self.assertEqual(len(bare._seed_prefill_curves()), 1)
             bare._save_prefill_ledger()

@@ -1416,7 +1416,11 @@ PREFILL_LEDGER_BUCKET_LOG2 = 0.05           # 同档判据（≈3.5%），与 ra
 
 
 def _prefill_fingerprint(model: str, cfg: dict) -> str:
-    """速率先验的归户键：模型 + 部署快照 + 上限 + 网关。
+    """速率先验的归户键：模型 + 部署快照 + 上限。**网关地址不进键**（ADR-0139 修订
+    ADR-0134 决策 2）：一套部署常配两个入口（`gateway_urls` 取首个可达，ADR-0002），
+    把「本轮选中的那个地址」算进身份位会把同一套部署劈成两张表，两张都长不到高档
+    （本机 `Qwen3.8-27B` 就因此一张末位 204528、另一张 205733）。代价明写：丢掉
+    「别名不变而上游偷换后端」这一层保护，改由「本轮实测 vs 历史基线」的行为判据兜。
 
     prefill 速率是**部署属性**（量化、KV 量化、推理框架、硬件、窗口大小都改变它），
     模型名相同不代表速率相同。字段缺失就不进键——宁可多建一张表也不与旧部署合表：
@@ -1430,10 +1434,32 @@ def _prefill_fingerprint(model: str, cfg: dict) -> str:
     mc = (cfg.get("model_max_ctx") or {}).get(model)
     if isinstance(mc, (int, float)) and not isinstance(mc, bool) and mc > 0:
         parts.append(f"ctx{int(mc)}")
-    gw = cfg.get("gateway_url")
-    if isinstance(gw, str) and gw:
-        parts.append(gw[:100])
     return "|".join(parts)
+
+
+def _prefill_key_no_gateway(key: str) -> str:
+    """旧台账键（ADR-0134 带网关尾缀）→ 新键：剥掉含 `://` 的那一段。
+
+    放在装载侧做，就是自愈式迁移：旧文件照读，下一次保存磁盘上已是新键，不需要
+    停机脚本。剥完为空则保留原键（真发生不了：首段总是模型名）。"""
+    parts = [p for p in key.split("|") if "://" not in p]
+    return "|".join(parts) or key
+
+
+def _prefill_bucket_trim(rows: list, per_bucket: int = PREFILL_LEDGER_PER_BUCKET) -> list:
+    """同档（log2 差 <阈值）最多留最近 `per_bucket` 条。写侧本来就有这道上限，装载侧
+    补齐是因为旧键归一会把多入口的两张表合到一起，同档可能堆出六条。"""
+    groups: list[list] = []
+    for e in sorted(rows, key=lambda e: float(e[0])):
+        if groups and (math.log2(float(e[0])) - math.log2(float(groups[-1][0][0]))
+                       < PREFILL_LEDGER_BUCKET_LOG2):
+            groups[-1].append(e)
+        else:
+            groups.append([e])
+    out: list = []
+    for g in groups:
+        out.extend(sorted(g, key=lambda e: float(e[2]))[-per_bucket:])
+    return out
 
 
 def _prefill_ledger_load(path: str | None) -> dict:
@@ -1470,8 +1496,14 @@ def _prefill_ledger_load(path: str | None) -> dict:
                 rows.sort(key=lambda e: e[2])
                 if rows:
                     kept[scen] = rows[-PREFILL_LEDGER_MAX_POINTS:]
+            nk = _prefill_key_no_gateway(k)     # 旧键归一（ADR-0139）：多入口合一张
             if kept:
-                out[k] = kept
+                dst = out.setdefault(nk, {})
+                for scen, rows in kept.items():
+                    dst.setdefault(scen, []).extend(rows)
+        for subs in out.values():
+            for scen in subs:
+                subs[scen] = _prefill_bucket_trim(subs[scen])
         return out
     except Exception:   # noqa: BLE001
         return {}
@@ -2895,6 +2927,9 @@ class BenchRun:
         # 只剩探测点一个锚点（2026-10-17 真机：复测 256K 等待期显示 1100+、实
         # 际 3700，因为先验就是探测档那 ~1000 tok/s），见 ADR-0134
         self.prefill_ledger: dict[str, dict[str, list]] = {}
+        # 本轮从台账播种进来的锚点快照（ADR-0139）：实测点落地时靠它识别“哪些
+        # 是历史锚点”并剔掉同档那几条，行为判据将来也要拿它与本轮点比对
+        self._prior_seeded: dict[tuple[str, str], list[tuple[float, float]]] = {}
         self._prefill_ledger_dirty = False
         self._prefill_path = (os.path.join(results_dir, PREFILL_LEDGER_FILE)
                               if results_dir else None)
@@ -2915,7 +2950,22 @@ class BenchRun:
         self.prefix_locked = mode in ("v1", "none", "")
 
     def _note_prefill_rate(self, key: tuple[str, str], ctx: float, rate: float):
-        """登记一个实测 prefill 速率点到曲线（保持 ctx 升序、同 ctx 覆盖）。"""
+        """登记一个实测 prefill 速率点到曲线（保持 ctx 升序、同 ctx 覆盖）。
+
+        实测点落地时**剔掉同档的播种锚点**（ADR-0139）：播种时那句「本轮实测会盖过
+        它」过去只在 ctx 完全相等时成立（本轮 130302 与台账 132525 不等 → 两点并存，
+        读取侧 `_rate_groups` 取均值，本轮 701 反被旧点抬成 790）。本轮自己的近重复
+        点不动——多轮复测同档取均值是 ADR-0133 要的性质。"""
+        seeded = self._prior_seeded.get(key)
+        if seeded:
+            far = [s for s in seeded
+                   if abs(math.log2(float(s[0])) - math.log2(float(ctx)))
+                   >= RATE_PRIOR_MERGE_LOG2]
+            if len(far) != len(seeded):
+                gone = {tuple(s) for s in seeded} - {tuple(s) for s in far}
+                pts0 = self.prefill_curve.get(key) or []
+                self.prefill_curve[key] = [p for p in pts0 if tuple(p) not in gone]
+                self._prior_seeded[key] = far
         pts = self.prefill_curve.setdefault(key, [])
         i = bisect.bisect_left([c for c, _ in pts], ctx)
         if i < len(pts) and pts[i][0] == ctx:
@@ -3059,32 +3109,48 @@ class BenchRun:
     def _seed_prefill_curves(self) -> list[str]:
         """用台账锚点播种本次运行的先验曲线（在第一个点登记之前调用）。
 
-        历史锚点只在「这一档本轮还没测出来」时起作用：本轮实测点经
-        `_note_prefill_rate` 同 ctx 覆盖、近重复点在 `rate_prior` 读取侧并组，所以
-        本轮数据永远压过历史。返回逐 (模型, 场景) 的播种播报（无台账则空）。"""
+        **只查本轮完整指纹那一张表**（ADR-0139 决策 2）：写侧按部署指纹归户，读
+        侧过去只按模型名前缀扫全表，谁先命中用谁，且 `if cur: continue` 会把本部署
+        那张直接跳过——同名别的另一套部署会被借来当先验（2026-10-19 真机：本轮实测
+        701，借来的表估出 2523）。对不上就当无台账（走 `weak` 保守值），不借表。
+
+        历史锚点只在「这一档本轮还没测出来」时起作用：本轮实测点经 `_note_prefill_rate`
+        剔同档播种锚点、近重复点在 `rate_prior` 读取侧并组，所以本轮数据真的压过历史。
+        返回逐 (模型, 场景) 的播种播报（无台账则空）。"""
         msgs: list[str] = []
         want_models = set(self.cfg.get("models") or [])
         want_scens = set(self.cfg.get("scenarios") or [])
-        for key, subs in (self.prefill_ledger or {}).items():
-            model = key.split("|", 1)[0]
-            if want_models and model not in want_models:
-                continue   # 台账里可能有别的模型：不播种也不播报，免得报鬼账
+        ledger = self.prefill_ledger or {}
+        models = sorted(want_models) or sorted({k.split("|", 1)[0] for k in ledger})
+        for model in models:
+            subs = ledger.get(_prefill_fingerprint(model, self.cfg)) or {}
             for scenario, pts in subs.items():
                 if want_scens and scenario not in want_scens:
                     continue
                 seed = _prefill_ledger_seed(pts)
                 if not seed:
                     continue
-                cur = self.prefill_curve.get((model, scenario)) or []
-                if cur:   # 本轮已登记过（不经探测的路径先登了）：不回头污染
-                    continue
+                key = (model, scenario)
+                if self.prefill_curve.get(key):
+                    continue   # 本轮已登记过（不经探测的路径先登了）：不回头污染
                 for ctx, rate in seed:
-                    self._note_prefill_rate((model, scenario), ctx, rate)
+                    self._note_prefill_rate(key, ctx, rate)
+                self._prior_seeded[key] = list(seed)
+                stamp = max((float(e[2]) for e in pts
+                             if isinstance(e, (list, tuple)) and len(e) == 3), default=0.0)
+                age = f"，{int((time.time() - stamp) / 86400)} 天前登记" if stamp else ""
                 msgs.append(
                     f"{model} / {SCENARIOS.get(scenario, {}).get('label', scenario)} "
-                    f"prefill 先验：已从历史台账播种 {len(seed)} 档（"
+                    f"prefill 先验：已按本部署登记播种 {len(seed)} 档（"
                     f"{int(seed[0][0])}→{int(seed[-1][0])} tokens，最新锚点 "
-                    f"{int(seed[-1][0])}）；本轮实测同档点会盖过它")
+                    f"{int(seed[-1][0])}{age}）；本轮实测同档点会盖过它")
+            if not subs and any(k.split("|", 1)[0] == model for k in ledger):
+                # 有同名别的表、但没有一张与本部署当前登记一致：不拦测，但得说一句
+                # “为什么没用先验”，否则用户只看到数字不准（ADR-0139）
+                msgs.append(
+                    f"{model} prefill 先验：台账里有同名别的表，但没有一条与本部署"
+                    f"登记完全一致——本轮不用历史基线（新部署，或部署字段未更新/"
+                    f"未填全），只用本轮实测外推")
         return msgs
 
     def _prefill_note(self, model: str, scenario: str, sample: tuple[float, float]):

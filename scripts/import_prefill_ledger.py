@@ -56,12 +56,32 @@ def _points_of(run: dict) -> list[tuple[str, str, float, float, float]]:
     return out
 
 
-def _adopt(model: str, table: dict) -> int:
-    """把 `模型|网关`（无部署字段）的旧键并入当前 config.json 解析出的部署指纹。
+def _shape_suspect(curve: list[tuple[float, float]], x: float,
+                   rate: float, ratio: float = 1.5) -> bool:
+    """回填专用的**形状闸**：拿同一次运行已收下的低档点外推到本档，读数超
+    `ratio` 倍就不回填。与引擎的 `_prior_suspect` 不同且**不可互相代替**：那道闸只
+    管「漏判的缓存命中」（`cache_hit > 0` 且未回传才判），而 2026-10-10 那条把
+    256K 估成 2259.7 tok/s（真值同轮后测 490）的点 `cache_hit=0` 且正常回传，
+    c=0 按设计不判——它是网关静默 fallback 到更快的后端，不是缓存。
 
-    旧档案跑在用户填写 deploy_label/quant/硬件之前，指纹天然退化；而引擎现在按
-    完整指纹查表，不折叠就播种不上。折叠是**显式 opt-in**（--adopt-model），因为
-    它等于宣称「那些 run 就是现在这套部署」——合错表比没表更坏。"""
+    回填是离线一次性动作，宁可漏收一条真读数（少一个锚点，外推照样跑）也不
+    把孤峰固化成基线；prefill 速率随上下文只会趋平或下降，低档外推之上的尖尖
+    几乎总是事故（引擎实时路径不加这道闸，改由 ADR-0139 决策 3 的「不采纳 +
+    提示」处理，不静默丢数据）。"""
+    if len(curve) < 2 or x <= curve[-1][0]:
+        return False      # 低档不够或不是往高档外推：不判
+    prior = bench.rate_prior(curve, x)
+    return bool(prior) and rate > ratio * prior
+
+
+def _adopt(model: str, table: dict) -> int:
+    """把**没有部署字段**的旧键（旧档案跑在用户填 deploy_label/quant/硬件之前，
+    键就退化成光一条模型名，旧形式是「模型|网关」）并入当前 config.json 解析出的
+    部署指纹。
+
+    折叠是**显式 opt-in**（--adopt-model），因为它等于宣称「那些 run 就是现在这套
+    部署」——合错表比没表更坏。ADR-0139 后网关不再进键，装载侧也已剥掉旧键的
+    地址尾缀，所以这里只认光板键 `model`，provider 靠“谁能解出该模型的部署字段”找。"""
     try:
         import server   # noqa: PLC0415  只有 --adopt-model 才需要读配置
         providers = server.load_providers()
@@ -69,12 +89,13 @@ def _adopt(model: str, table: dict) -> int:
         print(f"  跳过 {model}：读 config.json 失败（{e}）")
         return 0
     moved = 0
-    for key in [k for k in table if k.startswith(model + "|") and k.count("|") == 1]:
-        gw = key.split("|", 1)[1]
+    for key in [k for k in table if k == model]:
         prov = next((p for p in providers
-                     if gw in (p.get("gateway_urls") or [])), None)
+                     if any((info or {}).values()
+                            for info in (server.match_deployments(p, [model]) or {}).values())),
+                    None)
         if prov is None:
-            print(f"  跳过 {key}：config.json 里没有网关 {gw} 的 provider")
+            print(f"  跳过 {key}：config.json 里没有能解出该模型部署字段的 provider")
             continue
         info = server.match_deployments(prov, [model]) or {}
         if not any((info.get(model) or {}).values()):
@@ -83,8 +104,7 @@ def _adopt(model: str, table: dict) -> int:
         new_key = bench._prefill_fingerprint(model, {
             "model_info": info,
             "model_max_ctx": {m: v["max_ctx"] for m, v in info.items()
-                              if v.get("max_ctx")},
-            "gateway_url": gw})
+                              if v.get("max_ctx")}})
         if new_key == key:
             continue
         for scen, rows in table[key].items():
@@ -109,6 +129,7 @@ def main() -> int:
     table = bench._prefill_ledger_load(path)
     runs = 0
     added: list[str] = []
+    rejected: list[str] = []
     for f in sorted(glob.glob(os.path.join(args.results_dir, "*.json"))):
         try:
             with open(f, encoding="utf-8") as fh:
@@ -120,7 +141,10 @@ def main() -> int:
         if not pts:
             continue
         runs += 1
-        for model, scenario, x, rate, ts in pts:
+        # 形状闸的曲线按 (模型, 场景) 各自维护，且必顺 ctx 升序走（低档先入曲线，
+        # 高档才有得外推）；存档本身的顺序不保证（复测/拼接档会乱）
+        curve: dict[tuple[str, str], list[tuple[float, float]]] = {}
+        for model, scenario, x, rate, ts in sorted(pts, key=lambda e: e[:3]):
             key = bench._prefill_fingerprint(model, cfg)
             have = bench._prefill_ledger_seed(
                 (table.get(key) or {}).get(scenario) or [])
@@ -128,7 +152,14 @@ def main() -> int:
                       < bench.PREFILL_LEDGER_BUCKET_LOG2 for c, _ in have)
             if dup and not args.force:
                 continue
+            cur = sorted(curve.setdefault((model, scenario), []), key=lambda e: e[0])
+            if _shape_suspect(cur, x, rate):
+                rejected.append(f"  {model} / {scenario} @{int(x)} tokens → {rate:.0f} tok/s"
+                                f"  ({os.path.basename(f)}，超同运行低档外推 1.5×，"
+                                f"形状闸拦下：疑似网关 fallback/跳后端)")
+                continue
             bench._prefill_ledger_note(table, key, scenario, x, rate, ts)
+            curve[(model, scenario)] = cur + [(float(x), float(rate))]
             added.append(f"  {model} / {scenario} @{int(x)} tokens → {rate:.0f} tok/s"
                          f"  ({os.path.basename(f)}, {'覆盖' if dup else '新增'})")
     print(f"扫描 {args.results_dir}/*.json：{runs} 次运行产出先验点，"
@@ -137,6 +168,10 @@ def main() -> int:
         print(line)
     if len(added) > 40:
         print(f"  …另有 {len(added) - 40} 条")
+    if rejected:
+        print(f"形状闸拦下 {len(rejected)} 条（不进台账）：")
+        for line in rejected[:20]:
+            print(line)
     for key, subs in sorted(table.items()):
         for scenario, rows in sorted(subs.items()):
             seed = bench._prefill_ledger_seed(rows)
