@@ -728,6 +728,29 @@ input[type=checkbox]:disabled,input[type=radio]:disabled{opacity:.45; cursor:not
 .hd-warn[hidden]{display:none}
 .hd-list{flex:1; overflow-y:auto; padding:10px 14px; overscroll-behavior:contain;
   display:flex; flex-direction:column; gap:6px; align-content:flex-start}
+/* 速率先验基线面板（先验台账的体检视图 + 删锚点，ADR-0140）：抽屉就地换模式，
+   列表与披露行隐掉、面板接管主栏（与拼接模式同一手法） */
+.hd-prior{flex:1; overflow-y:auto; padding:12px 14px; overscroll-behavior:contain;
+  display:flex; flex-direction:column; gap:12px}
+.pl-tbl{border:1px solid var(--border); border-radius:var(--r-md); background:var(--card);
+  padding:10px 12px; display:flex; flex-direction:column; gap:8px}
+.pl-head{display:flex; align-items:center; gap:8px; flex-wrap:wrap}
+.pl-head b{font-size:var(--fs-md)}
+.pl-dep{color:var(--ink-4); font-size:var(--fs-micro); min-width:0; overflow-wrap:anywhere}
+.pl-badge{flex:none; font-size:var(--fs-micro); padding:2px 8px;
+  border-radius:var(--r-pill); border:1px solid var(--border)}
+.pl-badge.on{background:var(--green-soft); color:var(--green); border-color:var(--green-border)}
+.pl-badge.off{background:var(--hover); color:var(--ink-4)}
+.pl-when{margin-left:auto; flex:none; color:var(--ink-4); font-size:var(--fs-micro)}
+.pl-scen{color:var(--ink-3); font-size:var(--fs-micro)}
+.pl-chips{display:flex; flex-wrap:wrap; gap:6px}
+.pl-chip{display:inline-flex; align-items:center; gap:4px; padding:3px 4px 3px 8px;
+  border:1px solid var(--border-2); border-radius:var(--r-pill); background:var(--bg);
+  font-size:var(--fs-micro); font-variant-numeric:tabular-nums; color:var(--ink-2)}
+.pl-chip button{width:18px; height:18px; padding:0; border:0; border-radius:var(--r-pill);
+  background:none; color:var(--ink-4); cursor:pointer; line-height:1}
+.pl-chip button:hover{background:var(--red-soft); color:var(--red)}
+.pl-note{color:var(--ink-3); font-size:var(--fs-sm); line-height:1.7}
 /* 「全部」视图里的组节头：组名是折叠开关（点 = 收/展本组记录，纯展示态不切过滤），左侧整组勾选照旧 */
 .hd-sec-t{display:flex; align-items:center; gap:8px; padding:8px 4px 2px; color:var(--ink-3);
   font-size:var(--fs-micro); font-weight:600; letter-spacing:.02em}
@@ -1947,6 +1970,8 @@ tr.fade td{opacity:.45}
                   title="勾选 ≥2 个组并成一个（可自定义目标组名）">合并组</button>
           <button type="button" class="btn-ghost nav-btn" onclick="hdAutoGroup()"
                   title="把未归组的记录按各自的模型集合一次落组">自动建组（模型名）</button>
+          <button type="button" class="btn-ghost nav-btn" id="hdPriorBtn" onclick="hdPriorEnter()"
+                  title="看 / 删等待期「预估」用的历史基线（跳运行台账）">速率先验基线</button>
         </div>
       </nav>
       <div class="hd-main">
@@ -1963,6 +1988,7 @@ tr.fade td{opacity:.45}
         <div class="hd-disc" id="hdDisc"></div>
         <div class="hd-warn" id="hdWarn" hidden></div>
         <div class="hd-list" id="hdList"></div>
+        <div class="hd-prior" id="hdPrior" hidden></div>
       </div>
     </div>
     <footer class="dr-foot hd-foot" id="hdFoot"></footer>
@@ -8124,6 +8150,12 @@ function closeHistDrawer(){
   const root = $("#histDrawerRoot");
   if(root.hidden) return;
   hdRowUnpick.clear();           // 关抽屉时未兑现的待取消全部作废（抽屉已关，不该背后改选集）
+  if(hdMode === "prior"){         // 基线面板不留到下次开抽屉：那里的数据可能已过期
+    hdMode = "browse"; priorCache = null;
+    $("#hdModeBar").hidden = true; $("#hdPrior").hidden = true;
+    $("#hdPrior").innerHTML = ""; $("#hdList").hidden = false;
+    $("#hdDisc").hidden = false;
+  }
   hdMenuClose();
   root.classList.remove("open");
   unlockScroll();
@@ -8139,6 +8171,7 @@ function onHistDrawerKey(e){
   if(e.key === "Escape"){
     if(!$("#hdMenu").hidden){ hdMenuClose(); return; }          // 菜单开着先收菜单
     if(hdMode === "splice"){ hdSpliceExit(); return; }          // 拼接模式先退回浏览
+    if(hdMode === "prior"){ hdPriorExit(); return; }            // 基线面板同理
     closeHistDrawer(); return;
   }
   wrapTabWithin($("#histDrawer"), e);   // 焦点圈定在抽屉内（共享实现）
@@ -8481,6 +8514,7 @@ function hdToggleSection(key){
   hdRenderList();
 }
 function hdPickBucket(key){
+  if(hdMode === "prior") hdPriorExit();      // 基线面板占着主栏，点组先退回浏览
   hdBucket = key;
   hdSearched = null;                        // 切桶清搜索（旧台账同口径）
   const box = $("#hdSearch"); if(box) box.value = "";
@@ -8853,6 +8887,105 @@ function hdSpliceExit(){
   hdMode = "browse"; hdSpliceTarget = ""; hdSpliceSrc = "";
   $("#hdModeBar").hidden = true;
   hdRenderAll();
+}
+/* ---------------- 速率先验基线模式（先验台账的体检与清理，ADR-0140） ----------------
+   先验决定等待期「预估」读数的平台值：它错了会一路骗到屏幕上（2026-10-19 真机：
+   脏锚点把 256K 估成 2523、实测 490），而它此前没有任何界面——想剔一条脏
+   锚点只能手改 JSON。这里只做两件事：看得到（谁的表、哪几档、多少天前、这次
+   会不会被用上）与删得掉（单档 / 整张表）。 */
+let priorCache = null;
+async function hdPriorEnter(){
+  hdMode = "prior";
+  $("#hdModeBar").innerHTML = `<span style="min-width:0">速率先验基线：这些是等待期「预估」
+    用的历史读数——<b>只有与当前部署登记完全一致的表才会被用上</b>；错读数可直接删</span>
+    <button type="button" class="btn-ghost" id="hdPriorReload" title="重新读台账">刷新</button>
+    <button type="button" class="btn-ghost" id="hdPriorExit2">退出</button>`;
+  $("#hdModeBar").hidden = false;
+  $("#hdModeBar #hdPriorExit2").onclick = hdPriorExit;
+  $("#hdModeBar #hdPriorReload").onclick = hdPriorEnter;
+  $("#hdList").hidden = true;
+  $("#hdDisc").hidden = true;
+  $("#hdPrior").hidden = false;
+  await hdPriorRender();
+}
+function hdPriorExit(){
+  hdMode = "browse"; priorCache = null;
+  $("#hdModeBar").hidden = true;
+  const box = $("#hdPrior");
+  box.hidden = true; box.innerHTML = "";
+  $("#hdList").hidden = false;
+  $("#hdDisc").hidden = false;
+  hdRenderAll();
+}
+function plAge(d){
+  if(d === null || d === undefined) return "时间未知";
+  return d < 1 ? "今天" : (d < 2 ? "1 天前" : `${Math.round(d)} 天前`);
+}
+async function hdPriorRender(){
+  const box = $("#hdPrior");
+  box.innerHTML = `<div class="pl-note">读取中…</div>`;
+  let d;
+  try{
+    const r = await fetch("/api/prefill-ledger");
+    d = await r.json().catch(() => ({}));
+    if(!r.ok){ box.innerHTML = `<div class="pl-note">读取失败：${esc(d.detail || r.status)}</div>`; return; }
+  }catch(e){ box.innerHTML = `<div class="pl-note">读取失败：${esc(e.message)}</div>`; return; }
+  priorCache = d;
+  box.innerHTML = plHTML(d);
+  box.querySelectorAll("[data-pl-del]").forEach(b => { b.onclick = () => plDel(b.dataset); });
+}
+function plHTML(d){
+  if(d.empty) return `<div class="pl-note">还没有先验台账：这台部署以没跑过完整测速，
+    或跑过但那些点不够格入表（只收并发 1、usage 真值、无超窗删减/异常输出的点）。
+    没台账时等待期只用本轮已测过的档外推，长档会偏保守。</div>`;
+  const cur = d.current || {};
+  const busy = d.busy ? `<div class="pl-note">⚠ 有测速正在运行：它收口时会把内存里的表
+    盖回来，此刻删不掉（要删请先停止或等它跑完）。</div>` : "";
+  return busy + (d.tables || []).map(t => {
+    const use = cur[t.key]
+      ? `<span class="pl-badge on" title="本次测速会读这张表">这次会用上 · ${esc(cur[t.key])}</span>`
+      : `<span class="pl-badge off" title="当前配置里没有与它完全一致的部署登记：播种不会读它
+         （新部署，或部署字段改过/没填全）">这次不会用上</span>`;
+    const when = t.age_d === null ? "" : `<span class="pl-when">最近记录 ${plAge(t.age_d)}</span>`;
+    const scens = (t.scenarios || []).map(s =>
+      `<div class="pl-scen">${esc(s.label)}（同档取中位数；条数与天数在悬停里）</div>
+       <div class="pl-chips">${(s.anchors || []).map(a =>
+        `<span class="pl-chip" title="${fmtK(a.ctx)} tokens → ${a.rate} tok/s（${a.n} 条原始读数，${plAge(a.age_d)}）">
+         ${fmtK(a.ctx)} → ${Math.round(a.rate)}
+         <button type="button" data-pl-del data-key="${esc(t.key)}" data-scen="${esc(s.scenario)}"
+                 data-ctx="${a.ctx}" title="删这一档" aria-label="删 ${fmtK(a.ctx)} 这一档">✕</button></span>`
+       ).join("")}</div>`).join("");
+    return `<div class="pl-tbl"><div class="pl-head"><b>${esc(t.model)}</b>${use}
+      <span class="pl-dep">${esc(t.deployment)}</span>${when}
+      <button type="button" class="btn-ghost nav-btn" data-pl-del data-key="${esc(t.key)}"
+              title="删掉这张表的全部锚点（换后端后重置用）">删整张表</button></div>${scens}</div>`;
+  }).join("");
+}
+async function plDel(ds){
+  const key = ds.key || "", scen = ds.scen || "";
+  const ctx = ds.ctx ? Number(ds.ctx) : null;
+  if(priorCache && priorCache.busy){
+    setPill("有测速正在运行，先等它跑完再改基线", "err"); return;
+  }
+  const what = ctx ? `这一档（${fmtK(ctx)} tokens）的先验锚点`
+            : (scen ? `「${scen}」场景的先验` : "这张表的全部先验锚点");
+  if(!await uiDialog({title:`删除${what}？`, danger: !ctx, okText:"删除",
+    body:"删除不可恢复（会自动留一份备份，最近 5 份）。少了锚点，下一轮这一档的先验"
+       + "退回用别的档外推，等待期读数可能偏保守——这比留一条错读数骗人好。"})) return;
+  let d;
+  try{
+    const r = await fetch("/api/prefill-ledger/prune",
+      {method:"POST", headers:{"Content-Type":"application/json"},
+       body:JSON.stringify({key, scenario:scen, ctx})});
+    d = await r.json().catch(() => ({}));
+    if(!r.ok){
+      setPill(d.detail || "删除失败", "err");
+      if(r.status === 409) await hdPriorRender();   // 刚好开了测速：重读会看到锁住提示
+      return;
+    }
+  }catch(e){ setPill("删除请求失败：" + e.message, "err"); return; }
+  setPill(`已删除 ${d.removed} 条先验锚点（备份 ${d.backup}）`, "");
+  await hdPriorRender();
 }
 async function hdSpliceConfirm(){
   const target = hdSpliceTarget, src = hdSpliceSrc;

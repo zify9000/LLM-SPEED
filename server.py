@@ -29,8 +29,10 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from bench import (AGENT_CACHE_RANGE, AGENT_INST_RANGE, AGENT_LADDER_MAX,
                    ANOMALY_TEXT_SUFFIX, ASR_LADDER_RANGE, BenchRun, CTX_HEADROOM,
                    DEFAULT_CONCURRENCIES, DEFAULT_CTX_LIST,
-                   MEDIA_LADDER_MAX, OCR_LADDER_RANGE, SCENARIOS,
-                   TIMEOUT_S_MAX, TTS_LADDER_RANGE, iter_in_text_holders)
+                   MEDIA_LADDER_MAX, OCR_LADDER_RANGE, PREFILL_LEDGER_FILE, SCENARIOS,
+                   TIMEOUT_S_MAX, TTS_LADDER_RANGE, iter_in_text_holders,
+                   prefill_ledger_prune, prefill_ledger_view,
+                   _prefill_fingerprint)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(BASE, "results")
@@ -2529,6 +2531,88 @@ async def bench_history_clear():
 
     removed, sidecars = await asyncio.to_thread(_clear)
     return {"ok": True, "removed": removed, "anomaly_text_removed": sidecars}
+
+
+# ---------------------------------------------------------------------------
+# 速率先验基线（跳运行台账 results/`PREFILL_LEDGER_FILE`）：看得见、删得掉
+# （ADR-0140）。先验直接决定等待期「预估」读数的平台值，错了会一路骗到屏幕上，
+# 而它此前完全隐形（只能手改 JSON 才能剔脏锚点）。数据层在 bench.py（可单测），
+# 这里只做 HTTP 面与守卫。
+# ---------------------------------------------------------------------------
+
+def _prefill_ledger_path() -> str:
+    return os.path.join(RESULTS_DIR, PREFILL_LEDGER_FILE)
+
+
+def _prefill_busy() -> bool:
+    """是否有测速在跑：台账是运行开头装载、收口整张写回，中途改盘会被覆盖。"""
+    return any(r.finished_at is None for r in RUNS.values())
+
+
+def _prefill_current_keys() -> dict[str, str]:
+    """当前 config.json 能解出的部署指纹 →「provider / 模型」。
+
+    面板拿它把每张表标成「这次会被用上」或「不会」：播种只按完整指纹查表，而
+    指纹全靠手填字段——两者对不上时用户只看到“没有先验”，不知道为哪般。"""
+    out: dict[str, str] = {}
+    try:
+        providers = load_providers()
+    except Exception:      # noqa: BLE001  配置读坏了不该让面板打不开
+        return out
+    for p in providers:
+        if not isinstance(p, dict):
+            continue
+        models: list[str] = []
+        for d in (p.get("deployments") or []):
+            if isinstance(d, dict):
+                models += [m for m in (d.get("models") or []) if isinstance(m, str)]
+        for prof in (p.get("model_profiles") or []):
+            if isinstance(prof, dict) and isinstance(prof.get("model"), str):
+                models.append(prof["model"])
+        info = match_deployments(p, sorted(set(models)))
+        max_ctx = {m: v["max_ctx"] for m, v in info.items() if v.get("max_ctx")}
+        for m in info:
+            out[_prefill_fingerprint(m, {"model_info": info,
+                                         "model_max_ctx": max_ctx})] = \
+                f"{p.get('label') or p.get('name') or '?'} / {m}"
+    return out
+
+
+@app.get("/api/prefill-ledger")
+async def prefill_ledger_get():
+    """先验基线的体检视图：每张表是谁的、有哪些锚点、多少天前记的。只读。"""
+    v = await asyncio.to_thread(prefill_ledger_view, _prefill_ledger_path())
+    v["current"] = _prefill_current_keys()
+    v["busy"] = _prefill_busy()
+    v["file"] = os.path.join("results", PREFILL_LEDGER_FILE)
+    return v
+
+
+@app.post("/api/prefill-ledger/prune")
+async def prefill_ledger_prune_api(body: dict):
+    """删先验锚点：`ctx` 给定删那一档，否则 `scenario` 删一个场景，再否则删整张表。
+
+    有测速在跑一律 409（它收口会把内存里的表盖回来）；目标找不到 404（不猜也不
+    “没删到算成功”）；删除不可恢复，靠面板二次确认 + 自动备份（留最近 5 份）+ 审计
+    行兜。"""
+    if _prefill_busy():
+        raise HTTPException(409, "有测速正在运行：它收口时会用内存里的台账盖掉你的删除，"
+                                 "请先停止或等它跑完")
+    key = body.get("key")
+    if not isinstance(key, str) or not key.strip():
+        raise HTTPException(400, "缺少 key（要删哪张表）")
+    scen = body.get("scenario")
+    scen = scen.strip() if isinstance(scen, str) else ""
+    ctx = body.get("ctx")
+    if ctx is not None and (isinstance(ctx, bool)
+                            or not isinstance(ctx, (int, float)) or ctx <= 0):
+        raise HTTPException(400, "ctx 必须是正数（要删哪一档）")
+    try:
+        d = await asyncio.to_thread(prefill_ledger_prune, _prefill_ledger_path(),
+                                    key=key.strip(), scenario=scen, ctx=ctx)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True, **d}
 
 
 if __name__ == "__main__":

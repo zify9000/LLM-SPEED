@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import bisect
+import glob
 import hashlib
 import io
 import json
@@ -1446,26 +1447,38 @@ def _prefill_key_no_gateway(key: str) -> str:
     return "|".join(parts) or key
 
 
-def _prefill_bucket_trim(rows: list, per_bucket: int = PREFILL_LEDGER_PER_BUCKET) -> list:
-    """同档（log2 差 <阈值）最多留最近 `per_bucket` 条。写侧本来就有这道上限，装载侧
-    补齐是因为旧键归一会把多入口的两张表合到一起，同档可能堆出六条。"""
+def _prefill_bucket_groups(rows: list) -> list[list]:
+    """同档（log2(ctx) 差 <阈值）归组，按 ctx 升序返回每组的原始条目。
+
+    装载侧限流、播种取中位数、给用户的体检视图三处都要同一套分组，各写一
+    份迟早分叉（同档边界不一致会出现“看得见的销点删不掉”）。"""
     groups: list[list] = []
-    for e in sorted(rows, key=lambda e: float(e[0])):
+    for e in sorted((e for e in (rows or [])
+                     if isinstance(e, (list, tuple)) and len(e) == 3
+                     and float(e[0]) > 0 and float(e[1]) > 0),
+                    key=lambda e: float(e[0])):
         if groups and (math.log2(float(e[0])) - math.log2(float(groups[-1][0][0]))
                        < PREFILL_LEDGER_BUCKET_LOG2):
-            groups[-1].append(e)
+            groups[-1].append(list(e))
         else:
-            groups.append([e])
+            groups.append([list(e)])
+    return groups
+
+
+def _prefill_bucket_trim(rows: list, per_bucket: int = PREFILL_LEDGER_PER_BUCKET) -> list:
+    """同档最多留最近 `per_bucket` 条。写侧本来就有这道上限，装载侧
+    补齐是因为旧键归一会把多入口的两张表合到一起，同档可能堆出六条。"""
     out: list = []
-    for g in groups:
+    for g in _prefill_bucket_groups(rows):
         out.extend(sorted(g, key=lambda e: float(e[2]))[-per_bucket:])
     return out
 
 
-def _prefill_ledger_load(path: str | None) -> dict:
+def _prefill_ledger_load(path: str | None, now: float | None = None) -> dict:
     """读速率先验台账：不存在/损坏/结构不合一律当空表（台账是优化项，坏了当
     没有，不能拖死测速）。磁盘结构：`键 → {场景: [[ctx, rate, ts], …]}`；丢掉非数、
-    非正的 ctx/rate、过期条目（换硬件旧表）与超出上限的尾部。"""
+    非正的 ctx/rate、过期条目（换硬件旧表）与超出上限的尾部。`now` 可注入（体检
+    视图要与装载同源，测试也要能造过期条目）。"""
     if not path or not os.path.exists(path):
         return {}
     try:
@@ -1473,7 +1486,7 @@ def _prefill_ledger_load(path: str | None) -> dict:
             raw = json.load(f)
         if not isinstance(raw, dict):
             return {}
-        horizon = time.time() - PREFILL_LEDGER_MAX_AGE_S
+        horizon = (now or time.time()) - PREFILL_LEDGER_MAX_AGE_S
         out: dict[str, dict[str, list]] = {}
         for k, subs in raw.items():
             if not isinstance(k, str) or not isinstance(subs, dict):
@@ -1510,22 +1523,12 @@ def _prefill_ledger_load(path: str | None) -> dict:
 
 
 def _prefill_ledger_seed(pts: list) -> list[tuple[float, float]]:
-    """台账条目 → rate_prior 用的锚点：同档（log2 差 <阈值）取**中位数**——多轮
-    复测/多轮 run 的噪声互打对，单次尖峰（被别的客户端挤占那一轮）不致单独决定
-    外推斜率；ctx 取组内中位数，结果按 ctx 升序。"""
-    rows = sorted((e for e in (pts or [])
-                   if isinstance(e, (list, tuple)) and len(e) == 3
-                   and e[0] > 0 and e[1] > 0), key=lambda e: float(e[0]))
-    groups: list[list[list]] = []
-    for e in rows:
-        lg = math.log2(float(e[0]))
-        if groups and lg - math.log2(float(groups[-1][0][0])) < PREFILL_LEDGER_BUCKET_LOG2:
-            groups[-1].append(e)
-        else:
-            groups.append([e])
+    """台账条目 → rate_prior 用的锚点：同档取**中位数**——多轮复测/多轮 run 的
+    噪声互打对，单次尖峰（被别的客户端挤占那一轮）不致单独决定外推斜率；
+    ctx 取组内中位数，结果按 ctx 升序。"""
     return [(float(statistics.median([float(x[0]) for x in g])),
              float(statistics.median([float(x[1]) for x in g])))
-            for g in groups if g]
+            for g in _prefill_bucket_groups(pts)]
 
 
 def _prefill_ledger_note(table: dict, key: str, scenario: str, ctx: float,
@@ -1547,6 +1550,133 @@ def _prefill_ledger_note(table: dict, key: str, scenario: str, ctx: float,
         lst.sort(key=lambda e: e[2])
         del lst[:len(lst) - PREFILL_LEDGER_MAX_POINTS]
     return True
+
+
+# ---- 台账体检与管理（给用户看的那一面，ADR-0140）------------------------------
+# 为什么要这一面：先验直接决定等待期「预估」读数的平台值，错了会一路骗到屏幕
+# 上（2026-10-19：脏锚点把 256K 估成 2523，实测 490），而它此前完全隐形——既不
+# 能看也不能删。下面两个函数只算数据，不碰 HTTP。
+PREFILL_LEDGER_BACKUPS = 5           # 删之前留几份备份，多余的自动清
+PREFILL_LEDGER_AUDIT = "prefill-ledger-audit.jsonl"
+
+
+def _prefill_ledger_heads(key: str) -> tuple[str, str]:
+    """台账键 → (模型名, 部署摘要)：首段是模型名，剩下的字段拼成人读的一串。"""
+    parts = [p for p in (key or "").split("|") if p]
+    return (parts[0] if parts else "", " · ".join(parts[1:]) or "（未登记部署字段）")
+
+
+def prefill_ledger_view(path: str | None, now: float | None = None) -> dict:
+    """先验台账的**只读体检视图**：每张表有什么锚点、多少天前记的。
+
+    走 `_prefill_ledger_load` 同一套装载口径，所以**界面所见就是引擎会用的那
+    些锚点**：过期条目（换硬件旧表）与旧网关尾缀键在装载时已被清掉/归一，不再
+    这里排出第二套真相。不给它写回口径：只读。"""
+    now = now or time.time()
+    out = []
+    for key, subs in (_prefill_ledger_load(path, now) or {}).items():
+        model, dep = _prefill_ledger_heads(key)
+        scens, newest = [], 0.0
+        for scen, rows in subs.items():
+            anchors = []
+            for g in _prefill_bucket_groups(rows):
+                ts = max(float(e[2]) for e in g)
+                newest = max(newest, ts)
+                anchors.append({
+                    "ctx": round(float(statistics.median([float(e[0]) for e in g]))),
+                    "rate": round(float(statistics.median([float(e[1]) for e in g])), 1),
+                    "n": len(g),
+                    "age_d": round((now - ts) / 86400, 1)})
+            if anchors:
+                scens.append({"scenario": scen,
+                              "label": SCENARIOS.get(scen, {}).get("label", scen),
+                              "anchors": anchors})
+        out.append({"key": key, "model": model, "deployment": dep,
+                    "age_d": (round((now - newest) / 86400, 1) if newest else None),
+                    "scenarios": scens})
+    # 新鲜度升序：最近记的排在最前（管理界面里"最相关的那张"要先看见），
+    # 时间未知的排最后（它多半是整表过期的边角料，不是要对着改的那张）
+    out.sort(key=lambda t: (t["age_d"] is None, t["age_d"] or 0.0))
+    return {"max_age_days": round(PREFILL_LEDGER_MAX_AGE_S / 86400),
+            "max_points": PREFILL_LEDGER_MAX_POINTS,
+            "per_bucket": PREFILL_LEDGER_PER_BUCKET,
+            "empty": not out, "tables": out}
+
+
+def prefill_ledger_prune(path: str | None, key: str, scenario: str = "",
+                         ctx: float | None = None,
+                         now: float | None = None) -> dict:
+    """删先验锚点：`ctx` 给定删那一档（同档整桶），否则 `scenario` 删那个场景，
+    再否则删整张表。返回 {removed, remaining, backup}；找不到目标一律 ValueError
+    （不猜、不“没删到也算成功”）。
+
+    写回的是**装载后的表**，所以这次删除顺带完成了旧键归一与过期清理（与引擎
+    下次保存同一效果）；删前把原件备份为 `<台账>.bak-时间戳`（留最近
+    `PREFILL_LEDGER_BACKUPS` 份），并往同目录的 audit.jsonl 追加一行留痕。"""
+    if not path or not os.path.exists(path):
+        raise ValueError("还没有先验台账（本轮之前没跑过这台部署）")
+    now = now or time.time()
+    table = _prefill_ledger_load(path)
+    subs = table.get(key)
+    if not subs:
+        raise ValueError(f"台账里没有这张表：{key}")
+    if scenario and scenario not in subs:
+        raise ValueError(f"这张表没有「{scenario}」场景")
+    removed = 0
+    if ctx is not None:
+        if not scenario:
+            raise ValueError("删单档必须同时指定场景")
+        lg = math.log2(float(ctx))
+        rows, kept = subs[scenario], []
+        for e in rows:
+            if abs(math.log2(float(e[0])) - lg) < PREFILL_LEDGER_BUCKET_LOG2:
+                removed += 1
+            else:
+                kept.append(e)
+        if not removed:
+            raise ValueError(f"这一档（{int(ctx)} tokens）没有锚点")
+        if kept:
+            subs[scenario] = kept
+        else:
+            del subs[scenario]
+    elif scenario:
+        removed = len(subs.pop(scenario))
+    else:
+        removed = sum(len(v) for v in subs.values())
+        del table[key]
+    if not table.get(key):
+        table.pop(key, None)
+    # 备份原件（不是删后的表）：删错了还能整张表拿回去
+    with open(path, "rb") as f:
+        raw = f.read()
+    backup = f"{path}.bak-{time.strftime('%Y%m%d-%H%M%S', time.localtime(now))}"
+    if os.path.exists(backup):     # 同一秒里连删两次：备份名不撞车，否则前一份被覆盖
+        n = 2
+        while os.path.exists(f"{backup}-{n}") and n < 99:
+            n += 1
+        backup = f"{backup}-{n}"
+    with open(backup, "wb") as f:
+        f.write(raw)
+    old = sorted(glob.glob(f"{path}.bak-*"))
+    for stale in old[:-PREFILL_LEDGER_BACKUPS]:
+        try:
+            os.remove(stale)
+        except OSError:
+            pass
+    _ledger_save(path, table)
+    remaining = sum(len(v) for subs in table.values() for v in subs.values())
+    try:
+        with open(os.path.join(os.path.dirname(path) or ".",
+                               PREFILL_LEDGER_AUDIT), "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+                "key": key, "scenario": scenario or None, "ctx": ctx,
+                "removed": removed, "remaining": remaining,
+                "backup": os.path.basename(backup)}, ensure_ascii=False) + "\n")
+    except OSError:
+        pass   # 审计写不进去不该让删除失败（数据已备份，事实还在）
+    return {"removed": removed, "remaining": remaining,
+            "backup": os.path.basename(backup)}
 
 
 def _prefill_prior_covered(pts: list[tuple[float, float]], ctx: float) -> bool:
