@@ -5371,15 +5371,26 @@ function histDrawWarn(n, max){
   if(max == null || count <= max) return null;
   return `已选 ${count} 条：对比曲线只有 ${max} 种颜色，超过就分不清谁是谁了`;
 }
+/* 一条记录短标题的三个部件（时间 / 模型名 / 备注）——**这份口径只写这一次**。
+   以前行内展示与短串各自剥年代、各自回退，于是 2026-10-17 把"备注不许顶掉模型名"
+   改在了列表行上，短串（快捷气泡 / 选集芯片 / 载入按钮 / 确认框点名）漏了，同一个
+   bug 第二次被用户抓到（坑位 `crosscut/24`） */
+function histPartsOf(h){
+  if(!h) return {t: "", models: "", note: ""};
+  return {
+    t: String(h.started_at || h.run_id || "").replace(/^\d{4}-/, "").slice(0, 11),
+    models: (h.models || []).join(", ") || h.run_id || "",   // 老存档没模型名时退回 run_id
+    note: String(h.note || ""),
+  };
+}
 /* 短标题（触发按钮、快捷气泡、选集芯片、台账行共用）：时间 + 模型名 +（备注）。
    **备注是补充不是替代**——只剩"时间 + 备注"时认不出这是哪台部署（同一天往往好几条），
    而模型名才是要一眼看见的那一个。长串 historyLabel() 自 ADR-0130 起只给悬浮
    title / aria，不再是任何可见文本的主体——否则上一轮“拆列”只完成了一半 */
 function histBrief(h){
   if(!h) return "";
-  const t = String(h.started_at || h.run_id || "").replace(/^\d{4}-/, "").slice(0, 11);
-  const m = (h.models || []).join(", ") || h.run_id;   // 老存档没模型名时退回 run_id，不留空
-  return h.note ? `${t} · ${m} ·（${h.note}）` : `${t} · ${m}`;
+  const {t, models, note} = histPartsOf(h);
+  return note ? `${t} · ${models} ·（${note}）` : `${t} · ${models}`;
 }
 /* 组名校验（确认框的 validate 用）：空、超长、撞保留名都当场说，不发请求。
    超长是报错不是截断：截断后的名字与用户心里那个不是同一个，以后按旧名并并就合不上 */
@@ -8316,8 +8327,7 @@ function hdRenderList(){
 /* 记录行：两行式。[勾] 时间+模型名+备注（主行；备注不再顶替模型名）/ 元信息（次行） | 徽标+hover 动作 */
 function hdRowHTML(it, cur){
   const on = hdSel.has(it.run_id);
-  const t = String(it.started_at || it.run_id || "").replace(/^\d{4}-/, "").slice(0, 11);
-  const models = (it.models || []).join(", ") || it.run_id;
+  const {t, models, note} = histPartsOf(it);   // 与短串 histBrief 同一份部件（口径只一份）
   const sub = [histSubOf(it, SCEN_LABEL)];
   const ck = hdMode === "splice" ? ""
     : `<input type="checkbox" class="hd-ck" data-rid="${esc(it.run_id)}" ${on ? "checked" : ""}
@@ -8333,7 +8343,7 @@ function hdRowHTML(it, cur){
     ${ck}
     <div class="hd-rowtxt">
       <div class="hd-r1"><span class="hd-time">${esc(t)}</span>
-        <span class="hd-name">${esc(models)}${it.note ? ` <span class="hd-name-note">【${esc(it.note)}】</span>` : ""}</span></div>
+        <span class="hd-name">${esc(models)}${note ? ` <span class="hd-name-note">【${esc(note)}】</span>` : ""}</span></div>
       ${sub.filter(Boolean).length ? `<div class="hd-r2">${esc(sub.filter(Boolean).join(" · "))}</div>` : ""}
     </div>
     <span class="hd-side-r">

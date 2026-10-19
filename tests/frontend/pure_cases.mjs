@@ -810,6 +810,10 @@ test("histBrief：短串是「时间 + 模型名 +（备注）」——备注不
                "10-14 02:03 · Qwen, Kimi");
   assert.equal(histBrief(sum("20261014-020300-a1", {models:[], note:"只有备注"})),
                "10-14 02:03 · 20261014-020300-a1 ·（只有备注）", "没模型名退回 run_id，不许留空");
+  assert.deepEqual(histPartsOf(sum("20261014-020300-a1", {note:"跑批"})),
+                   {t:"10-14 02:03", models:"M", note:"跑批"},
+                   "行内展示与短串共用这一份部件（各自剥年代就会各改一处漏一处）");
+  assert.deepEqual(histPartsOf(null), {t:"", models:"", note:""});
   assert.equal(histBrief(null), "");
 });
 
