@@ -102,6 +102,7 @@ def _adopt(model: str, table: dict) -> int:
             print(f"  跳过 {key}：该模型在 config.json 里没有部署声明可归户")
             continue
         new_key = bench._prefill_fingerprint(model, {
+            "provider": prov.get("name"),     # 网关名是键首段（ADR-0143）
             "model_info": info,
             "model_max_ctx": {m: v["max_ctx"] for m, v in info.items()
                               if v.get("max_ctx")}})
@@ -130,6 +131,7 @@ def main() -> int:
     runs = 0
     added: list[str] = []
     rejected: list[str] = []
+    no_gw: set[str] = set()
     for f in sorted(glob.glob(os.path.join(args.results_dir, "*.json"))):
         try:
             with open(f, encoding="utf-8") as fh:
@@ -146,6 +148,9 @@ def main() -> int:
         curve: dict[tuple[str, str], list[tuple[float, float]]] = {}
         for model, scenario, x, rate, ts in sorted(pts, key=lambda e: e[:3]):
             key = bench._prefill_fingerprint(model, cfg)
+            if not key:      # 归档 cfg 里没有网关身份＝不知道是谁家的，不猜归属
+                no_gw.add(os.path.basename(f))
+                continue
             have = bench._prefill_ledger_seed(
                 (table.get(key) or {}).get(scenario) or [])
             dup = any(abs(math.log2(c) - bench.math.log2(x))
@@ -158,7 +163,11 @@ def main() -> int:
                                 f"  ({os.path.basename(f)}，超同运行低档外推 1.5×，"
                                 f"形状闸拦下：疑似网关 fallback/跳后端)")
                 continue
-            bench._prefill_ledger_note(table, key, scenario, x, rate, ts)
+            # `now=ts`：拿存档当时的时间当记录时间（新鲜度按测速那天算）；
+            # `src=run_id`：回填的读数也带来源（ADR-0141）——事后改那次存档的环境
+            # 信息时它才搬得动，界面上也不会被算成「旧数据未标来源」
+            bench._prefill_ledger_note(table, key, scenario, x, rate, ts,
+                                       src=str(run.get("run_id") or ""))
             curve[(model, scenario)] = cur + [(float(x), float(rate))]
             added.append(f"  {model} / {scenario} @{int(x)} tokens → {rate:.0f} tok/s"
                          f"  ({os.path.basename(f)}, {'覆盖' if dup else '新增'})")
@@ -168,6 +177,9 @@ def main() -> int:
         print(line)
     if len(added) > 40:
         print(f"  …另有 {len(added) - 40} 条")
+    if no_gw:
+        print(f"跳过 {len(no_gw)} 份归档：cfg 里没有网关身份（provider 缺失），"
+              f"键算不出来——不猜归属（{', '.join(sorted(no_gw)[:3])} …）")
     if rejected:
         print(f"形状闸拦下 {len(rejected)} 条（不进台账）：")
         for line in rejected[:20]:

@@ -88,8 +88,11 @@ try:
     # 先从服务端问出「当前登记能算出的指纹」，用它造表才能同时验两件事：
     # ①旧键（带网关尾缀）在界面上归一 ②与登记一致的表会被标成「这次会用上」
     cur = httpx.get(url + "/api/prefill-ledger", timeout=5).json().get("current") or {}
-    live_key = next(iter(cur), "Qwen.SMOKE|dep-a|ctx262144")
-    bogus = "Qwen.SMOKE-OLD|dep-z|ctx8192"
+    live_key = next(iter(cur), "gw:local|Qwen.SMOKE|dep-a|ctx262144")
+    bogus = "gw:smoke-old|Qwen.SMOKE-OLD|dep-z|ctx8192"
+    # 旧口径遗留表（键里没有网关段，ADR-0143 之前的形状）：引擎不采纳，但界面要
+    # 报出来、也要删得掉（闷着不报 = 用户以为存过了；删不掉 = 盘上永久堆垃圾）
+    legacy_key = "Qwen.SMOKE-LEGACY|dep-old|ctx8192"
     path = os.path.join(RDIR, bench.PREFILL_LEDGER_FILE)
     # 第四位是来源（ADR-0141）：活表两条来自两轮测速，陈旧表那条刻意不带来源，
     # 用来验「旧数据 N 条未标来源」徽标（改存档环境时这类读数搬不动）
@@ -98,7 +101,8 @@ try:
             "code": [[4103.0, 1200.0, NOW - 3600, "run-a"],
                      [65000.0, 900.0, NOW - 7200, "run-a"],
                      [65100.0, 880.0, NOW - 7200, "run-b"]]},
-        bogus: {"code": [[4100.0, 500.0, NOW - 86400 * 40, ""]]}})
+        bogus: {"code": [[4100.0, 500.0, NOW - 86400 * 40, ""]]},
+        legacy_key: {"code": [[9000.0, 700.0, NOW - 86400 * 60, ""]]}})
 
     with sync_playwright() as p:
         b = p.chromium.launch()
@@ -129,7 +133,20 @@ try:
                  " && document.getElementById('baseDrawerRoot').classList.contains('open')"
                  " && document.getElementById('histDrawerRoot').hidden"))
         check("菜单已收起", pg.locator("#topSetMenu").count() == 0)
-        check("列出两张表", pg.locator("#blPanel .pl-tbl").count() == 2)
+        check("列出两张表（遗留表不算表：它不参与预估）",
+              pg.locator("#blPanel .pl-tbl").count() == 2)
+        check("表头把网关内部名排出来（基线指纹首段，ADR-0143）",
+              len(js("() => [...document.querySelectorAll('#blPanel .pl-gw')]"
+                     ".map(e => e.textContent)")) >= 2
+              and js("() => [...document.querySelectorAll('#blPanel .pl-gw')]"
+                     ".some(e => /smoke-old/.test(e.textContent))"),
+              str(js("() => [...document.querySelectorAll('#blPanel .pl-gw')]"
+                     ".map(e => e.textContent)")))
+        check("旧口径遗留表如实列出并给「删掉它」（引擎没用它，但不能闷着）",
+              js("() => { const n = document.querySelector('#blPanel .pl-note');"
+                 " return !!n && /旧口径遗留表/.test(n.textContent)"
+                 "  && !!document.querySelector('[data-pl-del][data-stale]'); }")
+              and legacy_key in str(js("() => document.getElementById('blPanel').innerText")))
 
         print("\n[2] 口径与引擎同源：旧键归一、同档并档、会不会被用上")
         dep = js("() => [...document.querySelectorAll('#blPanel .pl-dep')].map(e => e.textContent)")
@@ -163,9 +180,12 @@ try:
         js("() => document.getElementById('uiDialogOk').click()")
         pg.wait_for_timeout(900)
         left = json.load(open(path, encoding="utf-8"))
-        rows = [r for subs in left.values() for rr in subs.values() for r in rr]
+        rows = [r for k, subs in left.items() if k.startswith("gw:")
+                for rr in subs.values() for r in rr]
         check("只剩 4K 与陈旧那条（64K 那一桶整桶没掉）",
               sorted(int(r[0]) for r in rows) == [4100, 4103], str(rows))
+        check("删别的表不得顺手把遗留表也抹了（它只是不被采纳，不是该被删）",
+              legacy_key in left and len(left[legacy_key]["code"]) == 1)
         check("删前自动备份已生成",
               any(f.startswith(bench.PREFILL_LEDGER_FILE + ".bak-") for f in os.listdir(RDIR)))
         check("审计留痕一行已写", os.path.exists(os.path.join(RDIR, bench.PREFILL_LEDGER_AUDIT)))
@@ -192,6 +212,23 @@ try:
         check("Escape 关掉抽屉、焦点还给顶栏按钮",
               js("() => document.getElementById('baseDrawerRoot').hidden"
                  " && document.activeElement.id === 'btnTopSet'"))
+
+        print("\n[4b] 删旧口径遗留表：只摘它自己")
+        # 上面 Escape 关过抽屉，面板内容随抽屉一起清空了（下次打开要新鲜数据）→ 重开
+        pg.click("#btnTopSet")
+        pg.wait_for_timeout(250)
+        pg.click("#topMenuBaseline")
+        pg.wait_for_timeout(700)
+        js("() => document.querySelector(`[data-pl-del][data-stale]`).click()")
+        pg.wait_for_timeout(300)
+        js("() => document.getElementById('uiDialogOk').click()")
+        pg.wait_for_timeout(900)
+        left2 = json.load(open(path, encoding="utf-8"))
+        check("遗留表已从盘上摘掉", legacy_key not in left2, str(list(left2)))
+        check("已采纳的表一条没少（前缀替换/整表删都不许误伤别的网关）",
+              any(k.startswith("gw:") and k != bogus for k in left2), str(list(left2)))
+        check("面板不再报遗留表",
+              "旧口径遗留表" not in js("() => document.getElementById('blPanel').innerText"))
 
         print("\n[5] 真实仓库 results/ 零污染 + 无 JS 错误")
         check("文件集合与 size 全等", snap(REAL) == BEFORE, f"{len(BEFORE)} 个存档")
