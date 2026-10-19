@@ -844,9 +844,6 @@ input[type=checkbox]:disabled,input[type=radio]:disabled{opacity:.45; cursor:not
   .hd-side.open{transform:none; visibility:visible}
   .hd-sidetab{display:inline-flex}
 }
-/* 启动表单的「备注 / 分组」同行两格（窄屏自然回落单列） */
-.hp-two{display:grid; grid-template-columns:repeat(auto-fit, minmax(230px, 1fr));
-  gap:4px 14px; align-items:end}
 .dr-head{display:flex; align-items:flex-start; gap:12px; padding:16px 20px;
   background:var(--card); border-bottom:1px solid var(--border); flex:none}
 .dr-head h3{font-size:15px; font-weight:600}
@@ -1597,13 +1594,11 @@ tr.fade td{opacity:.45}
                 <option value="free">自由生成（测下限）</option>
               </select>
             </div>
-            <div class="pf-span hp-two"><label class="f" for="fNote">任务备注（可选）</label>
+            <div class="pf-span"><label class="f" for="fNote">任务备注（可选）</label>
               <!-- autocomplete=off：浏览器表单历史会把曾误粘的网关地址回填进备注框 -->
               <input type="text" id="fNote" maxlength="80" autocomplete="off" placeholder="如：有线环境复测 · 对比 v0.6 基线">
-              <!-- 分组（ADR-0126）：只决定历史记录**怎么归类**，不进存档、不影响测速；
-                   不填就是未分组，下次默认带上上次填的值（localStorage 记忆） -->
-              <label class="f" for="fGroup">分组（可选，只影响历史怎么归类）</label>
-              <input type="text" id="fGroup" maxlength="40" autocomplete="off" placeholder="如：4090 量化横评">
+              <!-- 「分组」输入曾在此（ADR-0126 手填组名）已移除：归组只在历史抽屉里做
+                   （勾选 → 移动分组下拉 / 拖到左栏组名），启动表单不再管「怎么归类」 -->
             </div>
           </div>
         </div>
@@ -2197,8 +2192,6 @@ async function init(){
   const firstWithKey = state.providers.find(p=>p.has_key);
   if(savedProv && state.providers.some(p => p.name === savedProv)) sel.value = savedProv;
   else if(firstWithKey) sel.value = firstWithKey.name;
-  // 分组名记忆（ADR-0126）：上次跑测速填过的组名默认带上；不填就是未分组
-  try{ $("#fGroup").value = localStorage.getItem(HIST_RUN_GROUP_KEY) || ""; }catch(e){}
   // 场景三分区渲染：场景一通用（**代码生成在前**、创意写作在后）在档位区上方；
   // 场景二 Agent 独立分区（勾选框自带，勾选后才展开链参数）；场景三多模态
   // （asr/ocr/tts）独立分区。勾选逻辑三分区共用 data-g=scen（选择/持久化/启动无分叉）
@@ -4413,13 +4406,6 @@ async function startRun(){
   try{ d = await r.json(); }
   catch(e){ setStartBusy(false); setPill("启动响应解析失败：" + e.message, "err"); return; }
   state.runId = d.run_id; state.running = true;
-  // 分组（ADR-0126）：本次运行一开跑就给组名（存档要跑完才落盘，映射先记一条、
-  // 跑完自然对得上）；记住它，下次默认带上。没填什么都不做
-  const runGroup = $("#fGroup").value.trim().slice(0, 40);
-  if(runGroup){
-    try{ localStorage.setItem(HIST_RUN_GROUP_KEY, runGroup); }catch(e){}
-    histStampGroup(d.run_id, runGroup);
-  }
   state.runStartTs = Date.now();   // 运行时长/ETA 起点
   // 本地先记一份（cfg 事件到达后即被服务端权威配置覆盖）
   const cp = currentProvider();
@@ -8105,7 +8091,6 @@ function histSetCurrent(id){
    - **左栏点组 = 过滤，拖到组名上 = 归组**：组导航与组管理同栏（改名/并入/解散收 ⋯），
      折叠机制随旧浮层一起退役——左栏导航上任后，折叠失去了存在理由
    纪律沿用：搜索走服务端全集（ADR-0126）；选择集独立于视图；组是实体（ADR-0129） */
-const HIST_RUN_GROUP_KEY = "llmspeed.histRunGroup";  // 上次跑测速用过的组名（启动表单记忆）
 const hdSel = new Set();          // 唯一选集（旧 cmpSel/histPopIds/ledgerIds 三 Set 归一）
 let hdBucket = null;              // 当前过滤桶：null=全部；""=未分组；其余=组 id
 let hdCollapsed = new Set();  // 「全部记录」目录态下折叠了的组键（纯展示态，切桶/搜索不涉及；组级过滤是左栏的活）
