@@ -29,8 +29,11 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from bench import (AGENT_CACHE_RANGE, AGENT_INST_RANGE, AGENT_LADDER_MAX,
                    ANOMALY_TEXT_SUFFIX, ASR_LADDER_RANGE, BenchRun, CTX_HEADROOM,
                    DEFAULT_CONCURRENCIES, DEFAULT_CTX_LIST,
-                   MEDIA_LADDER_MAX, OCR_LADDER_RANGE, PREFILL_LEDGER_FILE, SCENARIOS,
+                   MEDIA_LADDER_MAX, OCR_LADDER_RANGE, PREFILL_LEDGER_FILE,
+                   DELIVERY_LEDGER_FILE, SCENARIOS,
                    TIMEOUT_S_MAX, TTS_LADDER_RANGE, iter_in_text_holders,
+                   delivery_ledger_prune, delivery_ledger_rehome,
+                   delivery_ledger_rekey_gw, delivery_ledger_view,
                    prefill_ledger_prune, prefill_ledger_rehome, prefill_ledger_rekey_gw,
                    prefill_ledger_view,
                    _prefill_fingerprint)
@@ -954,11 +957,21 @@ async def put_config(body: dict):
     for old_gw, new_gw in _gw_renames(old_providers, providers):
         r = await asyncio.to_thread(prefill_ledger_rekey_gw,
                                     _prefill_ledger_path(), old_gw, new_gw)
+        rd = await asyncio.to_thread(delivery_ledger_rekey_gw,
+                                     _delivery_ledger_path(), old_gw, new_gw)
+        if not (r.get("moved") or rd.get("moved")):
+            continue
+        # 两张台账必须一起改：只改一张会出现“先验跟着改名走、decode 种子留在
+        # 旧网关名下”，下次跑测只播种一半（半对新半旧比全旧更难查）
+        bits = []
         if r.get("moved"):
-            notes.append(f"网关改名 {old_gw} → {new_gw}：测速基线已跟着换户（"
-                         f"{r['moved']} 张表 / {r['rows']} 条读数"
-                         + (f"，上限逐出 {r['dropped']} 条" if r.get("dropped") else "")
-                         + "）")
+            bits.append(f"prefill 先验 {r['moved']} 张表 / {r['rows']} 条"
+                        + (f"，逐出 {r['dropped']} 条" if r.get("dropped") else ""))
+        if rd.get("moved"):
+            bits.append(f"decode 交付粒度 {rd['moved']} 张表 / {rd['rows']} 条"
+                        + (f"，逐出 {rd['dropped']} 条" if rd.get("dropped") else ""))
+        notes.append(f"网关改名 {old_gw} → {new_gw}：测速基线已跟着换户（"
+                     + "；".join(bits) + "）")
     if notes:
         out["prior_ledger"] = "；".join(notes)
     return out
@@ -1926,25 +1939,37 @@ async def bench_groups_apply(body: dict):
 
 
 def _prefill_rehome(run_id: str, before: str, after: str) -> dict | None:
-    """存档的环境信息/模型名一改，那次测速写进先验台账的读数要跟着换身份（ADR-0141）。
+    """存档的环境信息/模型名一改，那次测速写进台账的读数要跟着换身份（ADR-0141）。
 
-    不搬的后果：先验永久漂在旧键上——按新登记跑测查不到这张表（几轮基线白攒），而
+    不搬的后果：基线永久漂在旧键上——按新登记跑测查不到这张表（几轮基线白攒），而
     那张「这次不会用上」的旧表还会被当成垃圾删掉。只在身份真的变了时才动手；旧数据
     没有来源位、搬不动的如实回报（`unknown`），由面板提示人去处理，不猜哪些是它写的。
     台账是缓存不是真相，这里搬失败不该让用户的编辑失败，故只报不抛。
-    """
+
+    两张台账（prefill 先验 / decode 交付粒度）同指纹归户、同一搬：只搬一张会出现
+    “这一轮先验是新身份、种子是旧身份”的半对新状态，比两张都旧更难查。"""
     if not before or before == after:
         return None
     try:
         r = prefill_ledger_rehome(_prefill_ledger_path(), run_id, before, after)
+        rd = delivery_ledger_rehome(_delivery_ledger_path(), run_id, before, after)
     except OSError:
         return None
-    if not r.get("moved") and not r.get("unknown"):
+    moved = int(r.get("moved") or 0) + int(rd.get("moved") or 0)
+    unknown = int(r.get("unknown") or 0) + int(rd.get("unknown") or 0)
+    if not moved and not unknown:
         return None
-    if r.get("moved") and _prefill_busy():
-        r["risk"] = ("有测速正在运行：它收口时会用内存里的台账盖掉这次搬家，"
-                     "跑完请刷新基线面板确认")
-    return r
+    out = {"moved": moved,
+           "prior_moved": int(r.get("moved") or 0),
+           "delivery_moved": int(rd.get("moved") or 0),
+           "unknown": unknown,
+           "dropped": int(r.get("dropped") or 0) + int(rd.get("dropped") or 0),
+           "from": before, "to": after,
+           "backup": r.get("backup") or rd.get("backup")}
+    if moved and _prefill_busy():
+        out["risk"] = ("有测速正在运行：它收口时会用内存里的台账盖掉这次搬家，"
+                       "跑完请刷新基线面板确认")
+    return out
 
 
 @app.post("/api/bench/history/{run_id}/rename")
@@ -2618,6 +2643,12 @@ def _prefill_ledger_path() -> str:
     return os.path.join(RESULTS_DIR, PREFILL_LEDGER_FILE)
 
 
+def _delivery_ledger_path() -> str:
+    """decode 交付粒度台账的路径（ADR-0145 草稿）：与先验台账同目录同锁机制
+    （`_ledger_lock` 按文件路径加锁，两张表各自一把）。"""
+    return os.path.join(RESULTS_DIR, DELIVERY_LEDGER_FILE)
+
+
 def _prefill_busy() -> bool:
     """是否有测速在跑：台账是运行开头装载、收口整张写回，中途改盘会被覆盖。"""
     return any(r.finished_at is None for r in RUNS.values())
@@ -2685,6 +2716,58 @@ async def prefill_ledger_prune_api(body: dict):
     try:
         d = await asyncio.to_thread(prefill_ledger_prune, _prefill_ledger_path(),
                                     key=key.strip(), scenario=scen, ctx=ctx)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return {"ok": True, **d}
+
+
+# ---------------------------------------------------------------------------
+# decode 交付粒度基线（跳运行台账 results/`DELIVERY_LEDGER_FILE`，ADR-0145 草稿）：
+# 跑动中那格 Decode 的 token 数是「包数 × 每包几个 token」，那个每包几个 token 就存在
+# 这里。没有它 = 每轮从零学、跨档/跨轮偏一个固定倍数；界面必须能看到能删得掉
+# （ADR-0140 那条纪律对新台账同样成立：存了一个引擎会用、用户看不见的东西）。
+# ---------------------------------------------------------------------------
+
+@app.get("/api/delivery-ledger")
+async def delivery_ledger_get():
+    """交付粒度基线的体检视图：每张表是谁的、有哪些档的锚点、多少天前记的。只读。
+
+    `current` 与先验台账共用 `_prefill_current_keys()`：两张表按同一指纹归户，
+    “这次会不会被用上”只能是同一个答案（两处各算一份迟早飘）。"""
+    v = await asyncio.to_thread(delivery_ledger_view, _delivery_ledger_path())
+    v["current"] = _prefill_current_keys()
+    v["busy"] = _prefill_busy()
+    v["file"] = os.path.join("results", DELIVERY_LEDGER_FILE)
+    return v
+
+
+@app.post("/api/delivery-ledger/prune")
+async def delivery_ledger_prune_api(body: dict):
+    """删交付粒度锚点：`ctx` 给定删那一档，否则 `sub`（场景×并发）删一栏，再否则整张表。
+
+    守卫与先验台账同口径：有测速在跑一律 409（它收口会把盘上的删批盖回内存），
+    找不到目标 404（不猜、不“没删到也算成功”），删前自动备份 + 审计行。"""
+    if _prefill_busy():
+        raise HTTPException(409, "有测速正在运行：它收口时会用内存里的台账盖掉你的删除，"
+                                 "请先停止或等它跑完")
+    key = body.get("key")
+    if not isinstance(key, str) or not key.strip():
+        raise HTTPException(400, "缺少 key（要删哪张表）")
+    sub = body.get("sub")
+    sub = sub.strip() if isinstance(sub, str) else ""
+    # 界面递上来的是「场景 + 并发」两个字段（视图就是这么给的），子表键的拼法只活在
+    # 数据层：让调用方猜「code」还是「code|c1」就会出“删了但什么都没删”
+    if not sub and body.get("scenario"):
+        cc = body.get("conc", 1)
+        cc = int(cc) if isinstance(cc, (int, float)) and not isinstance(cc, bool) else cc
+        sub = f"{str(body['scenario']).strip()}|c{cc}"
+    ctx = body.get("ctx")
+    if ctx is not None and (isinstance(ctx, bool)
+                            or not isinstance(ctx, (int, float)) or ctx <= 0):
+        raise HTTPException(400, "ctx 必须是正数（要删哪一档）")
+    try:
+        d = await asyncio.to_thread(delivery_ledger_prune, _delivery_ledger_path(),
+                                    key=key.strip(), sub=sub, ctx=ctx)
     except ValueError as e:
         raise HTTPException(404, str(e))
     return {"ok": True, **d}

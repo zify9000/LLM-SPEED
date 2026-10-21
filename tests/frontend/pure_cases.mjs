@@ -837,3 +837,32 @@ test("组名候选名单优先读组实体（含空组），没有 groups 数组
   assert.deepEqual(histGroupNamesOf(groups, items, "g-2"), ["A", "空组"], "并入/改名的候选排除自身");
   assert.deepEqual(histGroupNamesOf([], items), ["A", "B"], "退化路径仍可用（老响应没有 groups）");
 });
+
+test("_decEstTipOf：decode 估值悬浮按来源/流末分家（ADR-0145）", () => {
+  assert.match(_decEstTipOf(4.9, "ledger", false), /历史基线 4\.9 token\/包/,
+               "历史种子要说出处（用户能去「测速基线」面板核对）");
+  assert.match(_decEstTipOf(4.0, "cold", false), /探测实测 4 token\/包/,
+               "探测实测的比值不得冒称历史基线");
+  assert.match(_decEstTipOf(1.0, "cold", false), /1 事件\/token 直计/);
+  assert.match(_decEstTipOf(undefined, undefined, false), /1 事件\/token 直计/,
+               "缺省一律按 1 事件/token 直计说");
+  assert.match(_decEstTipOf(4.9, "ledger", true), /不会有真值帧覆盖/,
+               "流末估值帧与中途帧是两种处境（usage 始终未回），文案必须分开");
+  assert.match(_decEstTipOf(1.0, "cold", false), /测速基线/);
+});
+
+test("trkFrac/trkTier：分段线性、超量程钳末档（pitfalls/crosscut/02 回归）", () => {
+  const tiers = [10, 30, 50, 100, 300];
+  assert.equal(trkFrac(0, tiers), 0);
+  assert.equal(trkFrac(20, tiers), 0.3, "第二段中点：段内线性 (1+0.5)/5");
+  assert.equal(trkFrac(300, tiers), 1, "钉满程");
+  assert.equal(trkFrac(9999, tiers), 1, "超量程满程钉右端");
+  assert.equal(trkTier(5, tiers), "走路");
+  assert.equal(trkTier(9999, tiers), "高铁", "超量程不得退回第一档");
+  assert.equal(trkTier(60, [10, 30, 50, 100, 300, 9999]), "小汽车",
+               "段内正常归属（60 ≤ 100 → 第 4 段）");
+  assert.equal(trkTier(5000, [10, 30, 50, 100, 300, 9999]), "高铁",
+               "段数比档名多且读数落在超出段：钳到末档，不产出 undefined 档名");
+  assert.equal(trkFmt(500), "500");
+  assert.equal(trkFmt(2000), "2K");
+});

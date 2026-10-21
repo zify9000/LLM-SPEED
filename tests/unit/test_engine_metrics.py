@@ -15,6 +15,7 @@ import json
 import time
 import unittest
 import unittest.mock
+from collections import deque
 
 import bench
 from bench import (
@@ -36,6 +37,7 @@ from bench import (
     _out_hint_tail,
     _prior_suspect,
     _ratio_refold,
+    _refold_window,
     _tok_per_batch,
     _total_decode_rates,
     _wma,
@@ -403,6 +405,22 @@ class TestCalibHelpers(unittest.TestCase):
         self.assertAlmostEqual(_ratio_refold(100.0, None, 0.25), 400.0)
         # 基准已校准、新样本未校准（理论路径）：还原事件数直计口径
         self.assertAlmostEqual(_ratio_refold(400.0, 0.25, None), 100.0)
+
+    def test_refold_window_refolds_every_sample_not_just_the_base(self):
+        """ADR-0145：口径中途翻转时整窗折算。
+
+        翻转的两条常见路：本轮第一个请求带了跳运行种子、同轮另一个并发请求跑完
+        并校准（本请求还在流里）。只折差分基准那一条的话，窗口里剩下的旧口径样本
+        轮到当基准时会翻出大尖峰（能把读数推过上限、误触发 out_of_range 弃测）。"""
+        w = deque([(0.0, 10.0, None), (1.0, 20.0, None), (2.0, 30.0, None)])
+        new = _refold_window(w, 0.25)      # 每 token 0.25 个事件 → token 数 ×4
+        self.assertEqual([e for _, e, _ in new], [40.0, 80.0, 120.0])
+        self.assertTrue(all(r == 0.25 for _, _, r in new), "样本要带上新口径")
+        # 折算后差分仍是真速率：10 事件/秒 ÷ 0.25 = 40 token/秒（不翻转就会翻 4 倍）
+        self.assertAlmostEqual((120.0 - 80.0) / 1.0, 40.0, places=6)
+        # 口径没变不重建（每个 tick 都调，热路径不白算）
+        self.assertIs(_refold_window(new, 0.25), new)
+        self.assertEqual(_refold_window(deque(), 0.25), deque())
 
 
 class TestEstOut(unittest.TestCase):

@@ -41,6 +41,7 @@ import os
 import random
 import statistics
 import struct
+import threading
 import time
 import wave
 import zlib
@@ -1258,6 +1259,21 @@ def _ledger_pick(subs: list[dict], density: float | None,
 
 
 
+def _density_note_into(table: dict, lk: str, chars: float, real: float,
+                       density: float, source: dict, now: float):
+    """一次密度观测写进给定表（不碰磁盘、不播报）→ `(子表列表, 下标, 是否新建)`。
+
+    写侧只此一处：run 中写内存表、与收口时把本轮流水重放到盘上现表，都调它，
+    两套口径不会分叉（归户靠 `_ledger_pick` 的密度容差，锚点并入靠 `_ledger_add` 的
+    近点归并与单调硬保证）。"""
+    subs = table.setdefault(lk, [])
+    idx, new = _ledger_pick(subs, density, source, now)
+    sub = subs[idx]
+    sub["anchors"] = _ledger_add(
+        [(p[0], p[1]) for p in sub.get("anchors") or []], chars, real)
+    return subs, idx, new
+
+
 def _stream_fingerprint(scenario: str) -> str | None:
     """场景语料流的内容指纹（sha1 前 12 位）。台账按它寻址：语料一旦改动
     （含 vendored 版本更新、缺失时静默降级到内置回退池）旧表立即不再命中，
@@ -1414,6 +1430,502 @@ PREFILL_LEDGER_MAX_POINTS = 24              # 每 (部署指纹, 场景) 上限�
 PREFILL_LEDGER_PER_BUCKET = 3              # 同档最多留最近 3 条（播种取中位数）
 PREFILL_LEDGER_MAX_AGE_S = 90 * 86400       # 换硬件/换量化不该赖着不走
 PREFILL_LEDGER_BUCKET_LOG2 = 0.05           # 同档判据（≈3.5%），与 rate_prior 合并阈值同值
+PRIOR_RECONCILE_BAND = (0.85, 1.15)         # ADR-0139 决策 3：实测/台账偏离带宽（同算力同模型 ±15%）
+PRIOR_RECONCILE_MIN_TIERS = 2               # ADR-0139 决策 3：同方向 ≥N 档偏离才判基线不可信
+
+# ---- decode 交付粒度台账常量（跳运行，ADR-0145 草稿）--------------------------
+# 为什么要有：跑动中那格 Decode 的 token 数不是服务端给的，是「几个内容包 ×
+# 每包平均几个 token」（`chunk_calib` = 事件/token 比）。它原本只在内存里，每轮从
+# 零学——而实测交付粒度会跳：llama.cpp 逐 token 流式每包 1.0 个 token，投机解码
+# 类（mtp/dflash/dspark 以及自带多 token 头的“Next”类）每包 1.7~5.5 个，且同一次
+# 跑内跳上下文档也跳（存档实测 vLLM mtp4：0K 档 3.41、4K 以上 4.7~4.95）。本轮
+# 学到的比值用在下一档就偏一个固定倍数 → 中途读数全程偏高（用户 2026-10-20 目检：
+# 中途稳定 90+、跑完落 70+）。
+# 与 prefill 先验台账的两个刻意不同：
+#   1) 只当本轮第一个请求的**种子**，本轮实测照常每请求校准并快速压过它
+#     （prefill 那边历史是唯一的锚，权重该重；这边本轮就有观测）；
+#   2) 种子**不参与客户端断流判定**（偏高的种子一旦把 client_cut 提前触发，就会
+#     丢 usage → 永远无法校准，重演 ADR-0019 那条恶性循环）。
+DELIVERY_LEDGER_FILE = "delivery-ledger.v1"
+DELIVERY_LEDGER_MAX_POINTS = 24            # 每 (部署指纹, 场景, 并发档) 上限，逐出最旧
+DELIVERY_LEDGER_PER_BUCKET = 3             # 同档最多留最近 3 条（种子取中位数）
+DELIVERY_LEDGER_MAX_AGE_S = 90 * 86400     # 换后端/换投机配置不该赖着不走
+DELIVERY_LEDGER_BUCKET_LOG2 = 0.05         # 同档判据（与速率先验同值，≈3.5%）
+DELIVERY_LEDGER_MIN_EVENTS = 8             # 只收到几个包的请求不当锚点（几包的
+                                           # 交付粒度统计不稳；探测请求 64 输出 token
+                                           # 在 k≈5 的网关上只有 ~13 包，要进门槛）
+DELIVERY_LEDGER_AUDIT = "delivery-ledger-audit.jsonl"
+# 种子的初始权重（单位：事件数）：一个中等请求的量级。取小了历史不起作用
+# （第一个请求仍旧瞎猜）、取大了本轮实测压不过历史（网关改了交付粒度后一路偏）。
+# 256 ≈ 一个 256-token 逐 token 请求；MTP 网关下 256 事件对应上千 token，
+# 但权重单位是事件数，本轮两三个请求就能把它压到 1/3 以下。
+DELIVERY_SEED_WEIGHT = 256.0
+
+PREFILL_LEDGER_AUDIT = "prefill-ledger-audit.jsonl"
+FP_LEDGER_BACKUPS = 5           # 删/搬/换户之前留几份备份（两张指纹台账共用），多余的自动清
+
+
+# ---- 部署指纹台账通用核 ------------------------------------------------------
+# prefill 速率先验与 decode 交付粒度两张台账形状一致：键=部署指纹（`gw:` 打头）、
+# 子表（场景 / 场景×并发档）、行=[ctx, 值, 时刻, 来源 run_id, 并跑标?]。装载/记账/
+# 限流/删除/搬家/换户/体检过去逐对复制了六遍——「旧键归一」「遗留表不采纳但原样
+# 写回」「锁内读-改-写」这类不变量写两份迟早分叉，差异全部收进 `_LEDGER_KINDS`，
+# 工序只有一份。对外的种类层（`_prefill_ledger_load` / `delivery_ledger_view` 等）
+# 全部是这里的薄包装。
+_LEDGER_KINDS = {
+    "prefill": {
+        "max_points": PREFILL_LEDGER_MAX_POINTS,
+        "per_bucket": PREFILL_LEDGER_PER_BUCKET,
+        "bucket_log2": PREFILL_LEDGER_BUCKET_LOG2,
+        "max_age_s": PREFILL_LEDGER_MAX_AGE_S,
+        "audit": PREFILL_LEDGER_AUDIT,
+        "what": "先验",                # 用户可见报错里的台账名
+        "sub_label": "场景",           # 报错用语：「这张表没有「X」场景」
+        "need_sub": "删单档必须同时指定场景",
+        "rec_sub": "scenario",         # audit 记录里的子表字段名
+    },
+    "delivery": {
+        "max_points": DELIVERY_LEDGER_MAX_POINTS,
+        "per_bucket": DELIVERY_LEDGER_PER_BUCKET,
+        "bucket_log2": DELIVERY_LEDGER_BUCKET_LOG2,
+        "max_age_s": DELIVERY_LEDGER_MAX_AGE_S,
+        "audit": DELIVERY_LEDGER_AUDIT,
+        "what": "交付粒度",
+        "sub_label": "这一栏（场景×并发）",
+        "need_sub": "删单档必须同时指定场景与并发",
+        "rec_sub": "sub",
+    },
+}
+
+
+def _fp_spec(kind: str) -> dict:
+    return _LEDGER_KINDS[kind]
+
+
+def _fp_ledger_load(kind: str, path: str | None, now: float | None = None) -> dict:
+    """读指纹台账：不存在/损坏/结构不合一律当空表（台账是优化项，坏了当没有，
+    不能拖死测速）。磁盘结构：`键 → {子表: [[ctx, 值, ts, run_id], …]}`
+    （第四位是**来源存档**，ADR-0141；旧文件只有三位，装载时补成空串 = 来源未知；
+    第五位是并跑标记，只在置位时占位，旧表不致“读一次就胖一圈”）。
+    丢掉非数、非正的 ctx/值、过期条目（换硬件旧表）与超出上限的尾部；旧网关
+    尾缀键归一（ADR-0139），无 `gw:` 段的旧口径遗留表**不采纳**（ADR-0143，
+    缺网关身份，采纳就是猜归属）。`now` 可注入（体检视图要与装载同源，测试
+    也要能造过期条目）。"""
+    if not path or not os.path.exists(path):
+        return {}
+    spec = _fp_spec(kind)
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            return {}
+        horizon = (now or time.time()) - spec["max_age_s"]
+        out: dict[str, dict[str, list]] = {}
+        for k, subs in raw.items():
+            if not isinstance(k, str) or not isinstance(subs, dict):
+                continue
+            nk = _prefill_key_no_gateway(k)     # 旧键归一（ADR-0139）：多入口合一张
+            if _prefill_key_is_legacy(nk):      # 没有网关段＝身份不全，不猜、不采纳
+                continue
+            kept: dict[str, list] = {}
+            for sub, pts in subs.items():
+                if not isinstance(sub, str) or not isinstance(pts, list):
+                    continue
+                rows = []
+                for p in pts:
+                    if not isinstance(p, (list, tuple)) or len(p) < 3:
+                        continue
+                    c, x, ts = p[0], p[1], p[2]
+                    if any(isinstance(v, bool) or not isinstance(v, (int, float))
+                           for v in (c, x, ts)):
+                        continue
+                    if c <= 0 or x <= 0 or ts < horizon:   # 旧部署的表不拿来估新机器
+                        continue
+                    src = p[3] if len(p) > 3 and isinstance(p[3], str) else ""
+                    row = [float(c), float(x), float(ts), src]
+                    if len(p) > 4 and p[4]:      # 第五位 = 并跑标记（置位才占位）
+                        row.append(1)
+                    rows.append(row)
+                rows.sort(key=lambda e: e[2])
+                if rows:
+                    kept[sub] = rows[-spec["max_points"]:]
+            if kept:
+                dst = out.setdefault(nk, {})
+                for sub, rows in kept.items():
+                    dst.setdefault(sub, []).extend(rows)
+        for subs in out.values():
+            for sub in subs:
+                subs[sub] = _fp_ledger_trim(kind, subs[sub])
+        return out
+    except Exception:   # noqa: BLE001
+        return {}
+
+
+def _fp_ledger_note(kind: str, table: dict, key: str, sub: str, ctx: float,
+                    val: float, now: float | None = None, src: str = "",
+                    flag: int = 0) -> bool:
+    """一个实测锚点归户入表（内存中，收口时落盘）。同档最多留最近
+    `per_bucket` 条（播种取中位数），全表超上限逐出最旧。不写磁盘：
+    逐点落盘会把 I/O 插在测量路径上。
+
+    `src` = 写它的那次测速（run_id，ADR-0141）。事后改存档的环境信息或改名时，
+    要靠这一位把读数从旧身份搬到新身份——没它，「这条存档改了」与「台账里哪些
+    读数是它写的」之间没有任何连接，改完环境基线就永久漂在旧身份上。
+    **归并重放也靠它**：收口时先摘掉 `src==本轮` 的行再重放，同一轮重复落盘
+    不会长出双份。
+
+    `flag=1` = 写它的时候同网关还有另一个 run 在跑（速率互相压低/交付形态互扰）：
+    不剔除、不降权到盘外，只打标——播种时同档优先用干净锚点。"""
+    spec = _fp_spec(kind)
+    if ctx <= 0 or val <= 0:
+        return False
+    now = now or time.time()
+    lst = table.setdefault(key, {}).setdefault(sub, [])
+    same = [e for e in lst
+            if abs(math.log2(float(e[0])) - math.log2(float(ctx)))
+            < spec["bucket_log2"]]
+    if len(same) >= spec["per_bucket"]:
+        lst.remove(min(same, key=lambda e: e[2]))   # 逐出本档最旧一条
+    row = [float(ctx), float(val), float(now), str(src or "")]
+    if flag:
+        row.append(1)
+    lst.append(row)
+    if len(lst) > spec["max_points"]:
+        lst.sort(key=lambda e: e[2])
+        del lst[:len(lst) - spec["max_points"]]
+    return True
+
+
+def _fp_ledger_trim(kind: str, rows: list) -> list:
+    """同档最多留最近 `per_bucket` 条。写侧本来就有这道上限，装载/搬家/换户侧
+    补齐是因为旧键归一与并表会把两份行合到一起，同档可能堆出六条。"""
+    spec = _fp_spec(kind)
+    return _prefill_bucket_trim(rows, spec["per_bucket"], spec["bucket_log2"])
+
+
+def _fp_ledger_raw(path: str) -> dict:
+    """台账**原样**读成 `归一键 → {子表: [[ctx, 值, ts, src], …]}`（不过期清理、
+    不限流）。搬户要用它：改一次环境信息不该顺手把别处的过期条目 GC 掉。
+    坏文件当空表（与装载同口径）。两张指纹台账共用（磁盘形状一致）。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, list]] = {}
+    for k, subs in raw.items():
+        if not isinstance(k, str) or not isinstance(subs, dict):
+            continue
+        nk = _prefill_key_no_gateway(k)      # 旧键归一（ADR-0139）：与装载同一套
+        dst = out.setdefault(nk, {})
+        for scen, rows in subs.items():
+            if not isinstance(scen, str) or not isinstance(rows, list):
+                continue
+            keep = []
+            for r in rows:
+                if not isinstance(r, (list, tuple)) or len(r) < 3:
+                    continue
+                src = r[3] if len(r) > 3 and isinstance(r[3], str) else ""
+                keep.append([r[0], r[1], r[2], src])
+            dst.setdefault(scen, []).extend(keep)
+    return out
+
+
+def _fp_ledger_backup(path: str, now: float | None = None) -> str:
+    """把台账原件备份成 `<台账>.bak-时间戳`（留最近 `FP_LEDGER_BACKUPS` 份）。
+    备份的是**改之前的原件**：改错了还能整张表拿回去。"""
+    now = now or time.time()
+    with open(path, "rb") as f:
+        raw = f.read()
+    backup = f"{path}.bak-{time.strftime('%Y%m%d-%H%M%S', time.localtime(now))}"
+    if os.path.exists(backup):     # 同一秒里连改两次：备份名不撞车，否则前一份被覆盖
+        n = 2
+        while os.path.exists(f"{backup}-{n}") and n < 99:
+            n += 1
+        backup = f"{backup}-{n}"
+    with open(backup, "wb") as f:
+        f.write(raw)
+    for stale in sorted(glob.glob(f"{path}.bak-*"))[:-FP_LEDGER_BACKUPS]:
+        try:
+            os.remove(stale)
+        except OSError:
+            pass
+    return backup
+
+
+def _fp_ledger_audit(path: str, rec: dict, kind: str) -> None:
+    """台账的改动往同目录 audit.jsonl 追加一行。写不进去不报错：数据已备份，
+    事实还在，不该因为审计失败让用户的操作失败。
+
+    两张台账各有一份审计流水（`delivery-ledger-audit.jsonl` 与
+    `prefill-ledger-audit.jsonl`）——混进一份就分不清某次删除动的是哪张表。"""
+    try:
+        with open(os.path.join(os.path.dirname(path) or ".",
+                               _fp_spec(kind)["audit"]), "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def _fp_ledger_prune(kind: str, path: str | None, key: str, sub: str = "",
+                     ctx: float | None = None, now: float | None = None) -> dict:
+    """删锚点工序（入口是各种类层的公开函数，整段读-改-写套在台账锁里）：
+    `ctx` 给定删那一档（同档整桶），否则 `sub` 删那个子表，再否则删整张表。
+    返回 {removed, remaining, backup}；找不到目标一律 ValueError（不猜、
+    不“没删到也算成功”）。
+
+    写回的是**装载后的表**，所以这次删除顺带完成了旧键归一与过期清理（与引擎
+    下次保存同一效果）；删前把原件备份为 `<台账>.bak-时间戳`，并往该台账的
+    audit.jsonl 追加一行留痕。旧口径遗留表（无 `gw:` 段，装载时被跳过）只允许
+    整表删——按子表/单档删都算“猜归属”；删别的表时遗留表原样写回（不合并
+    进来就会被不声不响抹掉：静默删数据是这条链上最贵的错）。"""
+    spec = _fp_spec(kind)
+    now = now or time.time()
+    table = _fp_ledger_load(kind, path)
+    legacy = {k: v for k, v in _fp_ledger_raw(path).items()
+              if _prefill_key_is_legacy(k)}
+    if key in legacy and key not in table:
+        if sub or ctx is not None:
+            raise ValueError("旧口径遗留表（键里没有网关段）只能整表删，"
+                             "按场景/单档删要先认领归属")
+        removed = sum(len(v or []) for v in legacy[key].values()
+                      if isinstance(v, list))
+        backup = _fp_ledger_backup(path, now)
+        rest = {k: v for k, v in legacy.items() if k != key}
+        _ledger_save(path, {**table, **rest})
+        _fp_ledger_audit(path, {"op": "prune-legacy", "key": key,
+                                "removed": removed, "now": now, "kind": kind}, kind)
+        return {"removed": removed, "remaining": 0, "backup": backup,
+                "msg": f"已删除旧口径遗留表（{removed} 条读数）"}
+    subs = table.get(key)
+    if not subs:
+        raise ValueError(f"台账里没有这张表：{key}")
+    if sub and sub not in subs:
+        raise ValueError(f"这张表没有「{sub}」{spec['sub_label']}")
+    removed = 0
+    if ctx is not None:
+        if not sub:
+            raise ValueError(spec["need_sub"])
+        lg = math.log2(float(ctx))
+        rows, kept = subs[sub], []
+        for e in rows:
+            if abs(math.log2(float(e[0])) - lg) < spec["bucket_log2"]:
+                removed += 1
+            else:
+                kept.append(e)
+        if not removed:
+            raise ValueError(f"这一档（{int(ctx)} tokens）没有锚点")
+        if kept:
+            subs[sub] = kept
+        else:
+            del subs[sub]
+    elif sub:
+        removed = len(subs.pop(sub))
+    else:
+        removed = sum(len(v) for v in subs.values())
+        del table[key]
+    if not table.get(key):
+        table.pop(key, None)
+    # 备份原件（不是删后的表）：删错了还能整张表拿回去
+    backup = _fp_ledger_backup(path, now)
+    _ledger_save(path, {**table, **legacy})
+    remaining = sum(len(v) for subs in table.values() for v in subs.values())
+    _fp_ledger_audit(path, {
+        "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+        "op": "prune", "key": key, spec["rec_sub"]: sub or None, "ctx": ctx,
+        "removed": removed, "remaining": remaining, "kind": kind,
+        "backup": os.path.basename(backup)}, kind)
+    return {"removed": removed, "remaining": remaining,
+            "backup": os.path.basename(backup)}
+
+
+def _fp_ledger_rehome(kind: str, path: str | None, run_id: str, old_key: str,
+                      new_key: str, now: float | None = None) -> dict:
+    """把某次测速写进台账的读数**从旧身份搬到新身份**（ADR-0141）。
+
+    触发：事后改了存档的部署环境信息（切换/编辑环境）或改了模型名。存档那侧的
+    身份变了，台账那侧不会自己变——基线就永久漂在旧键上：下次按新登记跑测查
+    不到这张表（白攒），而那张「这次不会用上」的旧表还可能被当成垃圾删掉。
+
+    只搬**来源标记等于 `run_id`** 的读数（`_fp_ledger_note` 的 `src`）。旧数据
+    没有来源位，搬不动——如实报 `unknown` 数让界面提示人去面板处理，绝不猜哪些
+    是它写的（猜错就是把别的部署的读数搬进这台机器）。目标表按装载同一套限流
+    收敛，被逐出的如实报 `dropped`；旧表搬空即摘（留一张空表会在界面上挂着
+    "这次不会用上"的幽灵）。返回 {moved, unknown, dropped, from, to, backup}；
+    一点没搬动就不写盘。"""
+    now = now or time.time()
+    empty = {"moved": 0, "unknown": 0, "dropped": 0, "from": old_key, "to": new_key,
+             "backup": None}
+    if not path or not os.path.exists(path) or not run_id or old_key == new_key:
+        return empty
+    table = _fp_ledger_raw(path)
+    subs = table.get(old_key)
+    if not subs:
+        return empty
+    moved = unknown = 0
+    for sub, rows in list(subs.items()):
+        mine = [r for r in rows if _row_src(r) == run_id]
+        if mine:
+            subs[sub] = [r for r in rows if _row_src(r) != run_id]
+            dst = table.setdefault(new_key, {}).setdefault(sub, [])
+            dst.extend(mine)
+            dst.sort(key=lambda e: float(e[2]))
+            moved += len(mine)
+        unknown += sum(1 for r in subs[sub] if not _row_src(r))
+    if not moved:
+        return {**empty, "unknown": unknown}
+    if not any(table.get(old_key, {}).values()):
+        table.pop(old_key, None)
+    survived = 0
+    for sub, rows in table[new_key].items():
+        trimmed = _fp_ledger_trim(kind, rows)
+        survived += sum(1 for r in trimmed if _row_src(r) == run_id)
+        table[new_key][sub] = trimmed
+    backup = _fp_ledger_backup(path, now)
+    _ledger_save(path, table)
+    dropped = moved - survived
+    _fp_ledger_audit(path, {
+        "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+        "op": "rehome", "run": run_id, "from": old_key, "to": new_key,
+        "moved": moved, "dropped": dropped, "unknown": unknown, "kind": kind,
+        "backup": os.path.basename(backup)}, kind)
+    return {"moved": moved, "unknown": unknown, "dropped": dropped,
+            "from": old_key, "to": new_key, "backup": os.path.basename(backup)}
+
+
+def _fp_ledger_rekey_gw(kind: str, path: str | None, old_gw: str, new_gw: str,
+                        now: float | None = None) -> dict:
+    """网关（provider）**改名** → 台账里那批表整张改户（ADR-0143）。
+
+    与 `*_ledger_rehome` 不同粒度：那条按「哪次测速写的」搬（一个存档改了环境
+    信息），本条按**网关段前缀**搬（整张表本来就属于那条网关，与是哪轮跑的无关）。
+    正因为键里带了网关段，前缀替换不会误伤同名模型在另一条网关下的表。
+    **两张台账必须一起改**（调用方 server 侧 `_gw_renames` 两处都调）：只改一张
+    会出现“prefill 先验跟着改名走、decode 种子留在旧网关名下”，下次按新登记
+    跑测就只播种一半（半对新半旧比全旧更难查）。
+
+    目标键已存在（旧表早已存在另一台同身份）→ 同档并桶后按上限收敛，被逐出的
+    如实报 `dropped`。没改到东西就不写盘。调用方负责判定“这真的是改名”而不是
+    “删了一条又新建一条”——那一步不能猜。"""
+    empty = {"moved": 0, "rows": 0, "dropped": 0, "from": old_gw, "to": new_gw,
+             "backup": None}
+    if not path or not os.path.exists(path) or not old_gw or not new_gw or old_gw == new_gw:
+        return empty
+    now = now or time.time()
+    table = _fp_ledger_raw(path)
+    prefix, new_prefix = f"gw:{old_gw}|", f"gw:{new_gw}|"
+    moved = rows = 0
+    for key in [k for k in table if isinstance(k, str) and k.startswith(prefix)]:
+        nk = new_prefix + key[len(prefix):]
+        if nk == key:
+            continue
+        src = table.pop(key)
+        dst = table.setdefault(nk, {})
+        for sub, pts in (src or {}).items():
+            dst.setdefault(sub, []).extend(pts if isinstance(pts, list) else [])
+            moved += 1
+            rows += len(dst[sub])
+        if not any(dst.get(s) for s in dst):
+            table.pop(nk, None)
+    if not moved:
+        return empty
+    dropped = 0
+    for key, subs in table.items():
+        if not key.startswith(new_prefix):
+            continue
+        for sub, rows_ in list(subs.items()):
+            trimmed = _fp_ledger_trim(kind, rows_)
+            dropped += max(0, len(rows_) - len(trimmed))
+            subs[sub] = trimmed
+    backup = _fp_ledger_backup(path, now)
+    _ledger_save(path, table)
+    _fp_ledger_audit(path, {
+        "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+        "op": "rekey-gw", "from": old_gw, "to": new_gw,
+        "moved": moved, "rows": rows, "dropped": dropped, "kind": kind,
+        "backup": os.path.basename(backup)}, kind)
+    return {"moved": moved, "rows": rows, "dropped": dropped,
+            "from": old_gw, "to": new_gw, "backup": os.path.basename(backup)}
+
+
+def _fp_ledger_view(kind: str, path: str | None, now: float | None,
+                    fmt_anchor, split_sub, view_extra: dict | None = None) -> dict:
+    """指纹台账的**只读体检视图**共用骨架（给用户看的那一面，ADR-0140）。
+
+    为什么要这一面：基线直接决定等待期/跑动中「预估」读数的平台值，错了会一路
+    骗到屏幕上（2026-10-19：脏锚点把 256K 估成 2523，实测 490），而它此前完全
+    隐形——既不能看也不能删。
+
+    走 `_fp_ledger_load` 同一套装载口径，所以**界面所见就是引擎会用的那些锚点**：
+    过期条目与旧网关尾缀键在装载时已被清掉/归一，不再这里排出第二套真相。
+    盘上有、引擎不用的旧口径遗留表列进 `stale_keys`（闷着不报就等于“我明明存了
+    东西，界面却说没有”）。锚点与子表键的字段形状由回调决定（速率表是 rate，
+    交付粒度表是 x + 并发档）。只读，不给写回口径。"""
+    spec = _fp_spec(kind)
+    now = now or time.time()
+    out = []
+    for key, subs in (_fp_ledger_load(kind, path, now) or {}).items():
+        gw, model, dep = _prefill_ledger_heads(key)
+        scens, newest = [], 0.0
+        rows_all = [e for rows in subs.values() for e in rows]
+        for sub, rows in subs.items():
+            anchors = []
+            for g in _prefill_bucket_groups(rows, spec["bucket_log2"]):
+                ts = max(float(e[2]) for e in g)
+                newest = max(newest, ts)
+                a = fmt_anchor(g)
+                a["n"] = len(g)
+                a["age_d"] = round((now - ts) / 86400, 1)
+                anchors.append(a)
+            if anchors:
+                entry = split_sub(sub)
+                entry["label"] = SCENARIOS.get(entry["scenario"], {}).get(
+                    "label", entry["scenario"])
+                entry["anchors"] = anchors
+                scens.append(entry)
+        out.append({"key": key, "gateway": gw, "model": model, "deployment": dep,
+                    "age_d": (round((now - newest) / 86400, 1) if newest else None),
+                    # 来源统计（ADR-0141）：legacy > 0 = 还有旧格式读数没标来源，
+                    # 改了存档环境信息时它们搬不动，得让人看得见去面板自己处理
+                    "runs": len({e[3] for e in rows_all if len(e) > 3 and e[3]}),
+                    "legacy": sum(1 for e in rows_all if not (len(e) > 3 and e[3])),
+                    # 并跑打标计数（>0 就要说一句话说为什么这张表偏低）
+                    "concurrent": sum(1 for e in rows_all if len(e) > 4 and e[4]),
+                    "scenarios": scens})
+    # 新鲜度升序：最近记的排在最前（管理界面里"最相关的那张"要先看见），
+    # 时间未知的排最后（它多半是整表过期的边角料，不是要对着改的那张）
+    out.sort(key=lambda t: (t["age_d"] is None, t["age_d"] or 0.0))
+    stale = sorted(k for k in _fp_ledger_raw(path) if _prefill_key_is_legacy(k))
+    return {**(view_extra or {}),
+            "max_age_days": round(spec["max_age_s"] / 86400),
+            "max_points": spec["max_points"],
+            "per_bucket": spec["per_bucket"],
+            "stale_keys": stale,
+            "empty": not out, "tables": out}
+
+
+def _prefill_view_anchor(g: list) -> dict:
+    """体检视图锚点（prefill）：ctx/速率各取同档中位数。"""
+    return {"ctx": round(float(statistics.median([float(e[0]) for e in g]))),
+            "rate": round(float(statistics.median([float(e[1]) for e in g])), 1)}
+
+
+def _delivery_view_anchor(g: list) -> dict:
+    """体检视图锚点（delivery）：ctx/每包 token 数各取同档中位数。并跑期间写的
+    锚点偏低（多请求共用一条流），不标出来下一轮会把「偏低」当成「就是这么粗」。"""
+    return {"ctx": round(float(statistics.median([float(e[0]) for e in g]))),
+            "x": round(float(statistics.median([float(e[1]) for e in g])), 2),
+            "concurrent": any(len(e) > 4 and e[4] for e in g)}
+
+
+def _delivery_view_sub(sub: str) -> dict:
+    """子表键 `场景|c并发` 拆开：界面要的是数字并发档（不转就拼不出「并发 1」
+    这种标题，排序也会按字典顺排成 c1, c11, c2）。"""
+    scen, _, conc_seg = sub.partition("|c")
+    return {"scenario": scen,
+            "conc": int(conc_seg) if conc_seg.isdigit() else 1}
 
 
 def _prefill_fingerprint(model: str, cfg: dict) -> str:
@@ -1457,126 +1969,71 @@ def _prefill_key_no_gateway(key: str) -> str:
     return "|".join(parts) or key
 
 
-def _prefill_bucket_groups(rows: list) -> list[list]:
+def _prefill_bucket_groups(rows: list,
+                           log2: float = PREFILL_LEDGER_BUCKET_LOG2) -> list[list]:
     """同档（log2(ctx) 差 <阈值）归组，按 ctx 升序返回每组的原始条目。
 
     装载侧限流、播种取中位数、给用户的体检视图三处都要同一套分组，各写一
-    份迟早分叉（同档边界不一致会出现“看得见的销点删不掉”）。"""
+    份迟早分叉（同档边界不一致会出现“看得见的销点删不掉”）。
+
+    `log2` 可传：prefill 速率先验与 decode 交付粒度两张台账共用这套分组，
+    阈值各自定（阈值不同的两张表若共用硬编码阈值，会出现“这张表算同档、那张表不算”）。"""
     groups: list[list] = []
     for e in sorted((e for e in (rows or [])
                      if isinstance(e, (list, tuple)) and len(e) >= 3
                      and float(e[0]) > 0 and float(e[1]) > 0),
                     key=lambda e: float(e[0])):
         if groups and (math.log2(float(e[0])) - math.log2(float(groups[-1][0][0]))
-                       < PREFILL_LEDGER_BUCKET_LOG2):
+                       < log2):
             groups[-1].append(list(e))
         else:
             groups.append([list(e)])
     return groups
 
 
-def _prefill_bucket_trim(rows: list, per_bucket: int = PREFILL_LEDGER_PER_BUCKET) -> list:
+def _prefill_bucket_trim(rows: list, per_bucket: int = PREFILL_LEDGER_PER_BUCKET,
+                         log2: float = PREFILL_LEDGER_BUCKET_LOG2) -> list:
     """同档最多留最近 `per_bucket` 条。写侧本来就有这道上限，装载侧
     补齐是因为旧键归一会把多入口的两张表合到一起，同档可能堆出六条。"""
     out: list = []
-    for g in _prefill_bucket_groups(rows):
+    for g in _prefill_bucket_groups(rows, log2):
         out.extend(sorted(g, key=lambda e: float(e[2]))[-per_bucket:])
     return out
 
 
 def _prefill_ledger_load(path: str | None, now: float | None = None) -> dict:
-    """读速率先验台账：不存在/损坏/结构不合一律当空表（台账是优化项，坏了当
-    没有，不能拖死测速）。磁盘结构：`键 → {场景: [[ctx, rate, ts, run_id], …]}`
-    （第四位是**来源存档**，ADR-0141；旧文件只有三位，装载时补成空串 = 来源未知）；
-    丢掉非数、非正的 ctx/rate、过期条目（换硬件旧表）与超出上限的尾部。`now` 可注入
-    （体检视图要与装载同源，测试也要能造过期条目）。"""
-    if not path or not os.path.exists(path):
-        return {}
-    try:
-        with open(path, encoding="utf-8") as f:
-            raw = json.load(f)
-        if not isinstance(raw, dict):
-            return {}
-        horizon = (now or time.time()) - PREFILL_LEDGER_MAX_AGE_S
-        out: dict[str, dict[str, list]] = {}
-        for k, subs in raw.items():
-            if not isinstance(k, str) or not isinstance(subs, dict):
-                continue
-            kept: dict[str, list] = {}
-            for scen, pts in subs.items():
-                if not isinstance(scen, str) or not isinstance(pts, list):
-                    continue
-                rows = []
-                for p in pts:
-                    if not isinstance(p, (list, tuple)) or len(p) < 3:
-                        continue
-                    c, r, ts = p[0], p[1], p[2]
-                    if any(isinstance(x, bool) or not isinstance(x, (int, float))
-                           for x in (c, r, ts)):
-                        continue
-                    if c <= 0 or r <= 0 or ts < horizon:   # 旧部署的表不拿来估新机器
-                        continue
-                    src = p[3] if len(p) > 3 and isinstance(p[3], str) else ""
-                    rows.append([float(c), float(r), float(ts), src])
-                rows.sort(key=lambda e: e[2])
-                if rows:
-                    kept[scen] = rows[-PREFILL_LEDGER_MAX_POINTS:]
-            nk = _prefill_key_no_gateway(k)     # 旧键归一（ADR-0139）：多入口合一张
-            if _prefill_key_is_legacy(nk):      # 没有网关段＝身份不全，不猜、不播种
-                continue
-            if kept:
-                dst = out.setdefault(nk, {})
-                for scen, rows in kept.items():
-                    dst.setdefault(scen, []).extend(rows)
-        for subs in out.values():
-            for scen in subs:
-                subs[scen] = _prefill_bucket_trim(subs[scen])
-        return out
-    except Exception:   # noqa: BLE001
-        return {}
+    """速率先验台账装载（薄包装，工序与口径见 `_fp_ledger_load` 通用核）。"""
+    return _fp_ledger_load("prefill", path, now)
 
 
 def _prefill_ledger_seed(pts: list) -> list[tuple[float, float]]:
     """台账条目 → rate_prior 用的锚点：同档取**中位数**——多轮复测/多轮 run 的
     噪声互打对，单次尖峰（被别的客户端挤占那一轮）不致单独决定外推斜率；
-    ctx 取组内中位数，结果按 ctx 升序。"""
-    return [(float(statistics.median([float(x[0]) for x in g])),
-             float(statistics.median([float(x[1]) for x in g])))
-            for g in _prefill_bucket_groups(pts)]
+    ctx 取组内中位数，结果按 ctx 升序。
+
+    同档里若有非并跑（未带第五位）的锚点，**只用非并跑那几条**算中位数：并跑点
+    系统性偏低（同网关排队串扰），与干净点平铺中位数会把先验往低带。全档都是并跑点
+    时仍用它们（有偏的先验远比没有先验好，且不删记录）。"""
+    out: list[tuple[float, float]] = []
+    for g in _prefill_bucket_groups(pts):
+        clean = [e for e in g if not (len(e) > 4 and e[4])]
+        use = clean or g
+        out.append((float(statistics.median([float(x[0]) for x in use])),
+                    float(statistics.median([float(x[1]) for x in use]))))
+    return out
 
 
 def _prefill_ledger_note(table: dict, key: str, scenario: str, ctx: float,
                          rate: float, now: float | None = None,
-                         src: str = "") -> bool:
-    """一个实测锚点归户入表（内存中，收口时落盘）。同档最多留最近
-    `PREFILL_LEDGER_PER_BUCKET` 条（播种取中位数），全表超上限逐出最旧。不写磁盘：
-    逐点落盘会把 I/O 插在测量路径上。
-
-    `src` = 写它的那次测速（run_id，ADR-0141）。事后改存档的环境信息或改名时，要靠
-    这一位把读数从旧身份搬到新身份——没它，「这条存档改了」与「台账里哪些读数是它
-    写的」之间没有任何连接，改完环境基线就永久漂在旧身份上。"""
-    if ctx <= 0 or rate <= 0:
-        return False
-    now = now or time.time()
-    lst = table.setdefault(key, {}).setdefault(scenario, [])
-    same = [e for e in lst
-            if abs(math.log2(float(e[0])) - math.log2(float(ctx)))
-            < PREFILL_LEDGER_BUCKET_LOG2]
-    if len(same) >= PREFILL_LEDGER_PER_BUCKET:
-        lst.remove(min(same, key=lambda e: e[2]))   # 逐出本档最旧一条
-    lst.append([float(ctx), float(rate), float(now), str(src or "")])
-    if len(lst) > PREFILL_LEDGER_MAX_POINTS:
-        lst.sort(key=lambda e: e[2])
-        del lst[:len(lst) - PREFILL_LEDGER_MAX_POINTS]
-    return True
+                         src: str = "", flag: int = 0) -> bool:
+    """prefill 锚点归户（薄包装，工序与 src/flag 口径见 `_fp_ledger_note`）。"""
+    return _fp_ledger_note("prefill", table, key, scenario, ctx, rate, now,
+                           src, flag)
 
 
 # ---- 台账体检与管理（给用户看的那一面，ADR-0140）------------------------------
-# 为什么要这一面：先验直接决定等待期「预估」读数的平台值，错了会一路骗到屏幕
-# 上（2026-10-19：脏锚点把 256K 估成 2523，实测 490），而它此前完全隐形——既不
-# 能看也不能删。下面两个函数只算数据，不碰 HTTP。
-PREFILL_LEDGER_BACKUPS = 5           # 删之前留几份备份，多余的自动清
-PREFILL_LEDGER_AUDIT = "prefill-ledger-audit.jsonl"
+# 备份份数与审计文件名常量已随通用核上移（FP_LEDGER_BACKUPS / *_LEDGER_AUDIT）；
+# 这里只剩种类层薄包装，工序与口径注释都在 `_fp_ledger_*` 通用核上。
 
 
 def _prefill_ledger_heads(key: str) -> tuple[str, str, str]:
@@ -1604,294 +2061,130 @@ def _prefill_key_is_legacy(key: str) -> bool:
 
 
 def prefill_ledger_view(path: str | None, now: float | None = None) -> dict:
-    """先验台账的**只读体检视图**：每张表有什么锚点、多少天前记的。
-
-    走 `_prefill_ledger_load` 同一套装载口径，所以**界面所见就是引擎会用的那
-    些锚点**：过期条目（换硬件旧表）与旧网关尾缀键在装载时已被清掉/归一，不再
-    这里排出第二套真相。不给它写回口径：只读。"""
-    now = now or time.time()
-    out = []
-    for key, subs in (_prefill_ledger_load(path, now) or {}).items():
-        gw, model, dep = _prefill_ledger_heads(key)
-        scens, newest = [], 0.0
-        rows_all = [e for rows in subs.values() for e in rows]
-        for scen, rows in subs.items():
-            anchors = []
-            for g in _prefill_bucket_groups(rows):
-                ts = max(float(e[2]) for e in g)
-                newest = max(newest, ts)
-                anchors.append({
-                    "ctx": round(float(statistics.median([float(e[0]) for e in g]))),
-                    "rate": round(float(statistics.median([float(e[1]) for e in g])), 1),
-                    "n": len(g),
-                    "age_d": round((now - ts) / 86400, 1)})
-            if anchors:
-                scens.append({"scenario": scen,
-                              "label": SCENARIOS.get(scen, {}).get("label", scen),
-                              "anchors": anchors})
-        out.append({"key": key, "gateway": gw, "model": model, "deployment": dep,
-                    "age_d": (round((now - newest) / 86400, 1) if newest else None),
-                    # 来源统计（ADR-0141）：legacy > 0 = 还有旧格式读数没标来源，
-                    # 改了存档环境信息时它们搬不动，得让人看得见去面板自己处理
-                    "runs": len({e[3] for e in rows_all if len(e) > 3 and e[3]}),
-                    "legacy": sum(1 for e in rows_all if not (len(e) > 3 and e[3])),
-                    "scenarios": scens})
-    # 新鲜度升序：最近记的排在最前（管理界面里"最相关的那张"要先看见），
-    # 时间未知的排最后（它多半是整表过期的边角料，不是要对着改的那张）
-    out.sort(key=lambda t: (t["age_d"] is None, t["age_d"] or 0.0))
-    # 盘上有、引擎不用的表要说出来：旧口径遗留的键（无网关段）装载时被跳过，闷着不报
-    # 就等于“我明明存了东西，界面却说没有”（面板据此提示，用户自己决定删不删）
-    stale = sorted(k for k in _prefill_ledger_raw(path) if _prefill_key_is_legacy(k))
-    return {"max_age_days": round(PREFILL_LEDGER_MAX_AGE_S / 86400),
-            "max_points": PREFILL_LEDGER_MAX_POINTS,
-            "per_bucket": PREFILL_LEDGER_PER_BUCKET,
-            "stale_keys": stale,
-            "empty": not out, "tables": out}
+    """先验台账的**只读体检视图**（骨架见 `_fp_ledger_view` 通用核；界面所见
+    就是引擎会用的那些锚点）。只读，不给写回口径。"""
+    return _fp_ledger_view("prefill", path, now, _prefill_view_anchor,
+                           lambda sub: {"scenario": sub})
 
 
 def prefill_ledger_prune(path: str | None, key: str, scenario: str = "",
                          ctx: float | None = None,
                          now: float | None = None) -> dict:
-    """删先验锚点：`ctx` 给定删那一档（同档整桶），否则 `scenario` 删那个场景，
-    再否则删整张表。返回 {removed, remaining, backup}；找不到目标一律 ValueError
-    （不猜、不“没删到也算成功”）。
+    """删先验锚点的**入口**：整段读-改-写套在台账锁里（ADR-0144）。
 
-    写回的是**装载后的表**，所以这次删除顺带完成了旧键归一与过期清理（与引擎
-    下次保存同一效果）；删前把原件备份为 `<台账>.bak-时间戳`（留最近
-    `PREFILL_LEDGER_BACKUPS` 份），并往同目录的 audit.jsonl 追加一行留痕。"""
+    为什么：不加锁时，一次删除可能被同时收口的测速用内存里的旧表盖回去（与两个
+    run 互盖同一个病根）。锁只护台账文件这一段，测速本身不拦。
+    工序与报错口径见 `_fp_ledger_prune` 通用核。"""
     if not path or not os.path.exists(path):
         raise ValueError("还没有先验台账（本轮之前没跑过这台部署）")
-    now = now or time.time()
-    table = _prefill_ledger_load(path)
-    # 旧口径遗留表：装载时被跳过（不在 `table` 里），但仍要删得掉——否则它在盘上既
-    # 不被采纳、又没人能清理。只允许整表删（缺网关段，按场景/单档删都算“猜归属”）。
-    legacy = {k: v for k, v in _prefill_ledger_raw(path).items() if _prefill_key_is_legacy(k)}
-    if key in legacy and key not in table:
-        if scenario or ctx is not None:
-            raise ValueError("旧口径遗留表（键里没有网关段）只能整表删，"
-                             "按场景/单档删要先认领归属")
-        removed = sum(len(v or []) for v in legacy[key].values()
-                      if isinstance(v, list))
-        backup = _prefill_ledger_backup(path, now)
-        rest = {k: v for k, v in legacy.items() if k != key}
-        _ledger_save(path, {**table, **rest})
-        _prefill_ledger_audit(path, {"op": "prune-legacy", "key": key,
-                                     "removed": removed, "now": now})
-        return {"removed": removed, "remaining": 0, "backup": backup,
-                "msg": f"已删除旧口径遗留表（{removed} 条读数）"}
-    subs = table.get(key)
-    if not subs:
-        raise ValueError(f"台账里没有这张表：{key}")
-    if scenario and scenario not in subs:
-        raise ValueError(f"这张表没有「{scenario}」场景")
-    removed = 0
-    if ctx is not None:
-        if not scenario:
-            raise ValueError("删单档必须同时指定场景")
-        lg = math.log2(float(ctx))
-        rows, kept = subs[scenario], []
-        for e in rows:
-            if abs(math.log2(float(e[0])) - lg) < PREFILL_LEDGER_BUCKET_LOG2:
-                removed += 1
-            else:
-                kept.append(e)
-        if not removed:
-            raise ValueError(f"这一档（{int(ctx)} tokens）没有锚点")
-        if kept:
-            subs[scenario] = kept
-        else:
-            del subs[scenario]
-    elif scenario:
-        removed = len(subs.pop(scenario))
-    else:
-        removed = sum(len(v) for v in subs.values())
-        del table[key]
-    if not table.get(key):
-        table.pop(key, None)
-    # 备份原件（不是删后的表）：删错了还能整张表拿回去
-    backup = _prefill_ledger_backup(path, now)
-    # 遗留表原样写回：它们只是“不被采纳”，不是“该被删”——不合并进来就会在删别的表时
-    # 被不声不响抹掉（静默删数据是这条链上最贵的错）
-    _ledger_save(path, {**table, **legacy})
-    remaining = sum(len(v) for subs in table.values() for v in subs.values())
-    _prefill_ledger_audit(path, {
-        "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
-        "op": "prune", "key": key, "scenario": scenario or None, "ctx": ctx,
-        "removed": removed, "remaining": remaining,
-        "backup": os.path.basename(backup)})
-    return {"removed": removed, "remaining": remaining,
-            "backup": os.path.basename(backup)}
-
-
-def _prefill_ledger_backup(path: str, now: float | None = None) -> str:
-    """把台账原件备份成 `<台账>.bak-时间戳`（留最近 `PREFILL_LEDGER_BACKUPS` 份）。
-    备份的是**改之前的原件**：改错了还能整张表拿回去。"""
-    now = now or time.time()
-    with open(path, "rb") as f:
-        raw = f.read()
-    backup = f"{path}.bak-{time.strftime('%Y%m%d-%H%M%S', time.localtime(now))}"
-    if os.path.exists(backup):     # 同一秒里连改两次：备份名不撞车，否则前一份被覆盖
-        n = 2
-        while os.path.exists(f"{backup}-{n}") and n < 99:
-            n += 1
-        backup = f"{backup}-{n}"
-    with open(backup, "wb") as f:
-        f.write(raw)
-    for stale in sorted(glob.glob(f"{path}.bak-*"))[:-PREFILL_LEDGER_BACKUPS]:
-        try:
-            os.remove(stale)
-        except OSError:
-            pass
-    return backup
-
-
-def _prefill_ledger_audit(path: str, rec: dict) -> None:
-    """台账的改动往同目录 audit.jsonl 追加一行。写不进去不报错：数据已备份，
-    事实还在，不该因为审计失败让用户的操作失败。"""
-    try:
-        with open(os.path.join(os.path.dirname(path) or ".",
-                               PREFILL_LEDGER_AUDIT), "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
-
-
-def _prefill_ledger_raw(path: str) -> dict:
-    """台账**原样**读成 `归一键 → {场景: [[ctx, rate, ts, src], …]}`（不过期清理、
-    不限流）。搬户要用它：改一次环境信息不该顺手把别处的过期条目 GC 掉。
-    坏文件当空表（与装载同口径）。"""
-    try:
-        with open(path, encoding="utf-8") as f:
-            raw = json.load(f)
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    out: dict[str, dict[str, list]] = {}
-    for k, subs in raw.items():
-        if not isinstance(k, str) or not isinstance(subs, dict):
-            continue
-        nk = _prefill_key_no_gateway(k)      # 旧键归一（ADR-0139）：与装载同一套
-        dst = out.setdefault(nk, {})
-        for scen, rows in subs.items():
-            if not isinstance(scen, str) or not isinstance(rows, list):
-                continue
-            keep = []
-            for r in rows:
-                if not isinstance(r, (list, tuple)) or len(r) < 3:
-                    continue
-                src = r[3] if len(r) > 3 and isinstance(r[3], str) else ""
-                keep.append([r[0], r[1], r[2], src])
-            dst.setdefault(scen, []).extend(keep)
-    return out
+    with _ledger_lock(path):
+        return _fp_ledger_prune("prefill", path, key, scenario, ctx, now)
 
 
 def prefill_ledger_rehome(path: str | None, run_id: str, old_key: str,
                           new_key: str, now: float | None = None) -> dict:
-    """把某次测速写进台账的读数**从旧身份搬到新身份**（ADR-0141）。
+    """搬家入口（台账锁串行，ADR-0144），工序见 `_fp_ledger_rehome` 通用核。"""
+    with _ledger_lock(path):
+        return _fp_ledger_rehome("prefill", path, run_id, old_key, new_key, now)
 
-    触发：事后改了存档的部署环境信息（切换/编辑环境）或改了模型名。存档那侧的身份
-    变了，台账那侧不会自己变——先验就永久漂在旧键上：下次按新登记跑测查不到这张表
-    （白攒），而那张「这次不会用上」的旧表还可能被当成垃圾删掉。
 
-    只搬**来源标记等于 `run_id`** 的读数（`_prefill_ledger_note` 的 `src`）。旧数据
-    没有来源位，搬不动——如实报 `unknown` 数让界面提示人去面板处理，绝不猜哪些是
-    它写的（猜错就是把别的部署的读数搬进这台机器）。返回 {moved, unknown, dropped,
-    from, to, backup}；一点没搬动就不写盘。"""
-    now = now or time.time()
-    empty = {"moved": 0, "unknown": 0, "dropped": 0, "from": old_key, "to": new_key,
-             "backup": None}
-    if not path or not os.path.exists(path) or not run_id:
-        return empty
-    if old_key == new_key:
-        return empty                        # 环境字段没变到换身份（例如只改了 params）
-    table = _prefill_ledger_raw(path)
-    subs = table.get(old_key)
-    if not subs:
-        return empty
-    moved = unknown = 0
-    for scen, rows in list(subs.items()):
-        mine = [r for r in rows if r[3] == run_id]
-        if mine:
-            subs[scen] = [r for r in rows if r[3] != run_id]
-            dst = table.setdefault(new_key, {}).setdefault(scen, [])
-            dst.extend(mine)
-            dst.sort(key=lambda e: float(e[2]))
-            moved += len(mine)
-        unknown += sum(1 for r in subs[scen] if not r[3])
-    if not moved:
-        return {**empty, "unknown": unknown}
-    # 旧表被搬空就摘掉（留一张空表会在界面上挂着"这次不会用上"的幽灵）
-    if not any(table.get(old_key, {}).values()):
-        table.pop(old_key, None)
-    # 目标表按装载同一套限流收敛；被逐出的必须是**搬来的那几条**才算丢数据，如实报
-    survived = 0
-    for scen, rows in table[new_key].items():
-        trimmed = _prefill_bucket_trim(rows)
-        survived += sum(1 for r in trimmed if r[3] == run_id)
-        table[new_key][scen] = trimmed
-    backup = _prefill_ledger_backup(path, now)
-    _ledger_save(path, table)
-    dropped = moved - survived
-    _prefill_ledger_audit(path, {
-        "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
-        "op": "rehome", "run": run_id, "from": old_key, "to": new_key,
-        "moved": moved, "dropped": dropped, "unknown": unknown,
-        "backup": os.path.basename(backup)})
-    return {"moved": moved, "unknown": unknown, "dropped": dropped,
-            "from": old_key, "to": new_key, "backup": os.path.basename(backup)}
+def _row_src(row) -> str:
+    """台账行的来源位（哪次测速写的）。ADR-0141 之前落盘的行只有三位
+    `(x, 值, 时刻)`，直接 `row[3]` 会 IndexError 打掉整个改名操作。"""
+    return row[3] if len(row) > 3 and isinstance(row[3], str) else ""
 
 
 def prefill_ledger_rekey_gw(path: str | None, old_gw: str, new_gw: str,
                             now: float | None = None) -> dict:
-    """网关（provider）**改名**→ 台账里那批表整张改户（ADR-0143）。
+    """换户入口（台账锁串行，ADR-0144），工序见 `_fp_ledger_rekey_gw` 通用核。"""
+    with _ledger_lock(path):
+        return _fp_ledger_rekey_gw("prefill", path, old_gw, new_gw, now)
 
-    与 `prefill_ledger_rehome` 不同粒度：那条按「哪次测速写的」搬（一个存档改了环境
-    信息），本条按**网关段前缀**搬（整张表本来就属于那条网关，与是哪轮跑的无关）。
-    正因为键里带了网关段，前缀替换不会误伤同名模型在另一条网关下的表。
 
-    目标键已存在（旧表早已存在另一台同身份）→ 同档并桶后按上限收敛，被逐出的如实报
-    `dropped`。没改到东西就不写盘。调用方负责判定“这真的是改名”而不是
-    “删了一条又新建一条”（见 server 侧 `_gw_renames`）——那一步不能猜。"""
-    empty = {"moved": 0, "rows": 0, "dropped": 0, "from": old_gw, "to": new_gw,
-             "backup": None}
-    if not path or not os.path.exists(path) or not old_gw or not new_gw or old_gw == new_gw:
-        return empty
-    now = now or time.time()
-    table = _prefill_ledger_raw(path)
-    prefix, new_prefix = f"gw:{old_gw}|", f"gw:{new_gw}|"
-    moved = rows = 0
-    for key in [k for k in table if isinstance(k, str) and k.startswith(prefix)]:
-        nk = new_prefix + key[len(prefix):]
-        if nk == key:
-            continue
-        src = table.pop(key)
-        dst = table.setdefault(nk, {})
-        for scen, pts in (src or {}).items():
-            dst.setdefault(scen, []).extend(pts if isinstance(pts, list) else [])
-            moved += 1
-            rows += len(dst[scen])
-        if not any(dst.get(s) for s in dst):
-            table.pop(nk, None)
-    if not moved:
-        return empty
-    dropped = 0
-    for key, subs in table.items():
-        if not key.startswith(new_prefix):
-            continue
-        for scen, rows_ in list(subs.items()):
-            trimmed = _prefill_bucket_trim(rows_)
-            dropped += max(0, len(rows_) - len(trimmed))
-            subs[scen] = trimmed
-    backup = _prefill_ledger_backup(path, now)
-    _ledger_save(path, table)
-    _prefill_ledger_audit(path, {
-        "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
-        "op": "rekey-gw", "from": old_gw, "to": new_gw,
-        "moved": moved, "rows": rows, "dropped": dropped,
-        "backup": os.path.basename(backup)})
-    return {"moved": moved, "rows": rows, "dropped": dropped,
-            "from": old_gw, "to": new_gw, "backup": os.path.basename(backup)}
+# ---- decode 交付粒度台账（ADR-0145 草稿）--------------------------------------
+# 常量与「为什么要有」已随通用核上移（搜 DELIVERY_LEDGER_FILE）；这里只剩
+# 种类层薄包装与 delivery 专属的播种选档逻辑（`_delivery_seed_x`）。
+
+
+def _delivery_sub(scenario: str, conc: int) -> str:
+    """台账子表键 = 场景 + 并发档。并发批里各请求共享服务端资源、交付粒度与
+    单发不可比（ADR-0074 同一理由），分子表存而不是分一张表：两边各自攒锚点、
+    永不串用。"""
+    return f"{scenario}|c{max(1, int(conc))}"
+
+
+def _delivery_ledger_load(path: str | None, now: float | None = None) -> dict:
+    """交付粒度台账装载（薄包装，工序与口径见 `_fp_ledger_load` 通用核）。
+    子表键 = `场景|c并发`（`_delivery_sub`）。"""
+    return _fp_ledger_load("delivery", path, now)
+
+
+def _delivery_seed_x(rows: list, ctx: float) -> dict | None:
+    """台账条目 → 本轮用的一个种子：按档位**就近取桶**取中位数。
+
+    为什么就近而不是全表平均：交付粒度对上下文档不是光滑曲线（它是台阶），
+    全表平均会两边都不像；就近取桶至少拿同一工况的观测，实在没有才退到
+    相邻档（比“本轮从零学”强：冷启动默认 1 事件/token 对 MTP 网关能偏 5 倍）。
+
+    同档里若有非并跑（未带第五位）锚点，**只用非并跑那几条**：并跑期间的
+    交付形态受排队干扰，与干净锚点混在一里会把种子往一侧带。
+    返回 {x, n, ctx, ts}；无可用锚点回 None（调用方走“未校准直计”的冷启动口径）。"""
+    groups = _prefill_bucket_groups(rows or [], DELIVERY_LEDGER_BUCKET_LOG2)
+    if not groups:
+        return None
+    target = math.log2(max(float(ctx), 2))
+    use = min(groups, key=lambda g: abs(math.log2(float(g[0][0])) - target))
+    clean = [e for e in use if not (len(e) > 4 and e[4])]
+    pick = clean or use
+    return {"x": float(statistics.median([float(e[1]) for e in pick])),
+            "n": len(pick),
+            "ctx": float(statistics.median([float(e[0]) for e in pick])),
+            "ts": max(float(e[2]) for e in pick)}
+
+
+def _delivery_ledger_note(table: dict, key: str, sub: str, ctx: float, x: float,
+                          now: float | None = None, src: str = "",
+                          flag: int = 0) -> bool:
+    """交付粒度锚点归户（薄包装，工序与 src/flag 口径见 `_fp_ledger_note`）。"""
+    return _fp_ledger_note("delivery", table, key, sub, ctx, x, now, src, flag)
+
+
+def delivery_ledger_view(path: str | None, now: float | None = None) -> dict:
+    """交付粒度台账的**只读体检视图**（骨架见 `_fp_ledger_view` 通用核；界面所见
+    就是引擎会用的那些锚点）。只读，不给写回口径。"""
+    return _fp_ledger_view("delivery", path, now, _delivery_view_anchor,
+                           _delivery_view_sub,
+                           {"min_events": DELIVERY_LEDGER_MIN_EVENTS,
+                            "seed_weight": DELIVERY_SEED_WEIGHT})
+
+
+def delivery_ledger_prune(path: str | None, key: str, sub: str = "",
+                          ctx: float | None = None,
+                          now: float | None = None) -> dict:
+    """删交付粒度锚点的**入口**：整段读-改-写套在台账锁里（与 prefill 台账共用
+    一把 `_ledger_lock`：两个 run 并发收口、用户同时在面板里删，都要串行）。
+    工序与报错口径见 `_fp_ledger_prune` 通用核。"""
+    if not path or not os.path.exists(path):
+        raise ValueError("还没有交付粒度台账（本轮之前没跑过这台部署）")
+    with _ledger_lock(path):
+        return _fp_ledger_prune("delivery", path, key, sub, ctx, now)
+
+
+def delivery_ledger_rehome(path: str | None, run_id: str, old_key: str,
+                           new_key: str, now: float | None = None) -> dict:
+    """搬家入口（台账锁串行），工序见 `_fp_ledger_rehome` 通用核（ADR-0141
+    同一口径：只搬来源位等于 `run_id` 的读数，旧数据如实报 `unknown`）。"""
+    with _ledger_lock(path):
+        return _fp_ledger_rehome("delivery", path, run_id, old_key, new_key, now)
+
+
+def delivery_ledger_rekey_gw(path: str | None, old_gw: str, new_gw: str,
+                             now: float | None = None) -> dict:
+    """网关改名 → 换户入口（台账锁串行），工序见 `_fp_ledger_rekey_gw` 通用核。
+    **两张台账必须一起改**（server 侧两处都调）：只改一张会出现“prefill 先验
+    跟着改名走、decode 种子留在旧网关名下”，下次跑测就只播种一半。"""
+    with _ledger_lock(path):
+        return _fp_ledger_rekey_gw("delivery", path, old_gw, new_gw, now)
 
 
 def _prefill_prior_covered(pts: list[tuple[float, float]], ctx: float) -> bool:
@@ -1939,9 +2232,137 @@ def _ctx_short(ctx: int, ok: list, *, trimmed: bool = False):
     return None
 
 
+# ---- 台账写入串行（一把锁管住「读-改-写」整段）--------------------------------
+# 为什么要有：两条台账都是「run 开头整表 load → 收口时整表写回」的形状，`_ledger_save`
+# 又不读盘、不 merge、无锁。同步测两个模型省时间（两个 run 并发）时，后装载那个的内存表
+# 里根本没有先收口那次写的行，它后写回就把别人整片抹掉（2026-10-20 真机：同网关并跑
+# Strata-0/Strata-1，两次 run 的存档都在，台账只剩 Strata-1）。原子替换只保证「不写坏」，
+# 不保证「不写丢」——要的是把 load→mutate→save 整段串起来。
+try:
+    import fcntl as _fcntl          # POSIX 跨进程锁；Windows 无 fcntl，退化为仅进程内锁
+except ImportError:                 # pragma: no cover - 平台相关
+    _fcntl = None
+
+_LEDGER_LOCKS: dict[str, threading.Lock] = {}
+_LEDGER_LOCKS_GUARD = threading.Lock()
+
+
+def _ledger_lock(path: str | None):
+    """同一份台账的读-改-写临界区（进程内 `threading.Lock` + 跨进程 `flock`）。
+
+    落盘点本身是 `os.replace` 原子的，所以跨进程那把锁只需护住「装载→改→写回」这一段；
+    锁文件 `<台账>.lock` 常驻（不带 .json 后缀，不会被历史列表扫到）。拿不到 flock
+    （非 POSIX / 目录不可写）不报错：还有进程内那把顶着，单实例部署就是完整的。
+
+    注意：`path=None`（没有 results_dir 的内嵌调用）给一个空临界区，不锁、不建文件。"""
+    return _LedgerLock(path)
+
+
+class _LedgerLock:
+    """`_ledger_lock` 的实现体：可重入不必要（临界区内不再取锁），用完即弃。"""
+
+    def __init__(self, path: str | None):
+        self._path = path
+        self._lk: threading.Lock | None = None
+        self._fh = None
+
+    def __enter__(self):
+        if not self._path:
+            return self
+        key = os.path.abspath(self._path)
+        with _LEDGER_LOCKS_GUARD:
+            self._lk = _LEDGER_LOCKS.setdefault(key, threading.Lock())
+        self._lk.acquire()
+        if _fcntl is not None:
+            try:
+                self._fh = open(key + ".lock", "a")
+                _fcntl.flock(self._fh.fileno(), _fcntl.LOCK_EX)
+            except OSError:            # 只读盘/并发建目录失败：进程内锁已足够
+                self._close_file()
+        return self
+
+    def __exit__(self, *exc):
+        self._close_file()
+        if self._lk is not None:
+            self._lk.release()
+        return False
+
+    def _close_file(self):
+        if self._fh is None:
+            return
+        try:
+            _fcntl.flock(self._fh.fileno(), _fcntl.LOCK_UN)   # type: ignore[union-attr]
+        except OSError:
+            pass
+        try:
+            self._fh.close()
+        except OSError:
+            pass
+        self._fh = None
+
+
+# ---- 同网关并跑窗口（并跑污染的事后标记）--------------------------------------
+# 为什么要有：同一条网关上两个 run 同时喂长 prompt，服务端排队/batch 互相占用，两侧
+# 速率都比单跑低（2026-10-20 那对并发数据：每条档差 1.0~3.5% 且随 ctx 单调放大，形状
+# 就是排队串扰，但单凭并发样本永远无法和「两个模型真有此差异」区分开）。用户要求
+# 「记录都要入库」，所以不剔除、不改档，只给并跑期间写的锚点打一个标记，让播种时
+# 优先用干净点、体检时看得见这条是并跑记的。
+_RUN_WINDOWS: dict[str, dict] = {}      # run_id → {"gw", "start", "end"|None}
+_RUN_WINDOWS_GUARD = threading.Lock()
+_RUN_WINDOW_KEEP_S = 24 * 3600
+
+
+def _run_window_open(run_id: str, gw: str, start: float) -> None:
+    with _RUN_WINDOWS_GUARD:
+        now = time.time()
+        for rid in [k for k, v in _RUN_WINDOWS.items()
+                    if v.get("end") and now - float(v["end"]) > _RUN_WINDOW_KEEP_S]:
+            _RUN_WINDOWS.pop(rid, None)      # 只清已结束的旧窗口，活跃的一律留着
+        _RUN_WINDOWS[run_id] = {"gw": gw, "start": float(start), "end": None}
+
+
+def _run_window_close(run_id: str) -> None:
+    with _RUN_WINDOWS_GUARD:
+        w = _RUN_WINDOWS.get(run_id)
+        if w is not None:
+            w["end"] = time.time()
+
+
+def _run_window_peers(run_id: str, gw: str, at: float | None = None) -> list[str]:
+    """与某次观测（默认=本 run 整段窗口）同时在跑的同网关其它 run_id。
+
+    归户只认 provider 名而不是 `gateway_url`：多地址 provider 两个入口是同一套后端
+    （ADR-0002 择首个可达），按地址判会把真串扰的漏掉。跨 provider 视为不串扰
+    （本地与云端不共享推理设备）。"""
+    if not gw:
+        return []
+    now = time.time()
+    out: list[str] = []
+    with _RUN_WINDOWS_GUARD:
+        mine = _RUN_WINDOWS.get(run_id) or {}
+        lo = float(mine.get("start") or now)
+        hi = float(mine.get("end") or now)
+        for rid, w in _RUN_WINDOWS.items():
+            if rid == run_id or w.get("gw") != gw:
+                continue
+            s = float(w.get("start") or 0)
+            e = float(w.get("end") or now)
+            probe = float(at) if at is not None else None
+            if probe is not None:
+                if s <= probe <= e:
+                    out.append(rid)
+            elif not (e < lo or s > hi):
+                out.append(rid)
+    return sorted(out)
+
+
 def _ledger_save(path: str, table: dict):
     """原子写台账（同目录临时文件 + os.replace，与 _save 同口径）：截断的 JSON
-    会让下次读到半张表，而半张表比没表更坏——错误的末段锚点会被拿去外推。"""
+    会让下次读到半张表，而半张表比没表更坏——错误的末段锚点会被拿去外推。
+
+    **只保证写坏不了，不保证写丢不了**：单独调用等于「拿手里这份表当全盘真相」，
+    任何跨 run 的累计都必须套在 `_ledger_lock(path)` 里先装载再改（并发 run 互相
+    盖表就是这么发生的）。"""
     d = os.path.dirname(path) or "."
     os.makedirs(d, exist_ok=True)
     tmp = f"{path}.{os.getpid()}.tmp"
@@ -2431,6 +2852,18 @@ def _ratio_refold(base_est: float, ratio_old: float | None,
     return events / ratio_new if ratio_new else events
 
 
+def _refold_window(samples: deque, ratio: float | None) -> deque:
+    """把滑窗样本整体折算到当前的 token 估算口径（ADR-0145）。
+
+    校准在请求中途翻转的两条常见路：本轮第一个请求带跳运行种子、同轮另一个并发
+    请求跑完并校准（本请求还在流里）。只折差分基准那一条的话，窗口里其余样本
+    仍是旧口径，一滑出去就翻出大尖峰（能把读数推过上限、误触发 out_of_range 弃测）。"""
+    if not samples or all(s[2] == ratio for s in samples):
+        return samples
+    return deque((t, _ratio_refold(e, s_ratio, ratio), ratio)
+                 for (t, e, s_ratio) in samples)
+
+
 # 先验曲线的近重复合并阈值与外推斜率拟合跨度（单位 log2，1 = 一个倍频程）。
 # repeats≥2 时同一档位会登记多个「几乎同 x」的 rep 点（实测 131075 与 131411，
 # x 差 0.26%），拿它们当末两点算斜率等于用一根头发丝量坡度：实测被放大成
@@ -2730,6 +3163,17 @@ METRIC_VERSION_NOTES = {
 }
 
 
+def _first_req_field(reqs: list[dict] | None, field: str):
+    """从批内请求明细里取第一个有值的该字段（点级/摘要级需要 req 级字段时用）。
+    跳失败请求：它们的估算链路不完整，拿它会冒充成“这一轮的口径”。"""
+    for r in reqs or []:
+        if r.get("err"):
+            continue
+        if r.get(field) is not None:
+            return r[field]
+    return None
+
+
 def _first_err(reqs: list[dict] | None) -> str | None:
     """批内首个失败请求的错误文本（点级 err 落档取此为代表；逐请求明细
     仍在 reqs 内）。"""
@@ -2834,7 +3278,12 @@ def _aggregate_reps(reps: list[dict]) -> dict:
                        "rtf", "speed_x", "audio_s", "elapsed_s", "ttfa_s",
                        "ms_per_img", "img_per_s", "audio_min_per_min",
                        "out_chars", "out_bytes")},
-              "err": _first_err(p.get("reqs"))} for p in reps]
+              "err": _first_err(p.get("reqs")),
+              # 交付粒度证据要能跳「复测摘要」活下来（ADR-0145）：它们是 req 级
+              # 字段，而聚合行只取代表样本的 reqs（哪一轮被取不定），不从这里带上
+              # 就会把“这一轮是从历史种子起步的”这条证据洗掉
+              "calib_src": _first_req_field(p.get("reqs"), "calib_src"),
+              "out_est_gap": _first_req_field(p.get("reqs"), "out_est_gap")} for p in reps]
     return point
 
 
@@ -3257,6 +3706,11 @@ class BenchRun:
         # （每张 = 一个分词器口径：{density, source, seen, anchors}）。
         # run() 开头装载、收口时落盘；mock 运行既不写也不读
         self.density: dict[str, list[dict]] = {}
+        # 本轮密度观测流水 [(台账键, 字符数, 实测 tokens, probe 密度, 来源, 时刻)]：
+        # 落盘不拿 `self.density` 整表盖盘（那会把并发另一个 run 写的盖掉），而是拿
+        # 盘上现表重放这份流水（ADR-0144）
+        self._density_obs: list[tuple[str, float, float, float, dict, float]] = []
+        self._density_saved = False
         # probe 密度（归户指纹）：(model, scenario) → chars/real；probe 完成后写
         self._probe_density: dict[tuple[str, str], float] = {}
         self._pending_ledger_notes: list[str] = []
@@ -3275,7 +3729,16 @@ class BenchRun:
         # 本轮从台账播种进来的锚点快照（ADR-0139）：实测点落地时靠它识别“哪些
         # 是历史锚点”并剔掉同档那几条，行为判据将来也要拿它与本轮点比对
         self._prior_seeded: dict[tuple[str, str], list[tuple[float, float]]] = {}
+        # 播种时的**完整**台账曲线（ADR-0139 决策 3 行为判据）：对账拿这张全表
+        # 插值，而不是随同档剔除不断缩小的 _prior_seeded
+        self._prior_seed_orig: dict[tuple[str, str], list[tuple[float, float]]] = {}
+        # (model, scenario) → {方向: 偏离档桶集合}：同方向 ≥N 档触发整表摘除
+        self._prior_dev: dict[tuple[str, str], dict[str, set]] = {}
+        self._prior_discarded: set[tuple[str, str]] = set()
         self._prefill_ledger_dirty = False
+        # 本轮合格的 prefill 速率点流水 [(指纹键, 场景, ctx, 速率, 时刻)]：收口时拿
+        # 盘上现表重放，不拿 `self.prefill_ledger` 整表盖盘（ADR-0144）
+        self._prefill_obs: list[tuple[str, str, float, float, float]] = []
         self._prefill_path = (os.path.join(results_dir, PREFILL_LEDGER_FILE)
                               if results_dir else None)
         # (model, scenario) → 实测输出 chars/token（usage completion_tokens 反推），
@@ -3288,6 +3751,24 @@ class BenchRun:
         self.chunk_calib: dict[tuple[str, str], float] = {}
         # chunk_calib 加权滑动平均的累计权重（事件数，封顶 CHUNK_CALIB_W_CAP）
         self.chunk_calib_w: dict[tuple[str, str], float] = {}
+        # (model, scenario) → 本轮这个比值从哪来："run"（本轮实测校准过）、
+        # "ledger"（历史种子）、"cold"（未校准，按 1 事件/token 直计）。它决定
+        # 两件事：实时读数要不要标「≈」，以及断流判定要不要把种子乘进去
+        # （ADR-0145：种子偏高不能参与断流，否则重演 ADR-0019 丢 usage 恶性循环）
+        self._chunk_calib_src: dict[tuple[str, str], str] = {}
+        # 交付粒度台账（**跳运行**，`results/delivery-ledger.v1`）：已实测的
+        # 「每包几个 token」按部署指纹归户，本轮第一个请求的实时读数拿它当种子
+        # （ADR-0145 草稿；没有它 = 每轮从头学，跨档/跨轮偏一个固定倍数）
+        self.delivery_ledger: dict[str, dict[str, list]] = {}
+        # 本轮交付粒度观测流水 [(指纹键, "场景|c并发", ctx, 每包token数, 时刻)]：
+        # 收口时拿盘上现表重放，不整表盖盘（ADR-0144 同一口径）
+        self._delivery_obs: list[tuple[str, str, float, float, float]] = []
+        self._delivery_ledger_dirty = False
+        self._delivery_path = (os.path.join(results_dir, DELIVERY_LEDGER_FILE)
+                               if results_dir else None)
+        # 已经播报过“为什么用/不用历史交付粒度”的 (model, scenario, conc)：
+        # 逐请求播一遍会把 status 流水刷屏，而这句只需要让用户看见一次
+        self._delivery_seed_note: set[tuple[str, str, int]] = set()
         # API 路径前缀：LiteLLM/vLLM 用 "/v1"，DeepSeek 官方不带前缀
         # cfg.api_prefix: "auto"(默认探测) / "v1" / "none"
         mode = str(cfg.get("api_prefix") or "auto").lower()
@@ -3317,6 +3798,48 @@ class BenchRun:
             pts[i] = (ctx, rate)
         else:
             pts.insert(i, (ctx, rate))
+
+    async def _reconcile_prior(self, key: tuple[str, str], x: float, rate: float):
+        """行为判据（ADR-0139 决策 3）：实测 vs 台账对账，过期基线只提示不拦测。
+
+        每个入曲线的 conc=1 点，拿实测速率对照**完整台账曲线**（播种快照，
+        不含本轮点）在同一 x 的插值；落在 [0.85×, 1.15×] 之外记一次偏离
+        （x < RATE_GATE_MIN_TOKENS 豁免——小档 TTFT 固定开销占比大、方差天然
+        大，与物理闸同口径；同档桶内只计一次，防同档复测数出多票）。同方向
+        ≥PRIOR_RECONCILE_MIN_TIERS 档偏离 → 判「这条基线不属于当前部署」：整表
+        摘除（该 模型×场景 全部剩余播种锚点，后续只用本轮实测外推）+ 播报。
+        磁盘台账不动（历史记录照旧，可事后手动删表）；绝不拦测。只数被
+        `_prefill_prior_sample` 接纳的点：估算命中/防污染闸拒掉的点语义不明
+        （可能是缓存加速而非台账错），不计票。"""
+        if (key in self._prior_discarded or not rate
+                or x < RATE_GATE_MIN_TOKENS):
+            return
+        prior = rate_prior(self._prior_seed_orig.get(key) or [], x)
+        if not prior:
+            return
+        lo, hi = PRIOR_RECONCILE_BAND
+        if lo * prior <= rate <= hi * prior:
+            return
+        direction = "low" if rate < lo * prior else "high"
+        dev = self._prior_dev.setdefault(key, {})
+        bucket = round(math.log2(max(x, 2)) / RATE_PRIOR_MERGE_LOG2)
+        dev.setdefault(direction, set()).add(bucket)
+        if len(dev[direction]) < PRIOR_RECONCILE_MIN_TIERS:
+            return
+        self._prior_discarded.add(key)
+        seeded = self._prior_seeded.get(key) or []
+        if seeded:
+            gone = {tuple(s) for s in seeded}
+            pts = self.prefill_curve.get(key) or []
+            self.prefill_curve[key] = [p for p in pts if tuple(p) not in gone]
+            self._prior_seeded[key] = []
+        model, scenario = key
+        await self.emit({"type": "status",
+                         "msg": (f"{model} / "
+                                 f"{SCENARIOS.get(scenario, {}).get('label', scenario)} "
+                                 f"prefill 基线未采纳：{len(dev[direction])} 档实测"
+                                 f"同向偏离台账 ≥15%（可能部署已变或登记未更新），"
+                                 f"后续只用本轮实测外推（不影响本次测试）")})
 
     async def emit(self, ev: dict):
         ev.setdefault("ts", time.time())
@@ -3446,10 +3969,20 @@ class BenchRun:
 
     def _save_density(self):
         """密度台账落盘：mock 运行不写（假网关的密度会把真表带偏，而那恰好是
-        唯一能静默污染跨运行状态的路径）；无表/无目录那么不写。"""
-        if self.mock_seen or not self._density_path or not self.density:
+        唯一能静默污染跨运行状态的路径）；无表/无目录那么不写。
+
+        与速率先验台账同一形状（ADR-0144）：装载盘上现表 → 重放本轮观测 → 写回，
+        整段上锁。密度子表不带来源位（谁写的无法逐条认），所以靠 `_density_saved`
+        守幂等（`_ledger_add` 本身也会把近点归并，重放不会折返）。"""
+        if (self.mock_seen or not self._density_path or self._density_saved
+                or not self._density_obs):
             return
-        _ledger_save(self._density_path, self.density)
+        with _ledger_lock(self._density_path):
+            table = _ledger_load(self._density_path)
+            for lk, chars, real, dens, src, ts in self._density_obs:
+                _density_note_into(table, lk, chars, real, dens, src, ts)
+            _ledger_save(self._density_path, table)
+        self._density_saved = True
 
     def _seed_prefill_curves(self) -> list[str]:
         """用台账锚点播种本次运行的先验曲线（在第一个点登记之前调用）。
@@ -3486,8 +4019,11 @@ class BenchRun:
                 for ctx, rate in seed:
                     self._note_prefill_rate(key, ctx, rate)
                 self._prior_seeded[key] = list(seed)
+                self._prior_seed_orig.setdefault(key, list(seed))
+                # 行自 ADR-0141 起是 4~5 位（带 src/并跑标），按 ==3 判旧格式会永远
+                # 落空、「N 天前登记」不再出现（形状漂移的静默失效）
                 stamp = max((float(e[2]) for e in pts
-                             if isinstance(e, (list, tuple)) and len(e) == 3), default=0.0)
+                             if isinstance(e, (list, tuple)) and len(e) >= 3), default=0.0)
                 age = f"，{int((time.time() - stamp) / 86400)} 天前登记" if stamp else ""
                 msgs.append(
                     f"{model} / {SCENARIOS.get(scenario, {}).get('label', scenario)} "
@@ -3504,23 +4040,147 @@ class BenchRun:
         return msgs
 
     def _prefill_note(self, model: str, scenario: str, sample: tuple[float, float]):
-        """一个实测 prefill 速率点归户入台账（内存，收口时落盘）。mock 运行不写：
-        假网关的 usage 是编的，写一次就污染真表（与密度台账同口径）。"""
+        """一个实测 prefill 速率点**记账**（收口时按盘上现表归并重放）。mock 运行不写：
+        假网关的 usage 是编的，写一次就污染真表（与密度台账同口径）。
+
+        为什么不当场写内存表了：旧形状是「开头装载→当场写→收口整表盖盘」，两个 run
+        并发时后盖盘那个手里根本没别人写的行，就地抹了（ADR-0144）。现在只留
+        「本轮量到了什么」这张流水（带时刻），落盘时拿盘上最新表重放，谁的写都不丢。"""
         if self.mock_seen:
             return
         key = _prefill_fingerprint(model, self.cfg)
         if not key:      # 身份不明（没有网关段）：不写台账，宁可下一轮没先验
             return
-        if _prefill_ledger_note(self.prefill_ledger, key,
-                                scenario, float(sample[0]), float(sample[1]),
-                                src=self.run_id):
-            self._prefill_ledger_dirty = True
+        self._prefill_obs.append((key, scenario, float(sample[0]),
+                                  float(sample[1]), time.time()))
+        self._prefill_ledger_dirty = True
+
+    def _ledger_gw(self) -> str:
+        """并跑判定用的网关身份 = provider 内部名（与台账键首段同源）。
+        不用 `gateway_url`：多地址 provider 两个入口是同一套后端，按地址判会把
+        真在串扰的那对漏掉（ADR-0002）。"""
+        gw = self.cfg.get("provider")
+        return gw.strip()[:48] if isinstance(gw, str) else ""
+
+    def _save_fp_ledger(self, kind: str, path: str | None, obs: list) -> None:
+        """指纹台账收口写盘（prefill/delivery 同一形状，ADR-0144）：装载盘上现表
+        → 摘掉本轮自己写过的行 → 重放本轮流水 → 同档限流收敛 → 写回，整段套
+        `_ledger_lock`（并发 run 的写必须串行）。「先摘自己再重放」使写盘幂等：
+        手工再调一次不会长出双份。归并后同档可能堆出别家 + 本轮共六条，按写侧
+        同一口径 `_fp_ledger_trim` 削一遍。
+
+        盘上旧口径遗留表（无 `gw:` 段，装载时被跳过）原样带回去：它不被采纳，但也不
+        能因为“本轮顺手写一次盘”就被不声不响删掉（ADR-0143 同款口径）。
+        守卫（mock/无路径/无观测）在各公开入口。"""
+        gw = self._ledger_gw()
+        with _ledger_lock(path):
+            table = _fp_ledger_load(kind, path)
+            for subs in table.values():
+                for rows in subs.values():
+                    for e in [e for e in rows if len(e) > 3 and e[3] == self.run_id]:
+                        rows.remove(e)
+            for key, sub, ctx, val, ts in obs:
+                _fp_ledger_note(kind, table, key, sub, ctx, val, ts,
+                                src=self.run_id,
+                                flag=1 if _run_window_peers(self.run_id, gw, ts)
+                                else 0)
+            for subs in table.values():
+                for sub in list(subs):
+                    subs[sub] = _fp_ledger_trim(kind, subs[sub])
+            legacy = {k: v for k, v in _fp_ledger_raw(path).items()
+                      if _prefill_key_is_legacy(k)}
+            _ledger_save(path, {**table, **legacy})
 
     def _save_prefill_ledger(self):
+        """prefill 速率先验台账收口（守卫 + 委托 `_save_fp_ledger`）。
+
+        为什么只留流水不当场写内存表：旧形状是「开头装载→当场写→收口整表盖盘」，
+        两个 run 并发时后盖盘那个手里根本没别人写的行，就地抹了（ADR-0144）。
+        现在 `_prefill_obs` 只留「本轮量到了什么」（带时刻），落盘时拿盘上最新表
+        重放，谁的写都不丢。"""
         if (self.mock_seen or not self._prefill_path
-                or not self._prefill_ledger_dirty or not self.prefill_ledger):
+                or not self._prefill_ledger_dirty or not self._prefill_obs):
             return
-        _ledger_save(self._prefill_path, self.prefill_ledger)
+        self._save_fp_ledger("prefill", self._prefill_path, self._prefill_obs)
+
+    async def _delivery_seed(self, model: str, scenario: str, ctx: int,
+                             conc: int) -> str:
+        """这个请求的实时读数分子用哪个「每包几个 token」（ADR-0145 草稿）。
+
+        三种来源，逐请求在请求开始前定一次（流中途不換，否则滑窗差分会把校准
+        翻转算成速度尖峰）：
+          "run"    本轮已有实测比（上个请求流末从 usage 反推的）→ 照常用它；
+          "ledger" 本轮还没有、台账里有本部署本场景本并发档的锚点 → 就近档
+                   取中位数播一个种子，初始权重只给 `DELIVERY_SEED_WEIGHT`；
+          "cold"   都没有 → 不播，走未校准的 1 事件/token 直计（ADR-0019 口径）。
+
+        与 prefill 先验播种的刻意区别：那里历史是唯一的锚（等待期协议上零信号），
+        跑开头整表播种一次；这里本轮第一个请求跑完就有真观测，所以按「请求当时
+        的 ctx + conc」惰性取一个种子，本轮实测两三个请求就压过它。
+        探测/预热（prime）请求也经这里取种子——它本就是本轮第一个请求，种子该给它；
+        但它的校准不把来源翻成 "run"（包数太少压不过种子权重），转正只由正式
+        测速请求的校准触发（见 `_one` 收口处 `self._chunk_calib_src[key] = "run"`）。
+        只在每个 (model, scenario, conc) 首次定来源时播报一次。"""
+        key = (model, scenario)
+        if key in self.chunk_calib:
+            return self._chunk_calib_src.get(key, "run")
+        src = "cold"
+        seed = None
+        fp = _prefill_fingerprint(model, self.cfg) if not self.mock_seen else ""
+        rows = (self.delivery_ledger.get(fp) or {}).get(_delivery_sub(scenario, conc)) \
+            if fp else None
+        if rows:
+            seed = _delivery_seed_x(rows, max(int(ctx), 1))
+        if seed and seed["x"] > 0:
+            self.chunk_calib[key] = 1.0 / seed["x"]
+            self.chunk_calib_w[key] = DELIVERY_SEED_WEIGHT
+            src = "ledger"
+        self._chunk_calib_src[key] = src
+        note_key = (model, scenario, conc)
+        if note_key in self._delivery_seed_note:
+            return src
+        self._delivery_seed_note.add(note_key)
+        label = SCENARIOS.get(scenario, {}).get("label", scenario)
+        if src == "ledger":
+            age = int((time.time() - seed["ts"]) / 86400)
+            await self.emit({"type": "status", "msg":
+                f"{model} / {label} 实时读数：本轮尚无实测事件/token 比，暂按历史基线 "
+                f"{seed['x']:.2f} token/包估算（取 {int(seed['ctx'])} 档的 {seed['n']} 条"
+                f"锚点，最近 {age} 天前）；本场景首个请求跑完就改用本轮实测"
+                f"（该种子不参与输出上限断流判定）"})
+        elif self.delivery_ledger and any(_prefill_key_model(k) == model
+                                          for k in self.delivery_ledger):
+            # 盘上有同名别的表但没有一张与本部署登记一致（或本并发档没锚点）：
+            # 不拦测，但得说一句“为什么中途读数会偏”，否则用户只看到数字不准
+            await self.emit({"type": "status", "msg":
+                f"{model} / {label} 实时读数：台账里没有与本部署登记完全一致的"
+                f"交付粒度锚点（新部署/新并发档，或部署字段未更新）——本轮首个"
+                f"请求按 1 事件/token 直计，投机解码类网关会偏低，跑完一个请求即转正"})
+        return src
+
+    def _delivery_note(self, model: str, scenario: str, conc: int,
+                       ctx: float, batch_tok: float):
+        """一个实测交付粒度（token/包）记账，收口时按盘上现表重放（ADR-0145）。
+
+        mock 运行不写（假网关的交付形态是编的，与密度/先验台账同口径）；
+        预热请求不写（预热不是测速点，它的读数不进 KPI 也不进先验曲线——
+        ADR-0051/0060 那条纪律的延伸）；身份不明（没有网关段）不写。"""
+        if self.mock_seen:
+            return
+        key = _prefill_fingerprint(model, self.cfg)
+        if not key:
+            return
+        self._delivery_obs.append((key, _delivery_sub(scenario, conc),
+                                   float(ctx), float(batch_tok), time.time()))
+        self._delivery_ledger_dirty = True
+
+    def _save_delivery_ledger(self):
+        """交付粒度台账收口（守卫 + 委托 `_save_fp_ledger`，与 prefill 台账同一
+        形状，ADR-0144：并发 run 的写必须串行）。"""
+        if (self.mock_seen or not self._delivery_path
+                or not self._delivery_ledger_dirty or not self._delivery_obs):
+            return
+        self._save_fp_ledger("delivery", self._delivery_path, self._delivery_obs)
 
     def _save(self):
         if self.mock_seen:   # 模拟数据不进历史记录
@@ -3549,6 +4209,10 @@ class BenchRun:
                 "cfg": cfg_safe,
                 "results": self.results,
             }
+            peers = _run_window_peers(self.run_id, self._ledger_gw())
+            if peers:
+                # 并跑留痕（ADR-0144）：事后看这份存档能知道速率是被同伴压低的
+                archive["concurrent_runs"] = peers
             if warning:
                 # 预算耗尽时不静默：存档顶层留痕，说明有异常轮原文未存全
                 archive["anomaly_text_warning"] = warning
@@ -3568,6 +4232,12 @@ class BenchRun:
 
     async def run(self):
         cfg = self.cfg
+        # 并跑窗口登记（ADR-0144）：同网关同时有两个 run 在喂长 prompt 时，服务端排队
+        # 会互相压低速率（2026-10-20 实测：同网关并跑两个模型，每条档差 1.0~3.5%
+        # 且随 ctx 单调放大）。用户要并行省时间、又要记录全入库，所以这里不拦、
+        # 不剔，只：开头播一句 + 给并跑期间写的锚点打标（播种时同档优先用干净锚点）。
+        # 谁后起测谁先看见提醒（先起那个起测时同伴还没来）。
+        _run_window_open(self.run_id, self._ledger_gw(), time.time())
         # 终态三件套收口入 finally：前置段（系数转换、gateway_url 缺失）抛错也
         # 必须置 finished_at（server 依此回收）、存档、推 SSE 终止帧——否则任务
         # 静默死亡，订阅连接永等终止帧、_purge_finished_runs 永不回收
@@ -3576,11 +4246,18 @@ class BenchRun:
             # 本地状态，多标签页进入正在运行的任务也能拿到正确的 provider（ADR-0009：cfg 事件）
             await self.emit({"type": "cfg", "started_at": self.started_at,
                              "cfg": {k: v for k, v in cfg.items() if k != "api_key"}})
+            # 同网关并跑提醒（不拦测，ADR-0144）：紧跟 cfg 帧，回放也能看到
+            for msg in self._peers_note():
+                await self.emit({"type": "status", "msg": msg})
             # 密度台账装载（跨运行复用的密度锚点）：mock 运行不读——假网关的
             # usage 是编的，读一次就污染真表（写侧由 mock_seen 在收口处拦住）
             if not self.mock_seen:
                 self.density = _ledger_load(self._density_path)
                 self.prefill_ledger = _prefill_ledger_load(self._prefill_path)
+                # 交付粒度台账装载（实时读数分子用）：本轮不预先播种——播种发生在
+                # 每个 (模型,场景,并发) 的第一个请求上，拿它当时那个上下文档的
+                # 就近锚点（预先播种只能按某个 ctx 猜一个桶）
+                self.delivery_ledger = _delivery_ledger_load(self._delivery_path)
                 # 播种先验：单档复测/单点测速时等待期读数从此有真跳锚点可依，
                 # 不再只靠探测点（≈2K）平推（ADR-0134）
                 for msg in self._seed_prefill_curves():
@@ -3979,6 +4656,11 @@ class BenchRun:
             except Exception as e:   # noqa: BLE001  同上：先验台账是优化项
                 log.warning("速率先验台账落盘失败（不影响测速结果）: %s", e)
             try:
+                await asyncio.to_thread(self._save_delivery_ledger)
+            except Exception as e:   # noqa: BLE001  同上：交付粒度台账是优化项
+                log.warning("交付粒度台账落盘失败（不影响测速结果）: %s", e)
+            _run_window_close(self.run_id)   # 必须在两次台账落盘之后：打标要用它判重叠
+            try:
                 # 存档移出事件循环：多 MB json.dump 是同步阻塞，跑在同一循环上
                 # 会卡住正在测量的 TTFT/decode tick；to_thread 只把落盘 I/O 挪走
                 await asyncio.to_thread(self._save)
@@ -3988,6 +4670,18 @@ class BenchRun:
                 await self.emit({"type": "error", "msg": f"结果落盘失败: {e}"})
             finally:
                 self._close_streams()
+
+    def _peers_note(self) -> list[str]:
+        """同网关并跑提醒（也写进存档顶层 `concurrent_runs`，事后查污染用）。
+
+        不拦测：并行是合法省时间手段，代价只是速率偏低，而用户要的是记录都入库
+        （ADR-0144）。mock 运行不提醒（假网关无所谓）。"""
+        peers = _run_window_peers(self.run_id, self._ledger_gw())
+        if not peers or self.mock_seen:
+            return []
+        return [f"与另一测速同时在本网关运行（{'、'.join(peers)}）："
+                "长 prompt 会在服务端排队里互相压低速率，本轮读数仍全部入库，"
+                "但写入基线的锚点会被标为「并跑」（同档有干净锚点时优先用干净的）"]
 
     # -- 前置探测与网络基线 ----------------------------------------------------
 
@@ -4486,6 +5180,7 @@ class BenchRun:
                     self.prefill_curve.get((model, scenario)) or [])
                 if sample:
                     self._note_prefill_rate((model, scenario), *sample)
+                    await self._reconcile_prior((model, scenario), *sample)
                     # 同时归户入台账（跳运行复用）：只收「这个档真的被完整喂进去
                     # 且有 usage 真值」的点——超窗删减（实发长度不是本档）与异常
                     # 输出的点入表就是给下次的先验埋假锚点
@@ -5001,12 +5696,14 @@ class BenchRun:
         if not density or density < 1:   # 密度带内（入表守卫同界）才配当标定值
             return
         now = time.time()
-        subs = self.density.setdefault(lk, [])
         src = self._ledger_source(model)
-        idx, new = _ledger_pick(subs, density, src, now)
+        subs, idx, new = _density_note_into(self.density, lk, chars, real,
+                                            density, src, now)
+        # 同时记一笔流水：收口时拿盘上现表重放它（不拿 self.density 整表盖盘，
+        # 那会盖掉并发另一个 run 写的东西，ADR-0144）
+        self._density_obs.append((lk, float(chars), float(real), float(density),
+                                  dict(src), now))
         sub = subs[idx]
-        sub["anchors"] = _ledger_add(
-            [(p[0], p[1]) for p in sub.get("anchors") or []], chars, real)
         if new:
             self._pending_ledger_notes.append(
                 f"{model} / {SCENARIOS[scenario]['label']} 密度台账：本轮"
@@ -5728,6 +6425,7 @@ class BenchRun:
                             None, self.prefill_curve.get(key) or [])
                         if sample:
                             self._note_prefill_rate(key, *sample)
+                            await self._reconcile_prior(key, *sample)
                     await self._calibrate_usage(
                         key, sum(len(m["content"]) for m in msgs_list[0]),
                         ctx_n + seg_n, ok)
@@ -5766,6 +6464,20 @@ class BenchRun:
         if n_chunks:
             return float(n_chunks)
         return n_chars / out_cpt
+
+    def _est_out_cut(self, model: str, scenario: str, n_chunks: int,
+                     n_chars: float, out_cpt: float, src: str) -> float:
+        """输出上限断流判定用的**保守**估算（ADR-0145）。
+
+        本轮已经实测过事件/token 比时与 `_est_out` 同口径；本轮用的还是历史
+        种子（src == "ledger"）时不把种子乘进去，按 1 事件/token 直计。
+        为什么必须分家：种子偏高又参与断流判定，会把 `client_cut` 提前触发——
+        主动断开就连流末 usage 也摸不到，系数永远校不准，下一轮继续超发
+        （ADR-0019 写过的恶性循环：显示 88~103、后端真值 35.5）。“给看的估算”
+        要接近真值，“给断流用的估算”要不易误伤，两者不是同一个数。"""
+        if src == "ledger" and n_chunks:
+            return float(n_chunks)
+        return self._est_out(model, scenario, n_chunks, n_chars, out_cpt)
 
     def _mt_name(self, model: str) -> str:
         """当前对 model 下发的输出上限参数名（实测判定，默认 max_tokens，
@@ -6031,6 +6743,11 @@ class BenchRun:
                 # 外层帧逐层返回时不覆写
                 r.setdefault("edge_fallback", _edge_fb + 1)
             return r
+        # 实时读数分子用的「每包几个 token」定来源（ADR-0145）：在请求开始前定
+        # 一次、流中途不换——中途换会把校准翻转算成滑窗差分的速度尖峰/负值
+        # （`_ratio_refold` 只能消除翻转瞬间的尖峰，不能消除两个口径混用）。
+        calib_src = await self._delivery_seed(model, scenario, ctx, conc)
+        calib_ratio0 = self.chunk_calib.get((model, scenario))
         t0 = time.perf_counter()
         first = last = None
         max_gap = 0.0           # 相邻内容块最大空窗（秒，停滞诊断）
@@ -6328,6 +7045,7 @@ class BenchRun:
                             # 窗口差分把突发留在基准样本里，只反映当前速率（ADR-0007）。
                             # 3s 窗口在响应性与平滑间取中：比 2s 更少受单批推送/
                             # MTP 接受率抖动的瞬时拉扯，与最终 usage 口径的偏差更小
+                            samples = _refold_window(samples, ratio)
                             samples.append((now, est, ratio))
                             cutoff = now - 3.0
                             while len(samples) > 1 and samples[0][0] <= cutoff:
@@ -6336,27 +7054,40 @@ class BenchRun:
                             span = now - base_t
                             # 窗口内校准比例变化（加权平均仍在缓步移动/首次播种）
                             # 时，基准样本折算到新口径再差分，消除切换瞬间的
-                            # 速度尖峰/负值
+                            # 速度尖峰/负值（入窗时已整窗折算，这里只是兑底）
                             base_est = _ratio_refold(base_est, base_ratio, ratio)
                             # 钳非负：差分口径残余错配/抖动不向实时读数透出负速度
                             speed = (max(0.0, (est - base_est) / span) if span >= 0.3
                                      else max(0.0, est / max(now - first, 1e-6)))
-                            await emit_tick({
+                            tick = {
                                 "type": "tick", "tag": tag, "model": model,
                                 "scenario": scenario, "ctx": ctx, "conc": conc, "req": req_i,
                                 "phase": "decode", "tokens": round(est, 1),
                                 "speed": round(speed, 1),
                                 "elapsed": round(now - t0, 2),
                                 "ttft": round(first - t0, 3),
-                                "thinking": bool(reason_len)})
+                                "thinking": bool(reason_len)}
+                            # 分子不是真值（本轮还没实测过事件/token 比，用的就是
+                            # 历史种子或 1 事件/包 直计）→ 标 est：前端挂「≈」且
+                            # 不上「实测 Decode」牌（ADR-0068 条 10 的纪律从 prefill
+                            # 侧扩到 decode 侧；之前 decode tick 一律当实测推 KPI，
+                            # 用户看到的就是“实测值偶尔偏 20%”）
+                            if calib_src != "run":
+                                tick["est"] = True
+                                tick["est_batch"] = (round(1.0 / calib_ratio0, 2)
+                                                      if calib_ratio0 else 1.0)
+                                # 分子口径来源（ledger=历史种子 / cold=探测实测或
+                                # 1 事件/包直计）：前端悬浮文案据此说清估算依据
+                                tick["est_src"] = calib_src
+                            await emit_tick(tick)
                             last_emit = now
                     # 客户端断流兜底（ADR-0016 防线 3）：输出估算超下发上限
                     # ×CLIENT_CUT_FACTOR 仍未见 finish → 网关未执行截断，主动
                     # 断流（resp_ctx 收口时关闭连接），finish 记 client_cut；
                     # 旧名 max_tokens 在用时同时判定其被忽略，改用新名
-                    if (piece or rpiece) and self._est_out(
+                    if (piece or rpiece) and self._est_out_cut(
                             model, scenario, n_chunks, reason_len + text_len,
-                            out_cpt) > max_tokens * CLIENT_CUT_FACTOR:
+                            out_cpt, calib_src) > max_tokens * CLIENT_CUT_FACTOR:
                         finished = "client_cut"
                         if (self._mt_name(model) == "max_tokens"
                                 and model not in self.mt_mct_rejected):
@@ -6399,6 +7130,12 @@ class BenchRun:
                 await resp_ctx.__aexit__(None, None, None)
 
         t_end = time.perf_counter()
+        # 估算偏差留痕用（结果字典里那两个 `out_est_gap*`）：真值只认 usage 回传的
+        # completion_tokens，拿自己估出来的数当真值等于自己反驳自己
+        usage_ct = (usage.get("completion_tokens")
+                    if usage and usage.get("completion_tokens") else None)
+        est_ev0 = (n_chunks / calib_ratio0) if calib_ratio0 else float(n_chunks)
+        est_chars0 = ((text_len + reason_len) / out_cpt) if (out_cpt and out_cpt > 0) else None
         if first is None:
             # 措辞按实测逻辑写准（2026-09-22）：走到本分支 = 连 reasoning_content
             # 都没有（first 由 content 或 reasoning_content 任一非空置位）——是
@@ -6561,6 +7298,21 @@ class BenchRun:
                     cw = min(self.chunk_calib_w.get(key, 0.0), CHUNK_CALIB_W_CAP)
                     self.chunk_calib[key] = _wma(cold, cw, cobs, n_chunks)
                     self.chunk_calib_w[key] = cw + n_chunks
+                    # 「转正」只由正式测速请求触发，探测/预热（prime）不触发：
+                    # 探测只有 ~13-64 个包，压不过 256 权重的历史种子——若由它
+                    # 置 run，本轮第一个正式请求的中途读数仍是 8 成种子却被当
+                    # 实测（不挂 ≈），断流判定也失去保守口径（ADR-0145 的
+                    # 「种子只给本轮第一个请求」会被探测提前兑现）
+                    if not prime:
+                        self._chunk_calib_src[key] = "run"
+                    # 交付粒度入台账（1/cobs = 每包几个 token）。不当锚点的三种：
+                    # 只收到几个包的请求（统计不稳）、被超窗删减过的请求
+                    # （档位标签不可比，同速率先验台账的 `ovf_trim` 门槛）、
+                    # 预热请求（不是测速点，ADR-0051/0060 那条纪律的延伸）
+                    if (n_chunks >= DELIVERY_LEDGER_MIN_EVENTS
+                            and not ovf_attempt and not prime):
+                        self._delivery_note(model, scenario, conc, ctx,
+                                            usage["completion_tokens"] / n_chunks)
                     if cold is None:
                         await self.emit({"type": "status", "msg":
                             f"{model} / {sc['label']} 实时读数切换为 SSE 事件计数口径"
@@ -6627,7 +7379,9 @@ class BenchRun:
         # prefill 的权威帧同在此处：首 token 那一帧的分子是估算（字符÷全局平均
         # 系数），构造偏离时被带着虚高（2026-10-17 真机：实发 19.7 万 token、
         # 估成 22~26 万，KPI 挂 4200~5000 而真值 3722，且一挂到整点跑完才回写）——
-        # usage 已到手，此处用真实 prompt_tokens ÷ 净 TTFT 补一帧不带 est 的真·实测
+        # usage 到手时用真实 prompt_tokens ÷ 净 TTFT 补一帧不带 est 的真·实测；
+        # usage 未到手（含 client_cut）时分子仍是 est_prompt 兜底值，必须带 est，
+        # 否则前端把这帧当实测冻结 KPI（usage 缺失的网关会一路骗到点收口）
         if not tick_off and (ttft_net or ttft):
             # agent 矩阵（inst 非 None）点级是增量口径：命中回传时按未命中真值；
             # 未回传时分子仍只能沿用增量估算（标 est，与等待期帧同源），不拿
@@ -6636,11 +7390,13 @@ class BenchRun:
             _pf_t = ttft_net or ttft
             _pf_ptok: float | None = None
             _pf_est = False
+            _usage_ptok = bool(usage and usage.get("prompt_tokens"))
             if inst is not None:
                 _pf_ptok = (prompt_tokens - cache_hit) if cache_hit else est_tokens
-                _pf_est = not cache_hit
+                _pf_est = not (cache_hit and _usage_ptok)
             elif prompt_tokens:
                 _pf_ptok = prompt_tokens
+                _pf_est = not _usage_ptok
             if _pf_ptok and _pf_ptok > 0:
                 _pf = {"type": "tick", "tag": tag, "model": model,
                        "scenario": scenario, "ctx": ctx, "conc": conc,
@@ -6651,13 +7407,19 @@ class BenchRun:
                     _pf["est"] = True
                 await emit_tick(_pf)
         if not tick_off and decode_time and out_tokens:
-            await emit_tick({"type": "tick", "tag": tag, "model": model,
-                             "scenario": scenario, "ctx": ctx, "conc": conc, "req": req_i,
-                             "phase": "decode", "tokens": round(out_tokens),
-                             "speed": round(out_tokens / decode_time, 1),
-                             "elapsed": round(t_end - t0, 2),
-                             "ttft": round(ttft, 3) if ttft is not None else None,
-                             "thinking": bool(reason_len)})
+            _dec = {"type": "tick", "tag": tag, "model": model,
+                    "scenario": scenario, "ctx": ctx, "conc": conc, "req": req_i,
+                    "phase": "decode", "tokens": round(out_tokens),
+                    "speed": round(out_tokens / decode_time, 1),
+                    "elapsed": round(t_end - t0, 2),
+                    "ttft": round(ttft, 3) if ttft is not None else None,
+                    "thinking": bool(reason_len)}
+            # out_tokens 在 usage 缺失时同样是估算（est_chunks/est_out 兜底）：
+            # 这帧只能算「估」，est_batch 不补（分子可能来自字符系数而非包计数）
+            if not usage_ct:
+                _dec["est"] = True
+                _dec["est_final"] = True
+            await emit_tick(_dec)
         result = {
             "req": req_i, "err": None,
             "first_abs": first, "last_abs": last,
@@ -6704,6 +7466,19 @@ class BenchRun:
             # 成批冲刷（按到达间隔聚类按批计，≈ 接受长度 k）；③ 逐 token 交付
             # 记账噪声（偶发合并，≈1）。仅在有成批交付证据时记录，≈1 噪声不入档
             "tok_per_chunk": _tok_per_batch(tpc_gaps, tpc_chunks, out_clean),
+            # 交付粒度与估算偏差留痕（ADR-0145）：中途那格 Decode 的分子是
+            # 「包数 ÷ 事件/token 比」，那个比可能来自历史种子或尚未校准。
+            # 把「请求开始时那个口径算出的 token 数」相对 usage 真值的偏差落档：
+            # 正数 = 中途读数偏高、负数 = 偏低。以前这类失真只能事后从
+            # `tok_per_chunk` 反推，存档里没有任何直接证据（用户 2026-10-20 那次
+            # “中途 90+ / 最后 70+”只能靠猜）
+            "calib_src": calib_src,
+            "out_est_gap": (round(est_ev0 / usage_ct - 1.0, 3)
+                            if (usage_ct and n_chunks) else None),
+            # 另一条独立口径（字符 ÷ 实测输出系数）的偏差：两条背离 = 交付粒度
+            # 系数不可信的哨兵（只入档、不参与出数）
+            "out_est_gap_chars": (round(est_chars0 / usage_ct - 1.0, 3)
+                                  if (usage_ct and est_chars0) else None),
             # usage_real = 服务端确实回传了 prompt_tokens（真值），而非仅有 usage
             # 外壳、prompt_tokens 走字符估算兜底：估算值与同系数推导的靶值自指，
             # 进入构建偏离/prefix_kb/cpt 校准会把估计当真值（永不纠正偏差）

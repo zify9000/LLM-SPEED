@@ -115,19 +115,14 @@ def _adopt(model: str, table: dict) -> int:
     return moved
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--results-dir", default="results")
-    ap.add_argument("--write", action="store_true", help="写入台账（默认只预演）")
-    ap.add_argument("--force", action="store_true", help="同档也用存档值覆盖")
-    ap.add_argument("--adopt-model", action="append", default=[], metavar="模型名",
-                    help="把该模型**没有部署字段**的旧键并入当前 config.json 的指纹"
-                         "（旧档案跑在填字段之前，指纹退化成「模型|网关」，不并入就"
-                         "播种不上；只对确实是同一套部署的模型用——合错表比没表更坏）")
-    args = ap.parse_args()
+def _collect(table: dict, args) -> tuple[int, list, list, set]:
+    """扫 `results/*.json` 捞先验点、就地写进 `table`（**调用方持台账锁**，
+    ADR-0144）→ (跑过的档数, 入表明细, 形状闸拦下, 缺网关身份的存档)。
 
-    path = os.path.join(args.results_dir, bench.PREFILL_LEDGER_FILE)
-    table = bench._prefill_ledger_load(path)
+    单独成函数只为了让「装载→改→落盘」能被一个 `with` 罩住：脚本原先拿着
+    启动那一刻的表扫半天再整表写回，中途若有测速收口，它写的行就没了——
+    与两个并发 run 互盖台账是同一个病根。
+    """
     runs = 0
     added: list[str] = []
     rejected: list[str] = []
@@ -171,36 +166,56 @@ def main() -> int:
             curve[(model, scenario)] = cur + [(float(x), float(rate))]
             added.append(f"  {model} / {scenario} @{int(x)} tokens → {rate:.0f} tok/s"
                          f"  ({os.path.basename(f)}, {'覆盖' if dup else '新增'})")
-    print(f"扫描 {args.results_dir}/*.json：{runs} 次运行产出先验点，"
-          f"本次入表 {len(added)} 条")
-    for line in added[:40]:
-        print(line)
-    if len(added) > 40:
-        print(f"  …另有 {len(added) - 40} 条")
-    if no_gw:
-        print(f"跳过 {len(no_gw)} 份归档：cfg 里没有网关身份（provider 缺失），"
-              f"键算不出来——不猜归属（{', '.join(sorted(no_gw)[:3])} …）")
-    if rejected:
-        print(f"形状闸拦下 {len(rejected)} 条（不进台账）：")
-        for line in rejected[:20]:
+    return runs, added, rejected, no_gw
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--results-dir", default="results")
+    ap.add_argument("--write", action="store_true", help="写入台账（默认只预演）")
+    ap.add_argument("--force", action="store_true", help="同档也用存档值覆盖")
+    ap.add_argument("--adopt-model", action="append", default=[], metavar="模型名",
+                    help="把该模型**没有部署字段**的旧键并入当前 config.json 的指纹"
+                         "（旧档案跑在填字段之前，指纹退化成「模型|网关」，不并入就"
+                         "播种不上；只对确实是同一套部署的模型用——合错表比没表更坏）")
+    args = ap.parse_args()
+
+    path = os.path.join(args.results_dir, bench.PREFILL_LEDGER_FILE)
+    # 读-改-写整段上台账锁（ADR-0144）：装载与落盘之间若有测速收口，它写的行
+    # 会被这份「按脚本启动时那版表」整片盖掉
+    with bench._ledger_lock(path):
+        table = bench._prefill_ledger_load(path)
+        runs, added, rejected, no_gw = _collect(table, args)
+        print(f"扫描 {args.results_dir}/*.json：{runs} 次运行产出先验点，"
+              f"本次入表 {len(added)} 条")
+        for line in added[:40]:
             print(line)
-    for key, subs in sorted(table.items()):
-        for scenario, rows in sorted(subs.items()):
-            seed = bench._prefill_ledger_seed(rows)
-            head = (f"台账 {key} / {scenario}：{len(seed)} 档（"
-                    f"{int(seed[0][0])}→{int(seed[-1][0])} tokens）")
-            est = bench.rate_prior(seed, 262144) if len(seed) >= 2 else None
-            print(head + (f"，256K 先验 → {est:.0f} tok/s" if est else
-                          "，档数不足、暂不外推"))
-    for model in args.adopt_model:
-        n = _adopt(model, table)
-        print(f"并入当前部署指纹：{model} → {n} 条场景表（旧「模型|网关」空指纹键已折叠）")
-    if not args.write:
-        print("（预演：未写盘。加 --write 落盘）")
+        if len(added) > 40:
+            print(f"  …另有 {len(added) - 40} 条")
+        if no_gw:
+            print(f"跳过 {len(no_gw)} 份归档：cfg 里没有网关身份（provider 缺失），"
+                  f"键算不出来——不猜归属（{', '.join(sorted(no_gw)[:3])} …）")
+        if rejected:
+            print(f"形状闸拦下 {len(rejected)} 条（不进台账）：")
+            for line in rejected[:20]:
+                print(line)
+        for key, subs in sorted(table.items()):
+            for scenario, rows in sorted(subs.items()):
+                seed = bench._prefill_ledger_seed(rows)
+                head = (f"台账 {key} / {scenario}：{len(seed)} 档（"
+                        f"{int(seed[0][0])}→{int(seed[-1][0])} tokens）")
+                est = bench.rate_prior(seed, 262144) if len(seed) >= 2 else None
+                print(head + (f"，256K 先验 → {est:.0f} tok/s" if est else
+                              "，档数不足、暂不外推"))
+        for model in args.adopt_model:
+            n = _adopt(model, table)
+            print(f"并入当前部署指纹：{model} → {n} 条场景表（旧「模型|网关」空指纹键已折叠）")
+        if not args.write:
+            print("（预演：未写盘。加 --write 落盘）")
+            return 0
+        bench._ledger_save(path, table)
+        print(f"已写入 {path}")
         return 0
-    bench._ledger_save(path, table)
-    print(f"已写入 {path}")
-    return 0
 
 
 if __name__ == "__main__":

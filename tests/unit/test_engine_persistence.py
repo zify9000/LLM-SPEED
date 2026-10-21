@@ -17,6 +17,7 @@ chars↔tokens 反解、子表归户与 LRU 上限、落盘守卫与损坏容忍
 import asyncio
 import hashlib
 import json
+import math
 import os
 import sys
 import tempfile
@@ -496,26 +497,39 @@ class TestDensityLedger(unittest.TestCase):
 
     def test_mock_runs_never_write_ledger(self):
         """mock 运行不写台账：假网关的 usage 是编的，写一次就污染跨运行状态
-        （读侧在 run() 开头由 mock_seen 拦，写侧在 _save_density 拦）。"""
+        （读侧在 run() 开头由 mock_seen 拦，写侧在 _save_density 拦）。
+
+        写侧现在走观测流水（ADR-0144：收口时拿盘上现表重放，不再整表盖盘），
+        所以用真路径 `_ledger_note` 喂数据；顺带断言盘上已有的表不会被这一轮盖掉。"""
         with tempfile.TemporaryDirectory() as td:
             path = os.path.join(td, bench.DENSITY_LEDGER_FILE)
             seed = {"m|code@x": [{"density": 3.4, "source": {}, "seen": 1.0,
                                  "anchors": [[1000.0, 300.0], [2000.0, 600.0]]}]}
             bench._ledger_save(path, seed)
             run = BenchRun({}, results_dir=td)
+            # 假网关的密度（两点一条目：_ledger_load 会丢单锚点条目）；密度 1.0
+            # 与盘上 3.4 超容差 → 另开一张子表，不污染 seed 那张
+            run._probe_density[("m", "code")] = 1.0
             run.mock_seen = True
-            # 假网关的密度（两点一条目：_ledger_load 会丢单锚点条目）
-            run.density = {"m|code@x": [{"density": 1.0, "source": {},
-                                         "seen": 2.0,
-                                         "anchors": [[9999.0, 9999.0],
-                                                     [19998.0, 19998.0]]}]}
+            run._ledger_note("m|code@x", 9999.0, 9999.0)
+            run._ledger_note("m|code@x", 19998.0, 19998.0)
             run._save_density()
             self.assertEqual(bench._ledger_load(path), seed,
                              "mock 运行的密度不得落盘")
             run.mock_seen = False
             run._save_density()
-            self.assertEqual(bench._ledger_load(path), run.density,
-                             "真运行的密度应正常落盘（守卫不是永关）")
+            saved = bench._ledger_load(path)
+            self.assertIn([1000.0, 300.0],
+                          [list(p) for p in saved["m|code@x"][0]["anchors"]],
+                          "本轮写盘不得盖掉盘上已有的表（并发 run 互盖的根）")
+            self.assertEqual(
+                [list(p) for s in saved["m|code@x"] for p in s["anchors"]],
+                [[1000.0, 300.0], [2000.0, 600.0], [9999.0, 9999.0],
+                 [19998.0, 19998.0]],
+                "真运行的密度应正常落盘（守卫不是永关）")
+            run._save_density()
+            self.assertEqual(bench._ledger_load(path), saved,
+                             "重复落盘不长出双份锚点（收口只走一次，手工再调也不能坏）")
 
     def test_no_results_dir_skips_density_persistence(self):
         """无 results_dir（内嵌调用/MCP 临时跑）：不写也不炸。"""
@@ -841,6 +855,55 @@ class TestPrefillRateLedger(unittest.TestCase):
             self.assertAlmostEqual(bench.rate_prior(
                 run.prefill_curve[("m", "code")], 131072), 701.0, delta=40)
 
+    def test_reconcile_discards_stale_ledger_on_two_same_dir_tiers(self):
+        """行为判据（ADR-0139 决策 3）：同方向 ≥2 档偏离台账 ≥15% → 整表摘除 +
+        播报；磁盘台账不动，后续只用本轮实测外推。"""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = {"models": ["m"], "scenarios": ["code"], "provider": "gw1",
+                   "model_info": {"m": {"deploy_label": "mine"}},
+                   "model_max_ctx": {"m": 262144}}
+            run = BenchRun(cfg, results_dir=td)
+            run.prefill_ledger = {"gw:gw1|m|mine|ctx262144": {"code": [
+                [16384.0, 8000.0, time.time()], [32768.0, 10000.0, time.time()],
+                [65536.0, 11000.0, time.time()]]}}
+            run._seed_prefill_curves()
+            key = ("m", "code")
+            # 后端换慢了：两档实测都低台账 ~40%
+            run._note_prefill_rate(key, 16000.0, 4800.0)
+            asyncio.run(run._reconcile_prior(key, 16000.0, 4800.0))
+            self.assertNotIn(key, run._prior_discarded, "单档偏离不判")
+            run._note_prefill_rate(key, 32000.0, 5900.0)
+            asyncio.run(run._reconcile_prior(key, 32000.0, 5900.0))
+            self.assertIn(key, run._prior_discarded, "同向两档偏离必须判")
+            self.assertEqual(run.prefill_curve[key],
+                             [(16000.0, 4800.0), (32000.0, 5900.0)],
+                             "剩余台账锚点（含没撞档的 65536）全部摘除")
+            self.assertTrue(any(e.get("type") == "status" and "基线未采纳" in e["msg"]
+                                for e in run.history), "要播报为什么不用历史基线")
+
+    def test_reconcile_no_trigger_single_or_mixed_or_small_x(self):
+        """行为判据不误触发：单档、方向相反、同档复测、x<8K 都不判。"""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = {"models": ["m"], "scenarios": ["code"], "provider": "gw1",
+                   "model_info": {"m": {"deploy_label": "mine"}},
+                   "model_max_ctx": {"m": 262144}}
+            run = BenchRun(cfg, results_dir=td)
+            run.prefill_ledger = {"gw:gw1|m|mine|ctx262144": {"code": [
+                [16384.0, 8000.0, time.time()], [32768.0, 10000.0, time.time()]]}}
+            run._seed_prefill_curves()
+            key = ("m", "code")
+            run._note_prefill_rate(key, 16000.0, 4800.0)      # 低偏离
+            asyncio.run(run._reconcile_prior(key, 16000.0, 4800.0))
+            run._note_prefill_rate(key, 32000.0, 12000.0)     # 高偏离（反方向）
+            asyncio.run(run._reconcile_prior(key, 32000.0, 12000.0))
+            self.assertNotIn(key, run._prior_discarded, "方向相反更像噪声，不判")
+            asyncio.run(run._reconcile_prior(key, 16000.0, 4700.0))
+            self.assertNotIn(key, run._prior_discarded, "同档复测不数多票")
+            for x in (4096.0, 6000.0, 7000.0):                # x<8K 豁免对账
+                asyncio.run(run._reconcile_prior(key, x, 100.0))
+            self.assertNotIn(key, run._prior_discarded, "小档固定开销方差大，豁免")
+            self.assertEqual(len(run.prefill_curve[key]), 2, "未判则曲线原样不动")
+
     def test_backfill_shape_gate_blocks_the_2026_10_10_spike(self):
         """回填脚本的形状闸：同运行低档外推 1.5× 以上的孤峰不得入台账。
         污染源就是 2026-10-10 那跑（网关静默 fallback）的 204528→2259.7（同部署
@@ -932,3 +995,328 @@ class TestPrefillRateLedger(unittest.TestCase):
             bare.prefill_ledger = {"gw:gw1|m": {"code": [[65000.0, 3400.0, time.time()]]}}
             self.assertEqual(len(bare._seed_prefill_curves()), 1)
             bare._save_prefill_ledger()
+
+    def test_seed_broadcast_reports_anchor_age(self):
+        """播种播报的「N 天前登记」不得静默消失：行自 ADR-0141 起是 4~5 位
+        （src/并跑标），按旧三位格式（len==3）过滤会把 stamp 算成 0。"""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = {"models": ["m"], "scenarios": ["code"], "provider": "gw1",
+                   "model_info": {"m": {"deploy_label": "mine"}},
+                   "model_max_ctx": {"m": 262144}}
+            run = BenchRun(cfg, results_dir=td)
+            old = time.time() - 3 * 86400
+            run.prefill_ledger = {"gw:gw1|m|mine|ctx262144": {"code": [
+                [65000.0, 900.0, old, "r-1"], [131000.0, 800.0, old, "r-1", 1]]}}
+            msgs = run._seed_prefill_curves()
+            self.assertTrue(any("天前登记" in m for m in msgs),
+                            f"4/5 位行也要参与登记年龄计算: {msgs}")
+
+
+class TestLedgerConcurrentWrites(unittest.TestCase):
+    """并发两个 run（同步测两个模型省时间）写台账的回归（ADR-0144）。
+
+    病根：两条台账原本都是「run 开头整表 load → 收口时整表写回」，`_ledger_save`
+    又不读盘不 merge。后装载那个 run 手里没有先收口那次写的行，它后写回就把别人
+    整片抹掉——2026-10-20 真机：同网关并跑 Strata-0/Strata-1，两份存档都在，
+    `prefill-ledger.v1` 与 `density-ledger.v2` 都只剩 Strata-1。
+    """
+
+    def _clean_windows(self):
+        ids = set(bench._RUN_WINDOWS)
+        self.addCleanup(lambda: [bench._RUN_WINDOWS.pop(i, None) for i in ids])
+
+    def test_concurrent_runs_both_land_in_prefill_ledger(self):
+        """先收口的 run 写的行，不得被后收口那个盖掉（本坑的正判据）。"""
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, bench.PREFILL_LEDGER_FILE)
+            a = BenchRun({"provider": "gwCC", "models": ["A"], "scenarios": ["code"]},
+                         results_dir=td)
+            b = BenchRun({"provider": "gwCC", "models": ["B"], "scenarios": ["code"]},
+                         results_dir=td)
+            # 真机时序：两边都在对方落盘之前装载（此刻盘上还没有对方的行）
+            a.prefill_ledger = bench._prefill_ledger_load(path)
+            b.prefill_ledger = bench._prefill_ledger_load(path)
+            for i in (1, 2, 3):
+                a._prefill_note("A", "code", (60000.0 * i, 2000.0 + i))
+                b._prefill_note("B", "code", (60000.0 * i, 2100.0 + i))
+            a._save_prefill_ledger()
+            b._save_prefill_ledger()
+            table = bench._prefill_ledger_load(path)
+            self.assertIn("gw:gwCC|A", table, "先收口那次被后收口的盖掉了（本坑复发）")
+            self.assertIn("gw:gwCC|B", table)
+            self.assertEqual(len(table["gw:gwCC|A"]["code"]), 3)
+            self.assertEqual(len(table["gw:gwCC|B"]["code"]), 3)
+
+    def test_prefill_save_is_idempotent_and_keeps_legacy_tables(self):
+        """重复落盘不长双份；盘上旧口径遗留表（装载时被跳过）不得被顺手删掉。"""
+        self._clean_windows()
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, bench.PREFILL_LEDGER_FILE)
+            legacy = {"oldmodel|code@fp": {"code": [[64915.0, 3000.0, time.time()]]}}
+            bench._ledger_save(path, legacy)
+            run = BenchRun({"provider": "gwCD", "models": ["A"], "scenarios": ["code"]},
+                           results_dir=td)
+            run._prefill_note("A", "code", (65000.0, 3400.0))
+            run._save_prefill_ledger()
+            first = bench._prefill_ledger_load(path)
+            run._save_prefill_ledger()
+            self.assertEqual(bench._prefill_ledger_load(path), first,
+                             "同一轮重复落盘必须幂等（先摘自己再重放）")
+            self.assertIn("oldmodel|code@fp", bench._fp_ledger_raw(path),
+                          "遗留表只是不被采纳，不是该被删")
+
+    def test_concurrent_run_anchors_are_flagged_and_seed_prefers_clean(self):
+        """并跑期间写的锚点打标（不剔除），且同档有干净锚点时播种只用干净的。"""
+        self._clean_windows()
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, bench.PREFILL_LEDGER_FILE)
+            cfg = {"provider": "gwCE", "models": ["A"], "scenarios": ["code"]}
+            a = BenchRun(cfg, results_dir=td)
+            b = BenchRun(dict(cfg, models=["A"]), results_dir=td)
+            bench._run_window_open(a.run_id, "gwCE", time.time())
+            bench._run_window_open(b.run_id, "gwCE", time.time())
+            self.assertTrue(a._peers_note(), "起测时要播报「同网关并跑」")
+            a._prefill_note("A", "code", (60000.0, 1900.0))   # 并跑：被对方压低
+            a._save_prefill_ledger()
+            rows = bench._prefill_ledger_load(path)["gw:gwCE|A"]["code"]
+            self.assertTrue(all(len(e) > 4 and e[4] for e in rows),
+                            "并跑期间写的锚点要带第五位标记")
+            # 事后单独复测（同伴已结束）同档再写一条干净锚点
+            bench._run_window_close(a.run_id)
+            bench._run_window_close(b.run_id)
+            c = BenchRun(cfg, results_dir=td)
+            c._prefill_note("A", "code", (60000.0, 2600.0))
+            c._save_prefill_ledger()
+            table = bench._prefill_ledger_load(path)
+            self.assertEqual(bench._prefill_ledger_seed(table["gw:gwCE|A"]["code"]),
+                             [(60000.0, 2600.0)],
+                             "同档混有并跑点时，播种要取干净那条而不是被压低的那条")
+            self.assertEqual(bench.prefill_ledger_view(path)["tables"][0]["concurrent"], 1)
+
+    def test_density_ledger_merges_instead_of_overwriting(self):
+        """密度台账同样按「装载现表 + 重放本轮观测」写：另一台部署的表要活着。"""
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, bench.DENSITY_LEDGER_FILE)
+            seed = {"B|code@fp": [{"density": 3.4, "source": {}, "seen": 1.0,
+                                   "anchors": [[1000.0, 300.0], [2000.0, 600.0]]}]}
+            bench._ledger_save(path, seed)
+            a = BenchRun({}, results_dir=td)
+            a._probe_density[("A", "code")] = 2.2
+            for chars, real in ((2200.0, 1000.0), (4400.0, 2000.0)):
+                a._ledger_note("A|code@fp", chars, real)
+            a._save_density()
+            table = bench._ledger_load(path)
+            self.assertIn("B|code@fp", table, "密度台账被整表盖盘（本坑复发）")
+            self.assertIn("A|code@fp", table)
+
+
+class TestDeliveryLedger(unittest.TestCase):
+    """decode 交付粒度台账（跨运行，ADR-0145 草稿）：归户、就近播种、守卫、串行写。
+
+    病根（用户 2026-10-20 目检）：跑动中那格 Decode 的 token 数是「包数 ÷ 事件/token
+    比」，那个比原本只在单次 run 内存里从零学；投机解码网关每包 1.7~5.5 个 token 且
+    接受率跨档跳，本轮学到的比用在下一档就偏一个固定倍数（中途稳定 90+ / 最后 70+）。"""
+
+    _KEY = "gw:local|A|fastllm|nvfp4|fp8|ctx262144"
+
+    def test_note_and_load_roundtrip_with_bucket_cap(self):
+        now = 1_800_000_000.0
+        table: dict = {}
+        for i, (ctx, x) in enumerate([(4096.0, 4.9), (4110.0, 5.1), (4120.0, 3.0),
+                                      (4130.0, 2.0), (131168.0, 4.4)]):
+            self.assertTrue(bench._delivery_ledger_note(
+                table, self._KEY, "code|c1", ctx, x, now + i, src="r1"))
+        rows = table[self._KEY]["code|c1"]
+        same = [e for e in rows if abs(math.log2(e[0]) - math.log2(4096.0))
+                < bench.DELIVERY_LEDGER_BUCKET_LOG2]
+        self.assertEqual(len(same), bench.DELIVERY_LEDGER_PER_BUCKET,
+                         "同档只留最近 3 条：交付粒度是台阶不是曲线，旧观测不该拖着新观测")
+        self.assertEqual(same[0][1], 5.1, "被逐出的应是本档最旧那条")
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, bench.DELIVERY_LEDGER_FILE)
+            bench._ledger_save(path, table)
+            back = bench._delivery_ledger_load(path, now=now + 10)
+        self.assertEqual(sorted(back[self._KEY]), ["code|c1"])
+        self.assertEqual(len(back[self._KEY]["code|c1"]), len(rows))
+
+    def test_seed_takes_nearest_bucket_and_prefers_clean_anchors(self):
+        now = 1_800_000_000.0
+        rows = [[4096.0, 4.9, now, "r1"], [4100.0, 5.1, now + 1, "r1"],
+                [4110.0, 5.3, now + 2, "r1"],
+                [131168.0, 2.0, now + 3, "r2"],      # 高档：离目标远，不该被选中
+                [262144.0, 2.2, now + 4, "r2", 1]]   # 并跑标记
+        seed = bench._delivery_seed_x(rows, 4200)
+        self.assertAlmostEqual(seed["x"], 5.1, msg="就近档取中位数")
+        self.assertEqual(seed["n"], 3)
+        # 并跑锚点单独成档时仍可用作种子（有偏的种子远比没有好）
+        seed2 = bench._delivery_seed_x([[262144.0, 2.2, now, "r2", 1]], 262144)
+        self.assertAlmostEqual(seed2["x"], 2.2)
+        # 同档混有干净点与并跑点：只用干净的那几条
+        seed3 = bench._delivery_seed_x(
+            [[4096.0, 4.9, now, "r1"], [4100.0, 3.0, now + 1, "r2", 1]], 4096)
+        self.assertAlmostEqual(seed3["x"], 4.9)
+        self.assertIsNone(bench._delivery_seed_x([], 4096), "无锚点要回 None（走冷启动口径）")
+
+    def test_load_drops_stale_rows_and_legacy_keys(self):
+        now = 1_800_000_000.0
+        old_ts = now - (bench.DELIVERY_LEDGER_MAX_AGE_S + 86400)   # 换后端前的旧表
+        raw = {self._KEY: {"code|c1": [[4096.0, 4.9, old_ts, "r1"],
+                                       [4096.0, 0.0, now, "r1"],     # 非正值
+                                       [4096.0, 4.4, now - 3600, "r1"]]},
+               "A|fastllm": {"code|c1": [[4096.0, 3.0, now, "r1"]]}}   # 无网关段
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, bench.DELIVERY_LEDGER_FILE)
+            bench._ledger_save(path, raw)
+            table = bench._delivery_ledger_load(path, now=now)
+            view = bench.delivery_ledger_view(path, now=now)
+        self.assertEqual(list(table), [self._KEY], "旧口径遗留表（无网关段）不采纳")
+        rows = table[self._KEY]["code|c1"]
+        self.assertEqual(len(rows), 1, "过期条目与零值条目要在装载侧就丢掉")
+        self.assertEqual(rows[0][1], 4.4)
+        self.assertEqual(view["stale_keys"], ["A|fastllm"],
+                         "盘上有、引擎不用的表必须报出来（不报就是“我存了东西界面却说没有”）")
+
+    def test_prune_scopes_and_legacy_only_whole_table(self):
+        now = 1_800_000_000.0
+        raw = {self._KEY: {"code|c1": [[4096.0, 4.9, now, "r1"], [131168.0, 4.1, now, "r1"]],
+                           "creative|c1": [[4096.0, 2.0, now, "r1"]]},
+               "A|fastllm": {"code|c1": [[4096.0, 3.0, now, "r1"]]}}
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, bench.DELIVERY_LEDGER_FILE)
+            bench._ledger_save(path, raw)
+            d = bench.delivery_ledger_prune(path, self._KEY, sub="code|c1", ctx=4096,
+                                            now=now)
+            self.assertEqual(d["removed"], 1)
+            table = bench._delivery_ledger_load(path, now=now)
+            self.assertEqual(len(table[self._KEY]["code|c1"]), 1, "只删那一档")
+            self.assertIn("creative|c1", table[self._KEY], "删错了栏就是删数据")
+            with self.assertRaises(ValueError):
+                bench.delivery_ledger_prune(path, self._KEY, ctx=999999, now=now)
+            with self.assertRaises(ValueError):
+                bench.delivery_ledger_prune(path, "A|fastllm", sub="code|c1", now=now)
+            d = bench.delivery_ledger_prune(path, "A|fastllm", now=now)
+            self.assertEqual(d["removed"], 1, "遗留表要删得掉（只允许整表删）")
+            # 显式整表删就真删了；“删 A 表不得顺手抹掉 B 表”见下一条
+            self.assertNotIn("A|fastllm", bench._fp_ledger_raw(path))
+
+    def test_prune_keeps_legacy_tables_alive(self):
+        """删 A 表不得顺手抹掉 B 表：遗留表只是「不被采纳」，不是「该被删」。"""
+        now = 1_800_000_000.0
+        raw = {self._KEY: {"code|c1": [[4096.0, 4.9, now, "r1"]]},
+               "A|fastllm": {"code|c1": [[4096.0, 3.0, now, "r1"]]}}
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, bench.DELIVERY_LEDGER_FILE)
+            bench._ledger_save(path, raw)
+            bench.delivery_ledger_prune(path, self._KEY, now=now)
+            raw_after = bench._fp_ledger_raw(path)
+        self.assertIn("A|fastllm", raw_after, "静默删数据是这条链上最贵的错")
+        self.assertNotIn(self._KEY, raw_after)
+
+    def test_rehome_moves_only_rows_written_by_that_run(self):
+        now = 1_800_000_000.0
+        old_key, new_key = self._KEY, "gw:local|A|vllm|fp8|ctx262144"
+        raw = {old_key: {"code|c1": [[4096.0, 4.9, now, "run-1"],
+                                     [4096.0, 2.2, now - 10, "run-2"],
+                                     [4096.0, 3.3, now - 20]]}}   # 旧数据没标来源
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, bench.DELIVERY_LEDGER_FILE)
+            bench._ledger_save(path, raw)
+            r = bench.delivery_ledger_rehome(path, "run-1", old_key, new_key, now=now)
+            table = bench._fp_ledger_raw(path)
+        self.assertEqual(r["moved"], 1)
+        self.assertEqual(r["unknown"], 1, "没标来源的要如实报，不猜归属")
+        self.assertEqual([e[1] for e in table[new_key]["code|c1"]], [4.9])
+        self.assertEqual(len(table[old_key]["code|c1"]), 2, "别人写的读数留在原表")
+
+    def test_rekey_gw_moves_whole_tables(self):
+        now = 1_800_000_000.0
+        raw = {self._KEY: {"code|c1": [[4096.0, 4.9, now, "r1"]]}}
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, bench.DELIVERY_LEDGER_FILE)
+            bench._ledger_save(path, raw)
+            r = bench.delivery_ledger_rekey_gw(path, "local", "mainPC", now=now)
+            table = bench._fp_ledger_raw(path)
+        self.assertEqual(r["moved"], 1)
+        self.assertIn("gw:mainPC|A|fastllm|nvfp4|fp8|ctx262144", table)
+
+    def test_save_replays_instead_of_overwriting_and_is_idempotent(self):
+        """收口写盘 = 装载盘上现表 + 重放本轮流水：另一张表要活着，重复落盘不双份。"""
+        now = time.time()
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, bench.DELIVERY_LEDGER_FILE)
+            bench._ledger_save(path, {"gw:other|B": {"code|c1": [[4096.0, 3.5, now, "x"]]}})
+            run = BenchRun({"provider": "local"}, results_dir=td)
+            run.run_id = "run-1"
+            run._delivery_note("A", "code", 1, 4096.0, 4.9)
+            run._save_delivery_ledger()
+            run._save_delivery_ledger()      # 幂等：手工再调一次不长出双份
+            table = bench._delivery_ledger_load(path, now=now + 1)
+        self.assertIn("gw:other|B", table, "交付粒度台账被整表盖盘（ADR-0144 同坑复发）")
+        rows = table["gw:local|A"]["code|c1"]
+        self.assertEqual(len(rows), 1, f"同一轮重复落盘长出双份: {rows}")
+        self.assertEqual(rows[3] if len(rows) > 3 else rows[0][3], "run-1")
+
+    def test_seed_source_labels_and_weight(self):
+        """`_delivery_seed` 三态（run / ledger / cold）与种子权重：种子必须本轮两三个
+        请求就被压过（取大了网关改了交付粒度后会一路偏）。"""
+        now = time.time()
+        cfg = {"provider": "local", "model_info": {"A": {"framework": "fastllm"}}}
+        run = BenchRun(cfg)
+        key = ("A", "code")
+        fp = bench._prefill_fingerprint("A", cfg)
+        run.delivery_ledger = {fp: {"code|c1": [[4096.0, 4.9, now, "r1"]]}}
+        src = asyncio.run(run._delivery_seed("A", "code", 4096, 1))
+        self.assertEqual(src, "ledger")
+        self.assertAlmostEqual(run.chunk_calib[key], 1 / 4.9, places=4)
+        self.assertEqual(run.chunk_calib_w[key], bench.DELIVERY_SEED_WEIGHT)
+        # 本轮实测过 → 不再回报 "ledger"，也不回头改系数
+        run.chunk_calib[key] = 1 / 3.0
+        run._chunk_calib_src[key] = "run"
+        self.assertEqual(asyncio.run(run._delivery_seed("A", "code", 4096, 1)), "run")
+        self.assertAlmostEqual(run.chunk_calib[key], 1 / 3.0)
+        # 并发档没有锚点 → 不借单发那张表（批内交付粒度与单发不可比）
+        run2 = BenchRun(cfg)
+        run2.delivery_ledger = {bench._prefill_fingerprint("A", cfg):
+                                {"code|c1": [[4096.0, 4.9, now, "r1"]]}}
+        self.assertEqual(asyncio.run(run2._delivery_seed("A", "code", 4096, 4)), "cold")
+        self.assertNotIn(("A", "code"), run2.chunk_calib)
+
+    def test_seed_skipped_for_mock_runs(self):
+        """mock 运行不读台账：假网关的交付形态是编的，读一次就把假数播进真读数。"""
+        run = BenchRun({"provider": "local"})
+        run.mock_seen = True
+        run.delivery_ledger = {"gw:local|A": {"code|c1": [[4096.0, 4.9, time.time(), "r"]]}}
+        self.assertEqual(asyncio.run(run._delivery_seed("A", "code", 4096, 1)), "cold")
+        self.assertEqual(run._delivery_obs, [])
+        run._delivery_note("A", "code", 1, 4096.0, 4.9)
+        self.assertEqual(run._delivery_obs, [])
+
+
+class TestLedgerRowsWithoutSourceField(unittest.TestCase):
+    """ADR-0141 之前落盘的台账行只有三位 `(档位, 值, 时刻)`。搬家侧任何直接取
+    来源位的写法都会 IndexError 打掉整个「改存档环境信息 / 改网关名」操作——
+    而那次操作本来就不该因为「有旧格式行」而失败。"""
+
+    _NOW = 1_800_000_000.0
+
+    def _legacy(self, path, file):
+        bench._ledger_save(os.path.join(path, file),
+                           {"old": {"code|c1": [[4096.0, 4.9, self._NOW]],
+                                    "code": [[4096.0, 1200.0, self._NOW]]}})
+
+    def test_delivery_rehome_survives_legacy_rows(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._legacy(td, bench.DELIVERY_LEDGER_FILE)
+            p = os.path.join(td, bench.DELIVERY_LEDGER_FILE)
+            r = bench.delivery_ledger_rehome(p, "r1", "old", "new", now=self._NOW)
+            self.assertEqual((r["moved"], r["unknown"]), (0, 2),
+                             "搬不动要如实报，不能抛异常")
+            self.assertEqual(list(json.load(open(p, encoding="utf-8"))), ["old"],
+                             "没搬动就不写盘")
+
+    def test_prefill_rehome_survives_legacy_rows(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._legacy(td, bench.PREFILL_LEDGER_FILE)
+            p = os.path.join(td, bench.PREFILL_LEDGER_FILE)
+            r = bench.prefill_ledger_rehome(p, "r1", "old", "new", now=self._NOW)
+            self.assertEqual((r["moved"], r["unknown"]), (0, 2))

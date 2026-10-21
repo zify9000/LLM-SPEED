@@ -760,6 +760,10 @@ input[type=checkbox]:disabled,input[type=radio]:disabled{opacity:.45; cursor:not
   background:none; color:var(--ink-4); cursor:pointer; line-height:1}
 .pl-del:hover{background:var(--red-soft); color:var(--red)}
 .pl-note{color:var(--ink-3); font-size:var(--fs-sm); line-height:1.7}
+/* 两张台账的分节标题（ADR-0145）：抽屉里现在有两张表，不分段会让人以为
+   “先验那一叠就是测速基线的全部” */
+.pl-title{font-size:var(--fs-sm); font-weight:600; color:var(--ink-3);
+  letter-spacing:.02em; margin:14px 0 2px}
 /* 顶栏「设置」图标按钮的下拉菜单：与卡片图例/环境浮层同一张壳（fixed 定位、
    点外部/Escape 收），条目样式复用 .hd-mitem */
 .top-menu{position:fixed; z-index:120; min-width:200px; padding:4px;
@@ -2181,6 +2185,8 @@ const state = {points:new Map(), es:null, runId:null, running:false, cfg:null, m
   histId:"",              // 历史记录那一行的"当前选中存档"唯一事实源（ADR-0130，替掉隐藏 <select>）
   donePoints:0, totalPoints:0, providers:[], phase:"idle",
   preMeasured:new Set(),   // 已出 prefill 实测帧的点（livePointKey）——估值帧不再回退其 KPI
+  decMeasured:new Set(),   // 已出 decode 实测帧的点（ADR-0145）——同理：种子估帧不得把
+                           // 已经停在真值上的那格退回「≈」
   scenMeta:{},             // 场景元数据（/api/config 下发：label/kind/ladder/unit）
   defMediaLadder:{},       // 媒体场景（asr/ocr/tts）默认档位（场景 ladder，服务端下发）
   mladSel:{},              // 媒体档位勾选（场景键→数值数组；渲染/勾选时更新，持久化在 matrixCfg.mlad）
@@ -4444,6 +4450,7 @@ async function startRun(){
   state.points.clear(); state.maxSeq = -1;
   state.cmp = null;   // 启动新测速 = 退出多次对比态
   state.preMeasured.clear();
+  state.decMeasured.clear();
   state.donePoints = 0;
   clearSkipNotes();
   saveMatrixCfg();   // 启动即持久化当前矩阵选择，兜底未经 change 的改动
@@ -4753,27 +4760,9 @@ function tickElapsed(){
    （走路/跑步/自行车/小汽车/高铁）上界面（用户点名要诙谐）：actor 就是活指示器
    ——位置 = 数值、种类 = 档位，光粒子拖尾随档加密加速。`data-tiers` 是各段**上界**
    （decode 10/30/50/100/300、prefill 500/1000/2000/5000/10000，均用户拍板），
-   超过最后一个则满程钉右端。阈值是前端展示常量，不进 config.json（又多一份配置面不值得） */
-const TRK_NAMES = ["走路", "跑步", "自行车", "小汽车", "高铁"];
-const TRK_ACTORS = ["🚶", "🏃", "🚴", "🚗", "🚄"];   // 与 TRK_NAMES 同序；空读数 = 😴
-const TRK_IDLE = {actor: "😴", name: "待发车"};
-/* 里程碑数字的紧凑写法：1000→1K（prefill 标 0/500/1K/2K/5K/10K） */
-const trkFmt = v => v >= 1000 ? `${v / 1000}K` : String(v);
-/* 值 → 0~1 轨长（段内线性、段长相等——检查站等距，精确数值感交给大数字与 title） */
-function trkFrac(v, tiers){
-  const n = tiers.length; let lo = 0;
-  for(let i = 0; i < n; i++){
-    const hi = tiers[i];
-    if(v <= hi || i === n - 1)
-      return Math.min(1, (i + (hi > lo ? Math.max(0, Math.min(1, (v - lo) / (hi - lo))) : 1)) / n);
-    lo = hi;
-  }
-  return 1;
-}
-const trkTier = (v, tiers) => {
-  const i = tiers.findIndex(t => v <= t);
-  return TRK_NAMES[i < 0 ? tiers.length - 1 : i];
-};
+   超过最后一个则满程钉右端。阈值是前端展示常量，不进 config.json（又多一份配置面不值得）。
+   档名/actor/换算三个纯函数（TRK_NAMES/TRK_ACTORS/trkFmt/trkFrac/trkTier）在 §pure 区，
+   供 node 单测直接断言（分段线性、超量程钳末档） */
 /* 懒建（首次写值时建轨道；几何只建一次，之后每帧只改 width/left/类名）。
    Node 桩下 querySelector 返回 null → 后续写入自然无操作，渲染门禁不炸。
    如实退化三态（赛道只是同一个数的第二次表达，不得比数字更像实测）：
@@ -4820,8 +4809,10 @@ function trkSet(el, v, opt = {}){
   if(el.dataset.cls !== cls){
     el.dataset.cls = cls;
     const actor = el.querySelector(".actor");
-    if(actor) actor.textContent = live ? TRK_ACTORS[now] : TRK_IDLE.actor;
-    if(tn) tn.textContent = live ? TRK_NAMES[now] : TRK_IDLE.name;
+    // 档名/actor 数组只有 5 项：data-tiers 段数改多改少时钳末档，不产出 undefined
+    const ai = Math.min(now, TRK_ACTORS.length - 1);
+    if(actor) actor.textContent = live ? TRK_ACTORS[ai] : TRK_IDLE.actor;
+    if(tn) tn.textContent = live ? TRK_NAMES[ai] : TRK_IDLE.name;
   }
   if(tn) tn.classList.toggle("est", !!opt.est && live);
   /* 升档（含睡醒首发车）：actor 弹一下 + 爆一小把光粒子（冲线）；降档悄悄降——
@@ -4876,10 +4867,13 @@ function kpiPush(vSel, val, label){
    与点级回写推进），既动态又不污染峰值 */
 function kpiPushEst(vSel, val, hint){
   const el = $(vSel);
-  // 「≈」单独包一档：主数值保持最大字号，估值标记退到辅助档并带口径悬浮
-  // （两路估值共用：等待期帧 = 按速率曲线先验推算；首 token 帧 = TTFT 已实测
-  // 但 prompt tokens 仍是字符÷系数估算——流末 usage 真值帧到达后会被覆盖）
-  el.innerHTML = `<span class="est" title="估值：等待期按速率曲线先验推算；首 token 帧的 TTFT 已实测，但 prompt tokens 仍是估算（服务端 usage 未回）——流末真值帧到达后将被实测覆盖${hint || ""}">≈</span>${val} <small>tok/s</small>`;
+  // 「≈」单独包一档：主数值保持最大字号，估值标记退到辅助档并带口径悬浮。
+  // 口径文案按格分家：prefill = 等待期先验/首 token 帧；decode 的口径由 hint
+  // （_decEstTipOf）自带、不再叠一段 prefill 话术（以前两段「估值：」并列，
+  // decode 格悬浮里冒出一段 prompt tokens 解说）
+  const base = vSel === "#kpiDecode" ? ""
+    : "估值：等待期按速率曲线先验推算；首 token 帧的 TTFT 已实测，但 prompt tokens 仍是估算（服务端 usage 未回）——流末真值帧到达后将被实测覆盖";
+  el.innerHTML = `<span class="est" title="${base}${hint || ""}">≈</span>${val} <small>tok/s</small>`;
   // 赛道跟着动，但 fill/actor 降透明：不得比数字更像实测（估值从高往低收敛）
   trkSet(trkOf(vSel), val, {est: true, label: "估值"});
 }
@@ -4904,6 +4898,8 @@ function updateLive(t){
   // 实时表按媒体口径展示；ocr 走 VLM 流式路径，列语义与 llm 一致
   const k = scenKind(t.scenario);
   const isMedia = k === "asr" || k === "tts";
+  // 本轮用的事件/token 比不是本轮实测的（历史种子或未校准）：分子是估算，挂「≈」
+  let decEstFrame = false;
   if(!tr){
     tr = document.createElement("tr");
     tr.dataset.tag = rowKey;
@@ -4959,7 +4955,21 @@ function updateLive(t){
       // speed = 倍速或 KB/s——只更新实时表，不混入 tok/s KPI
       if(t.speed != null) c[8].textContent = k === "tts" ? t.speed + " KB/s" : t.speed + " ×";
     } else if(!isPrime){
-      kpiPush("#kpiDecode", t.speed || 0, "实测 Decode");
+      // 估值帧与实测帧分开走（ADR-0145）：以前 decode tick 一律当实测推 KPI（不挂
+      // 「≈」），而它的分子可能是历史种子估出来的——用户看到的就是“实测值偶尔偏 20%”
+      decEstFrame = !!t.est;
+      if(decEstFrame){
+        const tip = _decEstTipOf(t.est_batch, t.est_src, !!t.est_final);
+        c[8].textContent = "≈" + t.speed + " tok/s";
+        c[8].title = tip;
+        // 本点已经出过实测 decode 帧（流末 usage 那一帧）：估帧不得把它退回「≈」
+        if(!state.decMeasured.has(livePointKey(t))) kpiPushEst("#kpiDecode", t.speed, tip);
+      } else if(t.speed != null){
+        // speed 缺失/为 0 时不推 KPI：先 add 再推 0 会把「无读数」显示成
+        // 「实测 0」并冻结本点后续估帧
+        state.decMeasured.add(livePointKey(t));
+        kpiPush("#kpiDecode", t.speed, "实测 Decode");
+      }
     }
   }
   else if(t.phase === "error"){
@@ -4970,7 +4980,7 @@ function updateLive(t){
   }
   if(t.ttft != null) c[6].textContent = t.ttft + "s";
   if(t.tokens != null) c[7].textContent = isMedia && k === "tts" ? t.tokens + " KB" : Math.round(t.tokens);
-  if(!isMedia && t.phase === "decode" && t.speed != null) c[8].textContent = t.speed + " tok/s";
+  if(!isMedia && t.phase === "decode" && t.speed != null && !decEstFrame) c[8].textContent = t.speed + " tok/s";
   if(t.elapsed != null && t.phase !== "error") c[9].textContent = t.elapsed + "s";   // 错误文本不被耗时覆盖
 }
 function markLiveDone(p){
@@ -5019,6 +5029,46 @@ const provUrlText = p => {
 };
 const fmtNum = v => v==null ? "-" : Math.round(v).toLocaleString("en-US");
 const round1 = v => Math.round(v*10)/10;
+/* KPI 双赛道的档名/actor 与纯换算（从赛道渲染段搬来：纯函数集中在 §pure 才有
+   node 单测，pitfalls/crosscut/02 的超量程钳末档回归靠它守住） */
+const TRK_NAMES = ["走路", "跑步", "自行车", "小汽车", "高铁"];
+const TRK_ACTORS = ["🚶", "🏃", "🚴", "🚗", "🚄"];   // 与 TRK_NAMES 同序；空读数 = 😴
+const TRK_IDLE = {actor: "😴", name: "待发车"};
+/* 里程碑数字的紧凑写法：1000→1K（prefill 标 0/500/1K/2K/5K/10K） */
+const trkFmt = v => v >= 1000 ? `${v / 1000}K` : String(v);
+/* 值 → 0~1 轨长（段内线性、段长相等——检查站等距，精确数值感交给大数字与 title） */
+function trkFrac(v, tiers){
+  const n = tiers.length; let lo = 0;
+  for(let i = 0; i < n; i++){
+    const hi = tiers[i];
+    if(v <= hi || i === n - 1)
+      return Math.min(1, (i + (hi > lo ? Math.max(0, Math.min(1, (v - lo) / (hi - lo))) : 1)) / n);
+    lo = hi;
+  }
+  return 1;
+}
+const trkTier = (v, tiers) => {
+  const i = tiers.findIndex(t => v <= t);
+  // 超量程 findIndex 给 -1 → 手动拥到最后一段（pitfalls/crosscut/02）；
+  // 段数比档名多（data-tiers 改档忘了改这里）时钳到末档，不产出 undefined 档名
+  return TRK_NAMES[Math.min(i < 0 ? tiers.length - 1 : i, TRK_NAMES.length - 1)];
+};
+
+/* decode tick 那格的口径悬浮（ADR-0145）：中途那个 token 数不是服务端给的，而是
+   「包数 ÷ 每包几个 token」。那个每包几个 token 本轮还没实测过时来自历史基线或
+   1 事件/包 直计——所以那格得挂「≈」。文案写在展示层唯一一处（引擎只给数字）：
+   两处各写一份就是 `pitfalls/crosscut/24` 那个坑。
+   src：ledger=历史种子（「测速基线」面板可查）/ cold=无种子（est_batch>1 说明
+   探测请求已实测出比值，不是拍脑袋的 1.0）；fin=流末帧（usage 始终未回，不会再
+   有真值帧覆盖——与中途帧的“跑完就覆盖”是两种处境，文案必须分开） */
+function _decEstTipOf(estBatch, src, fin){
+  if(fin) return "估值：服务端始终未回传 usage，token 数为引擎估算（不会有真值帧覆盖），以点级读数为准";
+  const b = (estBatch == null ? 1 : estBatch);
+  const basis = b > 1.005
+    ? (src === "ledger" ? `历史基线 ${b} token/包` : `探测实测 ${b} token/包`)
+    : "1 事件/token 直计";
+  return `估值：token 数按${basis}估算，不是服务端真值；本请求跑完会被 usage 真值覆盖（实测每包几个 token 见「测速基线」面板）`;
+}
 
 // Prefill 展示口径：优先扣 RTT 的净值（ADR-0006），旧存档无该字段时回退毛值
 const preOf = p => p.prefill_net_tok_s ?? p.prefill_tok_s;
@@ -5578,6 +5628,10 @@ function addPoint(p){
     // 点完成回写权威读数：主数值=最终窗口均值（停滞点取空窗校正口径），
     // 峰值对比沿用实时逻辑（ADR-0007）
     kpiPush("#kpiDecode", dv, "实测 Decode");
+    // 同时记“本点已实测”（ADR-0145）：同点后续迟到的估算帧不得把这格退回「≈」。
+    // key 与 updateLive 的 livePointKey 同口径（含指令档段）——agent 矩阵同缓存档
+    // 的各指令档是不同测点，缺了这段两处对不上（迟到估帧会误退 KPI）
+    state.decMeasured.add(`${p.model}|${p.scenario}|${p.ctx_target}|${p.concurrency}|${p.inst_tokens ?? ""}`);
   }
 }
 /* 结果全量平铺（ADR：模型/场景筛选下拉已移除）——固定排序：
@@ -7568,7 +7622,11 @@ async function saveModelEnv(model, info){
    搬了几条、有没有因同档上限被逐出、有没有搬不动的旧数据、有没被在跑的测速盖掉的风险 */
 function priorMoveNote(p){
   if(!p) return "";
-  let t = p.moved ? `，速率先验基线已跟着搬 ${p.moved} 条`
+  const bits = [];
+  if(p.prior_moved) bits.push(`先验 ${p.prior_moved} 条`);
+  if(p.delivery_moved) bits.push(`交付粒度 ${p.delivery_moved} 条`);
+  let t = p.moved ? `，测速基线已跟着搬 ${p.moved} 条`
+        + (bits.length > 1 ? `（${bits.join(" · ")}）` : "")
         + (p.dropped ? `（${p.dropped} 条撞同档上限被逐出）` : "")
     : (p.unknown ? `（台账里 ${p.unknown} 条旧读数没标来源、搬不动，可在基线面板里删）` : "");
   if(p.risk) t += "；注意：" + p.risk;
@@ -8955,7 +9013,7 @@ function hdSpliceExit(){
    一样不少），这边是"逐档台账"（一行一档、数字要能扫读）——硬塞的结果是两边都别扭，
    于是改成顶栏设置图标 → 菜单「测速基线」→ 自己的侧边栏 + 自己的表格。
    面板只做两件事：看得到（谁的表、哪几档、多久没更新、这次会不会被用上）与删得掉。 */
-let priorCache = null, baseHideTimer = 0;
+let priorCache = null, deliveryCache = null, baseHideTimer = 0;
 function toggleTopMenu(btn){
   if($("#topSetMenu")){ closeTopMenu(); return; }
   const menu = document.createElement("div");
@@ -8963,7 +9021,7 @@ function toggleTopMenu(btn){
   menu.setAttribute("role", "menu"); menu.setAttribute("aria-label", "测速数据与基线设置");
   menu.innerHTML = `<div class="lg-title">测速数据</div>
     <button type="button" class="hd-mitem" role="menuitem" id="topMenuBaseline"
-      title="等待期「预估」用的历史读数：看 / 删">测速基线</button>`;
+      title="跑测时「预估」用的历史读数（prefill 先验 + decode 交付粒度）：看 / 删">测速基线</button>`;
   document.body.appendChild(menu);
   const r = btn.getBoundingClientRect();
   menu.style.top = `${r.bottom + 6}px`;
@@ -9010,6 +9068,7 @@ function closeBaseDrawer(){
   // 面板内容随抽屉一起清掉：下次打开要的是新鲜数据（台账随时可能被别人/别的轮次改过）
   baseHideTimer = setTimeout(() => { $("#blPanel").innerHTML = ""; root.hidden = true; }, 300);
   priorCache = null;
+  deliveryCache = null;
   const btn = $("#btnTopSet");
   btn.setAttribute("aria-expanded", "false");
   btn.focus();   // 焦点还给触发钮（读屏与键盘流的回程票）
@@ -9034,15 +9093,21 @@ async function blRender(){
   const box = $("#blPanel");
   box.innerHTML = `<div class="pl-note">读取中…</div>`;
   blMsg("");
-  let d;
+  let d, dd;
   try{
-    const r = await fetch("/api/prefill-ledger");
-    d = await r.json().catch(() => ({}));
-    if(!r.ok){ box.innerHTML = `<div class="pl-note">读取失败：${esc(d.detail || r.status)}</div>`; return; }
+    // 两张台账一次读齐：它们在屏幕上同一件事（“引擎拿哪些历史数去估”），
+    // 分两次读会出现“先验那张刚刷新、交付粒度那张还是旧的”
+    const [a, b] = await Promise.all([fetch("/api/prefill-ledger"),
+                                      fetch("/api/delivery-ledger")]);
+    d = await a.json().catch(() => ({}));
+    dd = await b.json().catch(() => ({}));
+    if(!a.ok){ box.innerHTML = `<div class="pl-note">读取失败：${esc(d.detail || a.status)}</div>`; return; }
+    if(!b.ok){ box.innerHTML = `<div class="pl-note">读取失败：${esc(dd.detail || b.status)}</div>`; return; }
   }catch(e){ box.innerHTML = `<div class="pl-note">读取失败：${esc(e.message)}</div>`; return; }
-  priorCache = d;
-  box.innerHTML = plHTML(d);
+  priorCache = d; deliveryCache = dd;
+  box.innerHTML = plHTML(d) + dlHTML(dd);
   box.querySelectorAll("[data-pl-del]").forEach(b => { b.onclick = () => plDel(b.dataset); });
+  box.querySelectorAll("[data-dl-del]").forEach(b => { b.onclick = () => dlDel(b.dataset); });
   $("#blReload").onclick = blRender;
 }
 function plHTML(d){
@@ -9072,7 +9137,13 @@ function plHTML(d){
           它们没法跟着搬家（不知道是哪次测速写的）：确认是旧身份就整张删掉重跑">旧数据 ${t.legacy} 条未标来源</span>`
       : "";
     const runs = t.runs > 1 ? `<span class="pl-when">来自 ${t.runs} 轮测速</span>` : "";
-    const when = t.age_d === null ? "" : `<span class="pl-when">最近记录 ${plAge(t.age_d)}</span>`;
+    // 并跑打标（ADR-0144）：同网关两个 run 同时跑时记的读数会被排队压低，不删
+    // （记录都要入库）但要说出来：同档另有单跑锚点时预估只用单跑的。
+    const conc = t.concurrent
+      ? `<span class="pl-badge off" title="这些读数写在「另一轮测速同时在跑本网关」期间：`
+        + `长 prompt 会在服务端排队里互相压低速率；同档另有单跑锚点时预估只用单跑的">`
+        + `并跑记的 ${t.concurrent} 条</span>`
+      : "";    const when = t.age_d === null ? "" : `<span class="pl-when">最近记录 ${plAge(t.age_d)}</span>`;
     const grids = (t.scenarios || []).map(s => `<table class="pl-grid">
         <caption>${esc(s.label)}<small> · 同档取中位数</small></caption>
         <thead><tr><th>档位 tokens</th><th class="num">先验 tok/s</th>
@@ -9088,7 +9159,7 @@ function plHTML(d){
         </tbody></table>`).join("");
     return `<div class="pl-tbl"><div class="pl-head"><span class="pl-gw"
         title="基线指纹的网关段（provider 内部名，ADR-0143）">${esc(t.gateway || "?")}</span>
-      <b>${esc(t.model)}</b>${use}${legacy}
+      <b>${esc(t.model)}</b>${use}${legacy}${conc}
       <button type="button" class="btn-ghost nav-btn" data-pl-del data-key="${esc(t.key)}"
               title="删掉这张表的全部锚点（换后端后重置用）">删整张表</button></div>
       <div class="pl-head"><span class="pl-dep">${esc(t.deployment)}</span>${when}${runs}</div>
@@ -9121,6 +9192,85 @@ async function plDel(ds){
   }catch(e){ blMsg("删除请求失败：" + e.message, true); return; }
   await blRender();
   blMsg(`已删除 ${d.removed} 条先验锚点（备份 ${d.backup}）`);
+}
+/* decode 交付粒度台账（ADR-0145）：与先验那张同一张抽屉、同一套徽标与删法。
+   它决定的是「跑动中那格 Decode 的 token 数怎么算」，不是“若此刻完成要多久”，
+   所以表头不写“先验 tok/s”而写“token / 包”（单位说不同才是不两张表）。 */
+function dlHTML(d){
+  const head = `<div class="pl-title">decode 交付粒度（跑动中那格 Decode 的 token 数用）</div>`;
+  if(d.empty) return head + `<div class="pl-note">还没有交付粒度基线：这台部署还没跑过够格的请求
+    （只收收到包数 ≥ ${d.min_events || 8} 的、未被超窗删减的、非预热的点）。
+    没基线时本轮第一个请求按 1 事件/token 直计，投机解码类网关会偏低，跑完一个请求即转正。</div>`;
+  const cur = d.current || {};
+  const busy = d.busy ? `<div class="pl-note">⚠ 有测速正在运行：它收口时会把内存里的表
+    盖回来，此刻删不掉（要删请先停止或等它跑完）。</div>` : "";
+  const stale = (d.stale_keys || []).length ? `<div class="pl-note">有 ${d.stale_keys.length}
+    张**旧口径遗留表**没被采用（键里没有网关段）：
+    ${(d.stale_keys || []).map(k => `<div class="pl-stale"><span class="pl-dep">${esc(k)}</span>
+      <button type="button" class="btn-ghost nav-btn" data-dl-del data-stale="1"
+        data-key="${esc(k)}" title="这张表本来也不参与估算">删掉它</button></div>`).join("")}
+    </div>` : "";
+  return head + busy + stale + (d.tables || []).map(t => {
+    const use = cur[t.key]
+      ? `<span class="pl-badge on" title="本轮这一部署的实时读数会拿它当种子">这次会用上 · ${esc(cur[t.key])}</span>`
+      : `<span class="pl-badge off" title="当前配置里没有与它完全一致的部署登记：播种不会读它">这次不会用上</span>`;
+    const legacy = t.legacy
+      ? `<span class="pl-badge off" title="这些读数写在「记来源」之前，事后改存档环境信息时它们没法跟着搬家">旧数据 ${t.legacy} 条未标来源</span>`
+      : "";
+    const runs = t.runs > 1 ? `<span class="pl-when">来自 ${t.runs} 轮测速</span>` : "";
+    const conc = t.concurrent
+      ? `<span class="pl-badge off" title="这些读数写在「另一轮测速同时在跑本网关」期间：同档另有单跑锚点时种子只用单跑的">`
+        + `并跑记的 ${t.concurrent} 条</span>`
+      : "";
+    const when = t.age_d === null ? "" : `<span class="pl-when">最近记录 ${plAge(t.age_d)}</span>`;
+    const grids = (t.scenarios || []).map(s => `<table class="pl-grid">
+        <caption>${esc(s.label)} · 并发 ${esc(s.conc)}<small> · 就近档取中位数</small></caption>
+        <thead><tr><th>档位 tokens</th><th class="num">token / 包</th>
+          <th class="num">原始读数</th><th class="num">距今</th><th></th></tr></thead>
+        <tbody>${(s.anchors || []).map(a => `<tr>
+          <td>${fmtK(a.ctx)}</td>
+          <td class="num" title="${fmtK(a.ctx)} tokens → 每个内容包约 ${a.x} 个 token">${a.x}</td>
+          <td class="num" title="这一档掺了几条原始读数">${a.n}</td>
+          <td class="num">${plAge(a.age_d)}</td>
+          <td><button type="button" class="pl-del" data-dl-del data-key="${esc(t.key)}"
+               data-sub="${esc(s.scenario)}|c${esc(s.conc)}" data-ctx="${a.ctx}"
+               title="删这一档" aria-label="删 ${fmtK(a.ctx)} 这一档">✕</button></td></tr>`).join("")}
+        </tbody></table>`).join("");
+    return `<div class="pl-tbl"><div class="pl-head"><span class="pl-gw"
+        title="基线指纹的网关段（provider 内部名，ADR-0143）">${esc(t.gateway || "?")}</span>
+      <b>${esc(t.model)}</b>${use}${legacy}${conc}
+      <button type="button" class="btn-ghost nav-btn" data-dl-del data-key="${esc(t.key)}"
+              title="删掉这张表的全部锚点（换后端/换投机配置后重置用）">删整张表</button></div>
+      <div class="pl-head"><span class="pl-dep">${esc(t.deployment)}</span>${when}${runs}</div>
+      ${grids}</div>`;
+  }).join("");
+}
+async function dlDel(ds){
+  const key = ds.key || "", sub = ds.sub || "";
+  const ctx = ds.ctx ? Number(ds.ctx) : null;
+  if(deliveryCache && deliveryCache.busy){
+    blMsg("有测速正在运行，先等它跑完再改基线", true); return;
+  }
+  const what = ctx ? `这一档（${fmtK(ctx)} tokens）的交付粒度锚点`
+            : (ds.stale ? "这张旧口径遗留表"
+              : (sub ? `「${sub}」这一栏（场景×并发）的交付粒度` : "这张表的全部交付粒度锚点"));
+  if(!await uiDialog({title:`删除${what}？`, danger: !ctx, okText:"删除",
+    body:"删除不可恢复（会自动留一份备份，最近 5 份）。少了锚点，下一轮这一档的实时读数"
+       + "退回按 1 事件/token 直计，投机解码类网关会偏低——这比留一条错读数骗人好。"})) return;
+  let d;
+  try{
+    const r = await fetch("/api/delivery-ledger/prune",
+      {method:"POST", headers:{"Content-Type":"application/json"},
+       body:JSON.stringify({key, sub, ctx})});
+    d = await r.json().catch(() => ({}));
+    if(!r.ok){
+      blMsg(d.detail || "删除失败", true);
+      if(r.status === 409) await blRender();   // 刚好开了测速：重读会看到锁住提示
+      return;
+    }
+  }catch(e){ blMsg("删除请求失败：" + e.message, true); return; }
+  await blRender();
+  blMsg(`已删除 ${d.removed} 条交付粒度锚点（备份 ${d.backup}）`);
 }
 async function hdSpliceConfirm(){
   const target = hdSpliceTarget, src = hdSpliceSrc;
@@ -9309,6 +9459,7 @@ async function enterRun(rid, totalPoints, {skipConfirm} = {}){
   state.points.clear(); state.maxSeq = -1;
   state.cmp = null;   // 进入运行任务 = 退出多次对比态
   state.preMeasured.clear();
+  state.decMeasured.clear();
   state.donePoints = 0; state.totalPoints = totalPoints || 0;
   clearSkipNotes();
   $("#liveTable tbody").innerHTML = "";
@@ -9462,7 +9613,7 @@ async function reloadAfterRetest(msg, cls, expectMerge){
   try{
     const r = await fetch(`/api/bench/history/${encodeURIComponent(id)}`);
     const d = r.ok ? await r.json().catch(() => null) : null;
-    if(d && hydrateArchive(d)){ setPhase("done"); renderAll(); genCards(); }
+    if(d && hydrateArchive(d)){ setPhase("done"); resetKpis(); renderAll(); genCards(); }
   }catch(e){ /* 兜底水合失败仅提示 */ }
   setPill("复测已结束，但结果未合并回原存档（未产出对应测点）——复测运行的独立存档保留在历史列表", "err");
 }

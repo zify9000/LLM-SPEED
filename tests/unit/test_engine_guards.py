@@ -904,3 +904,36 @@ class TestPrefillContinueParams(unittest.IsolatedAsyncioTestCase):
         r2 = await self._call(run, client, self.ECHO_MSGS)
         self.assertIsNone(r2["err"])
         self.assertNotIn("add_generation_prompt", client.payloads[2])
+
+
+class TestDeliveryEstimateNotUsedAsGate(unittest.TestCase):
+    """ADR-0145：交付粒度基线只喂显示，不喂判定。
+
+    断流闸（`_est_out`）过去默认走的就是那份「包数 ÷ 事件/token 比」的估算分子。
+    把跨运行基线接进来后，若让它一并参与闸口：基线取大了 → 估算 token 数虚高 →
+    真卡死的流被算成"还在出东西"，断流漏检。所以闸口按来源分开取值。"""
+
+    def _run(self, ratio):
+        run = BenchRun({})
+        run.chunk_calib[("A", "code")] = ratio
+        run.chunk_calib_w[("A", "code")] = 100.0
+        return run
+
+    def test_gate_counts_events_conservatively_when_ratio_is_a_seed(self):
+        run = self._run(1 / 4.9)                       # 基线播的：每包 4.9 个 token
+        run._chunk_calib_src[("A", "code")] = "ledger"
+        # 未实测过的比不参与：按 1 事件/token 直计，卡死时估算涨不动，闸照样触发
+        self.assertEqual(run._est_out_cut("A", "code", 10, 0, 1.0, "ledger"), 10)
+        self.assertAlmostEqual(run._est_out("A", "code", 10, 0, 1.0), 49.0, places=6,
+                               msg="显示侧不得被保守口径拖累")
+        run.chunk_calib[("A", "code")] = 1 / 2.0       # 本轮实测后照常生效
+        run._chunk_calib_src[("A", "code")] = "run"
+        self.assertEqual(run._est_out("A", "code", 10, 0, 1.0), 20)
+        self.assertEqual(run._est_out_cut("A", "code", 10, 0, 1.0, "run"), 20)
+
+    def test_display_estimate_still_uses_the_seed(self):
+        """显示侧照旧用基线（否则冷启动那一格又变成按包计数，偏差回到 4 倍量级）。"""
+        run = self._run(1 / 4.9)
+        run._chunk_calib_src[("A", "code")] = "ledger"
+        # 显示口径：10 包 × 每包 4.9 个 token
+        self.assertAlmostEqual(run._est_out("A", "code", 10, 0, 1.0), 49, places=6)

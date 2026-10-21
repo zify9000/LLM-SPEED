@@ -354,3 +354,156 @@ class TestE2EFrames(MockGatewayTest):
             self.assertTrue(50 <= t["speed"] <= 150,
                             f"恢复 tick 读数 {t['speed']} 应在 100±50% 内"
                             f"（全序列 {[x['speed'] for x in stream_ticks]}）")
+
+    async def test_delivery_grain_marks_unmeasured_decode_ticks_as_est(self):
+        """ADR-0145：本轮还没实测过「几个 token 算一个包」时，decode tick 的分子是估算
+        ——必须带 est/est_batch（前端据此挂「≈」、不上「实测 Decode」牌），跑完落定的
+        权威帧不得带 est。这两件以前在存档里没有任何证据，用户看到的就是"实测值偶尔
+        偏 20%"。
+
+        mock 运行不读不写交付粒度台账（假网关的交付形态是编的），所以走的是 cold
+        （1 事件/包 直计）那一路：ACCEPT=4 时它把 token 数估成实际的 1/4 →
+        out_est_gap ≈ -0.75、req 带 calib_src="cold"；同轮第二个请求已经实测过
+        → calib_src="run"、中途帧不再带 est。"""
+        old_accept, old_tg = mock_server.ACCEPT, mock_server.TG
+        mock_server.ACCEPT, mock_server.TG = 4, 40.0   # 64 token ≈ 1.6s：出多个中段 tick
+
+        async def collect(**cfg_extra):
+            run = BenchRun(self.std_cfg(max_tokens=64, **cfg_extra))
+            run.cpt_calib[("mock-llm-7b", "creative")] = 1.8   # 跳过探测
+            q: asyncio.Queue = asyncio.Queue()
+            run.subs.add(q)
+            task = asyncio.create_task(run.run())
+            try:
+                return await self._drain(q, task)
+            finally:
+                await task
+
+        try:
+            cold_events = await collect()
+            run_events = await collect(repeats=2)
+        finally:
+            mock_server.ACCEPT, mock_server.TG = old_accept, old_tg
+
+        def ticks(events):
+            return [e for e in events if e.get("type") == "tick"
+                    and e.get("phase") == "decode" and e.get("speed") is not None]
+
+        t1 = ticks(cold_events)
+        self.assertGreaterEqual(len(t1), 2, f"应有多个 decode tick: {t1}")
+        # 末帧是流末权威读数（usage 真值）：不入「中途帧」断言范围
+        mid = t1[:-1]
+        self.assertTrue(mid, "应有中途 tick（非流末权威帧）")
+        self.assertTrue(all(t.get("est") for t in mid),
+                        f"本轮未实测过事件/token 比的中途帧必须标 est: {mid}")
+        self.assertTrue(all(t.get("est_batch") == 1.0 for t in mid),
+                        "未校准时的交付粒度就是 1 个 token/包")
+        self.assertFalse(t1[-1].get("est"), "流末权威帧（usage 真值）不该标 est")
+
+        t2 = ticks(run_events)
+        rep1 = [t for t in t2 if "|rep1|" in t["tag"]][:-1]
+        self.assertTrue(rep1, f"复测第二轮应有中途帧: {[t['tag'] for t in t2]}")
+        self.assertTrue(all(not t.get("est") for t in rep1),
+                        "本轮已实测过事件/token 比后，中途帧不该再是估值帧")
+
+        r1 = [r for p in (e["point"] for e in cold_events if e.get("type") == "point")
+              for r in (p.get("reqs") or []) if not r.get("err")]
+        self.assertTrue(r1, "应有成功请求明细")
+        self.assertEqual(r1[0].get("calib_src"), "cold",
+                         f"交付粒度来源要看得出从哪来: {r1[0].get('calib_src')}")
+        # ACCEPT=4：每包 4 个 token，按 1 事件/包直计就是真值的 1/4 → -0.75
+        self.assertAlmostEqual(r1[0].get("out_est_gap"), -0.75, delta=0.15,
+                               msg="未校准直计对投机网关应低估 k 倍（ADR-0024）")
+        reps2 = [rp for p in (e["point"] for e in run_events if e.get("type") == "point")
+                 for rp in (p.get("reps") or [])]
+        # 聚合行只取代表样本的 reqs（哪一轮被取不定），所以「这一轮从种子起步、
+        # 后来改用本轮实测」这条证据必须活在「复测摘要」里
+        srcs2 = {rp.get("calib_src") for rp in reps2 if rp.get("calib_src")}
+        self.assertEqual(srcs2, {"cold", "run"},
+                         f"复测摘要要留住了来源标记: {srcs2}")
+        gaps = [rp.get("out_est_gap") for rp in reps2
+                if rp.get("out_est_gap") is not None]
+        self.assertTrue(gaps, "复测摘要要带上估算对真值的差距")
+        self.assertLess(min(abs(g) for g in gaps), 0.15,
+                        f"本轮实测过之后应几乎无偏差: {gaps}")
+
+
+    async def test_probe_calibration_does_not_turn_src_run(self):
+        """探测请求的校准不得把交付粒度来源提前翻成 "run"（ADR-0145 边界）。
+
+        探测只有 ~13-64 个包，压不过 256 权重的历史种子；若由它转正，本轮第一个
+        正式请求的中途读数仍八成是种子却被当实测（不挂 ≈），断流判定也失去
+        保守口径。本例**不预置 cpt_calib**（探测会真跑）：正式点 rep0 的中途帧
+        必须仍带 est（来源 cold），rep1 才转正。"""
+        old_accept, old_tg = mock_server.ACCEPT, mock_server.TG
+        mock_server.ACCEPT, mock_server.TG = 4, 40.0   # 64 token ≈ 1.6s：出多个中段 tick
+        try:
+            run = BenchRun(self.std_cfg(ctx_list=[4096], max_tokens=64, repeats=2))
+            # 不预置 cpt_calib —— 探测请求真跑（本例前提）
+            q: asyncio.Queue = asyncio.Queue()
+            run.subs.add(q)
+            task = asyncio.create_task(run.run())
+            try:
+                events = await self._drain(q, task, timeout=25)
+            finally:
+                await task
+        finally:
+            mock_server.ACCEPT, mock_server.TG = old_accept, old_tg
+
+        ticks = [e for e in events if e.get("type") == "tick"
+                 and e.get("phase") == "decode" and e.get("speed") is not None
+                 and "|4096|" in e.get("tag", "")]
+        rep0 = [t for t in ticks if "|rep0|" in t["tag"]][:-1]   # 末帧是权威帧
+        rep1 = [t for t in ticks if "|rep1|" in t["tag"]][:-1]
+        self.assertTrue(rep0, f"正式点 rep0 应有中途帧: {[t['tag'] for t in ticks]}")
+        self.assertTrue(all(t.get("est") for t in rep0),
+                        f"探测转正后 rep0 中途帧丢了 est 标: {rep0}")
+        self.assertTrue(all(t.get("est_src") == "cold" for t in rep0),
+                        f"mock 无台账，来源应为 cold: {rep0}")
+        self.assertTrue(all(abs((t.get("est_batch") or 0) - 4.0) < 0.6 for t in rep0),
+                        f"est_batch 应是探测实测的 4 token/包: {rep0}")
+        self.assertTrue(rep1, f"复测第二轮应有中途帧: {[t['tag'] for t in ticks]}")
+        self.assertTrue(all(not t.get("est") for t in rep1),
+                        f"正式请求校准后（rep1）才转正: {rep1}")
+        reps = [rp for p in (e["point"] for e in events if e.get("type") == "point")
+                for rp in (p.get("reps") or [])]
+        srcs = {rp.get("calib_src") for rp in reps if rp.get("calib_src")}
+        self.assertEqual(srcs, {"cold", "run"},
+                         f"rep0 应记 cold、rep1 才记 run: {srcs}")
+
+    async def test_final_frames_marked_est_when_usage_missing(self):
+        """usage 未回传时，流末帧的分子是估算兜底值（est_prompt/est_chunks）：
+        prefill/decode 两帧都必须带 est——不带会被前端当「实测」冻结 KPI，
+        usage 缺失（或 client_cut）的网关会一路骗到点收口。"""
+        old = mock_server.NO_USAGE
+        mock_server.NO_USAGE = "1"
+        try:
+            run = BenchRun(self.std_cfg(ctx_list=[4096], max_tokens=32))
+            run.cpt_calib[("mock-llm-7b", "creative")] = 1.8   # 跳过探测
+            q: asyncio.Queue = asyncio.Queue()
+            run.subs.add(q)
+            task = asyncio.create_task(run.run())
+            try:
+                events = await self._drain(q, task, timeout=25)
+            finally:
+                await task
+        finally:
+            mock_server.NO_USAGE = old
+
+        reqs = [r for p in (e["point"] for e in events if e.get("type") == "point")
+                for r in (p.get("reqs") or []) if not r.get("err")]
+        self.assertTrue(reqs, "应有成功请求明细（usage 缺失走估算兜底）")
+        self.assertFalse(reqs[0].get("usage_real"), "前提：本例全程无 usage")
+        ticks = [e for e in events if e.get("type") == "tick"]
+        pf_final = [t for t in ticks if t.get("phase") == "prefill"
+                    and t.get("ttft") is not None]
+        self.assertTrue(pf_final, "应有带 ttft 的 prefill 帧")
+        self.assertTrue(all(t.get("est") for t in pf_final),
+                        f"usage 未回时所有 prefill 帧（含流末帧）都必须带 est: {pf_final}")
+        dec = [t for t in ticks if t.get("phase") == "decode"
+               and t.get("speed") is not None]
+        self.assertTrue(dec, "应有 decode 帧")
+        self.assertTrue(all(t.get("est") for t in dec),
+                        f"usage 未回时所有 decode 帧（含流末帧）都必须带 est: {dec}")
+        self.assertTrue(dec[-1].get("est_final"),
+                        f"流末估值帧要带 est_final（前端文案区分「不会有真值帧覆盖」）: {dec[-1]}")
